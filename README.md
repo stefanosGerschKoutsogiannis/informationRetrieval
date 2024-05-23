@@ -6,4 +6,6 @@
 
 ## Run it yourself
 
+Η εφαρμογή δημιουργήθηκε με χρήση Apache Maven και το Intellij IDE.
+
 Στο αρχείο ApplicationConstants, αλλάξτε τις τιμές των INDEX_PATH και CORPUS_PATH, εκτελέστε στο τερματικό του IDE σας mvn clean compile, μετά τρέξτε το Indexer.java για να δημιουργήσεται το ευρετήριο και τέλος, τρέξτε το Main.java.
