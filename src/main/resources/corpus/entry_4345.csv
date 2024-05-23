@@ -1,0 +1,970 @@
+2019,PowerSGD: Practical Low-Rank Gradient Compression for Distributed Optimization,We study gradient compression methods to alleviate the communication bottleneck in data-parallel distributed optimization. Despite the significant attention received  current compression schemes either do not scale well  or fail to achieve the target test accuracy. We propose a low-rank gradient compressor that can i) compress gradients rapidly  ii) efficiently aggregate the compressed gradients using all-reduce  and iii) achieve test performance on par with SGD. The proposed algorithm is the only method evaluated that achieves consistent wall-clock speedups when benchmarked against regular SGD with an optimized communication backend. We demonstrate reduced training times for convolutional networks as well as LSTMs on common datasets.,PowerSGD: Practical Low-Rank
+
+Gradient Compression for Distributed Optimization
+
+Thijs Vogels
+
+EPFL
+
+Lausanne  Switzerland
+
+thijs.vogels@epfl.ch
+
+Sai Praneeth Karimireddy
+
+EPFL
+
+Lausanne  Switzerland
+
+sai.karimrieddy@epfl.ch
+
+Martin Jaggi
+
+EPFL
+
+Lausanne  Switzerland
+
+martin.jaggi@epfl.ch
+
+Abstract
+
+We study lossy gradient compression methods to alleviate the communication bot-
+tleneck in data-parallel distributed optimization. Despite the signiﬁcant attention
+received  current compression schemes either do not scale well  or fail to achieve
+the target test accuracy. We propose a new low-rank gradient compressor based
+on power iteration that can i) compress gradients rapidly  ii) efﬁciently aggregate
+the compressed gradients using all-reduce  and iii) achieve test performance on par
+with SGD. The proposed algorithm is the only method evaluated that achieves con-
+sistent wall-clock speedups when benchmarked against regular SGD using highly
+optimized off-the-shelf tools for distributed communication. We demonstrate re-
+duced training times for convolutional networks as well as LSTMs on common
+datasets. Our code is available at https://github.com/epfml/powersgd.
+
+1
+
+Introduction
+
+Synchronous data-parallel SGD is the most common method for accelerating training of deep learning
+models (Dean et al.  2012; Iandola et al.  2015; Goyal et al.  2017). Because the gradient vectors
+of such models can be large  the time required to share those gradients across workers limits the
+scalability of deep learning training (Seide et al.  2014; Iandola et al.  2015; Lin et al.  2018).
+Previous work proposes lossy gradient compression as a solution to this issue. Notable examples
+include replacing the coordinates of the gradient with only their sign (Seide et al.  2014; Carlson et al. 
+2015; Bernstein et al.  2018  2019; Karimireddy et al.  2019)  quantizing the individual coordinates
+(Alistarh et al.  2017; Wen et al.  2017)  and low-rank approximation of the gradient (Wang et al. 
+2018). While these works demonstrate speedups over full-precision SGD in some settings  we ﬁnd
+that their speedups vanish with a fast network and highly optimized communication backend  even on
+commodity hardware. Some prior work also suffers from degraded test accuracy compared to SGD.
+We combine three observations to ﬁx these issues: i) Linear compressor operators achieve scalability
+by enabling aggregation using all-reduce. ii) Error feedback ensures convergence with general biased
+compressors. iii) Low-rank updates enable aggressive compression without sacriﬁcing quality.
+First  we explore the properties of various gradient compression schemes for SGD and identify
+which ones are crucial for high scalability. In particular  we note that currently proposed gradient
+compressors are not linear. Their compressed messages cannot be added up hierarchically  unlike raw
+gradients. This prevents current compressed SGD algorithms from aggregating gradients using an
+efﬁcient reduce operation and instead require a gather operation. Current deep learning frameworks
+rely either solely or predominantly on all-reduce  which is key to why regular SGD scales well with
+fast communication hardware (cf. Awan et al.  2018; Panda et al.  2019).
+Secondly  it was recently shown that using error feedback (i.e. storing the difference between the
+computed and compressed gradient  and reinserting it at the next iteration) improves both convergence
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+Output neurons
+
+Compressed gradients
+
+s
+n
+o
+r
+u
+e
+n
+t
+u
+p
+n
+I
+
+Layer gradient
+
+Random Block Low-rank (ours)
+Figure 1: Compression schemes compared in this paper. Left: Interpretation of a layer’s gradient as a
+matrix. Right: The output of various compression schemes. Implementation details in Appendix G.
+
+Random K
+
+Sign
+
+Sign + Norm
+
+Top K
+
+and generalization for compression schemes (Karimireddy et al.  2019). This can enable general
+biased gradient compression schemes to reach the target test accuracy.
+Thirdly  there is growing evidence that the generalization ability of modern over-parameterized
+deep learning models is related to low-rankedness (Arora et al.  2018; Martin & Mahoney  2018;
+Collins et al.  2018). Using a low-rank update (as we do) can be viewed as implicitly performing
+spectral regularization (Gunasekar et al.  2018) and hence can be expected to have good generalization
+properties (Yoshida & Miyato  2017). Further  Wang et al. (2018) show that the eigenspectrum of the
+stochastic gradients for deep learning models decays  suggesting that a rank-based schemes can get
+away with aggressive compression without sacriﬁcing convergence.
+In this work  we design POWERSGD with the above observations in mind. POWERSGD computes
+a low-rank approximation of the gradient using a generalized power iteration (known as subspace
+iteration (Stewart & Miller  1975)). The approximation is computationally light-weight  avoiding
+any prohibitively expensive Singular Value Decomposition. To improve the quality of the efﬁcient
+approximation  we warm-start the power iteration by reusing the approximation from the previous op-
+timization step. Using all-reduce gradient aggregation  we empirically demonstrate that POWERSGD
+achieves wall-clock speedups over regular SGD in a 16-GPU setting  even with the optimized NCCL
+communication backend on a fast network (and is the only algorithm to do so.) By compressing
+gradients more than 120×  we reduce communication time (including coding and decoding) by 54%
+for RESNET18 on CIFAR10 and by 90% for an LSTM on WIKITEXT-2. End-to-end wall-clock
+training time to full test quality is reduced by 24% for RESNET18 and by 55% for the LSTM.
+
+2 Related work
+
+Gradient compression A variety of compression schemes (Figure 1) have been proposed: Alistarh
+et al. (2017) and Wen et al. (2017) quantize each gradient coordinate; Seide et al. (2014); Carlson
+et al. (2015); Bernstein et al. (2018  2019) and Karimireddy et al. (2019) replace each coordinate of
+the gradient with its sign; Lin et al. (2018); Stich et al. (2018) and Wangni et al. (2018) use the largest
+few coordinates; and Koneˇcn`y et al. (2016) and Wang et al. (2018) use a low-rank approximation.
+Spectral Atomo by Wang et al. (2018) is perhaps the closest to our work. It performs importance sam-
+pling of the gradient’s singular vectors and is an unbiased compression scheme. It requires  however 
+a full Singular Value Decomposition every iteration and is hence computationally impractical.
+
+Commutative compression and addition Yu et al. (2018) stress that commutability of compres-
+sion with gradient addition enables efﬁcient aggregation with ring all-reduce. Most compressors 
+however  lack this property. Yu et al. utilize temporally-consistent correlations between gradients
+coordinates to compress them linearly. POWERSGD has a similar property that we call ‘linearity’.
+
+Error feedback First introduced in (Seide et al.  2014) and analyzed in (Stich et al.  2018) for the
+convex case  error feedback involves computing the difference between a worker’s gradient and the
+compressed gradient (i.e. error) and adding it back to the next gradient (feedback). Karimireddy
+et al. (2019) and Stich & Karimireddy (2019) further develop and generalize the framework of error
+feedback with improved rates. In the non-convex setting  Karimireddy et al. (2019) show that error
+feedback is crucial both for convergence and generalization when using biased compressors (e.g. sign
+or top-K). In general  biased compression schemes equipped with error feedback tend to out-perform
+their unbiased counterparts. The practical algorithm by Lin et al. (2018) is also as an approximate
+top-K compressor with error feedback.
+
+2
+
+Low-rank methods Recent works argue that in modern over-parameterized deep networks  the ﬁnal
+model learnt has a ‘low stable rank’ (Martin & Mahoney  2018; Li et al.  2018). This can partially
+explain their impressive generalization properties despite being substantially overparameterized
+(Arora et al.  2018). Adding explicit spectral regularization has shown to further improve the
+performance of such models (Mazumder et al.  2010; Yoshida & Miyato  2017). Using a low-rank
+update (as we do) can be viewed as implicitly performing a similar regularization (Gunasekar et al. 
+2018). If the target matrices are known to be exactly low-ranked (instead of just low stable rank) 
+Yurtsever et al. (2017) show that it is sometimes possible to converge to the optima using low rank
+approximations of the gradients without the need for error feedback.
+
+3 Method
+
+(cid:46) Now  P = 1
+
+(cid:46) Now  Q = 1
+
+In data-parallel optimization of machine learning models  a number of W workers share the same
+model parameters x ∈ Rd. They iteratively update x by computing independent stochastic gradients 
+aggregating these gradients by averaging1  and updating the model parameters based on this aggregate.
+Algorithm 1 Rank-r POWERSGD compression
+1: The update vector ∆w is treated as a list of tensors corresponding to individual model parameters.
+Vector-shaped parameters (biases) are aggregated uncompressed. Other parameters are reshaped
+into matrices. The functions below operate on such matrices independently. For each matrix
+M ∈ Rn×m  a corresponding Q ∈ Rm×r is initialized from an i.i.d. standard normal distribution.
+
+2: function COMPRESS+AGGREGATE(update matrix M ∈ Rn×m  previous Q ∈ Rm×r)
+
+return ˆP Q(cid:62)
+
+W (M1 + . . . + MW )Q
+(cid:46) Orthonormal columns
+W (M1 + . . . + MW )(cid:62) ˆP
+
+3:
+P ← M Q
+4:
+P ← ALL REDUCE MEAN(P )
+ˆP ← ORTHOGONALIZE(P )
+5:
+Q ← M(cid:62) ˆP
+6:
+7:
+Q ← ALL REDUCE MEAN(Q)
+return the compressed representation ( ˆP   Q).
+8:
+9: end function
+10: function DECOMPRESS( ˆP ∈ Rn×r  Q ∈ Rm×r)
+11:
+12: end function
+POWERSGD compression We approximate each layer in the model independently. The parame-
+ters of fully-connected layers (dense matrix multiplication) and their gradients have an inherent matrix
+structure. The parameters of convolutional layers can be naturally interpreted as fully-connected
+layers applied repeatedly over a 2D grid of inputs. Practically  this amounts to ﬂattening input and
+kernel dimensions in the 4D gradient tensors. Neural networks also contain bias vectors  but these
+typically constitute a tiny fraction of the parameter space and can be aggregated uncompressed.
+For each parameter’s gradient M ∈ Rn×m  the aim of rank-r matrix approximation is to ﬁnd matrices
+P ∈ Rn×r and Q ∈ Rm×r such that P Q(cid:62) approximates M well. POWERSGD uses a single step of
+subspace iteration—power iteration generalized to r > 1—to compute such an approximation. This
+involves performing one right multiplication  one left multiplication  and an orthogonalization. We
+use the Gram-Schmidt procedure to orthogonalize our matrices since they have very few columns
+(1–4)  and this is the most expensive part of the compression procedure. Further  we ‘warm-start’ the
+subspace iteration by reusing the approximation computed at the previous step. With the inclusion
+of warm-start  a single step of subspace iteration yields a factorization M ∼ P Q(cid:62) with the same
+performance as the best rank-r approximation from an expensive Singular Value Decomposition.
+
+Efﬁcient aggregation between workers
+In data-parallel optimization  we want to approximate
+the average of the worker’s gradients. Suppose POWERSGD operates on a list of corresponding
+gradients [M1 . . . MW ] from W workers. Both occurrences of M in the algorithm are a (linear)
+matrix multiplication followed by a (linear) mean reduction over workers. This introduces a practical
+invariance: execution on 1 worker with batch size B × W is equivalent to execution on W workers
+with batch size B each. We call this property ‘linearity’. Refer to Appendix A.3 for more details.
+1Bernstein et al. (2019) propose Signum which aggregates 1-bit gradients by majority voting instead of
+
+averaging.
+
+3
+
+compute the sum of W matrices(cid:80)W
+
+An important beneﬁt of the POWERSGD’s linearity
+is that it can be implemented using the all-reduce
+protocol as opposed to needing a gather operation.
+To illustrate the difference  suppose that we want to
+i=1 Mi for W = 4.
+The all-reduce method can use associativity of addition
+to rewrite the computation as (M1+M2)+(M3+M4).
+This enables a divide-and-conquer approach and allows the summation task to be split over multiple
+workers  as illustrated on the right. With W workers  both the computation and the communication
+time scale as O(log W ) for all-reduce  compared to O(W ) for all-gather.
+In addition to improved scaling  all-reduce communication is preferred over a parameter-server setting
+because it avoids double compression. With a parameter server  both the ‘clients → server’ and
+‘server → clients’ communication have to be compressed (Caldas et al.  2018; Bernstein et al.  2019;
+Seide et al.  2014). We avoid this by merging compression and aggregation into one step.
+
+(b) Reduce
+
+(a) Gather
+
+Error-feedback SGD Since the POWERSGD scheme is biased (i.e. compressing and decompress-
+ing a random gradient does not yield the original in expectation)  we use error feedback (Seide et al. 
+2014; Karimireddy et al.  2019). Our version of error feedback (Algorithm 2) extends the original by
+introducing post-compression momentum. This simple extension allows us to reuse the same learning
+rate and hyper-parameters as those tuned for SGD with momentum.
+
+initialize memory ew ← 0 ∈ Rd
+for each iterate t = 0  . . . do
+
+Algorithm 2 Distributed Error-feedback SGD with Momentum
+1: hyperparameters: learning rate γ  momentum parameter λ
+2: initialize model parameters x ∈ Rd  momentum m ← 0 ∈ Rd  replicated across workers
+3: at each worker w = 1  . . .   W do
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15: end at
+
+Compute a stochastic gradient gw ∈ Rd.
+∆w ← gw + ew
+C(∆w) ← COMPRESS(∆w)
+ew ← ∆w − DECOMPRESS(C(∆w))
+C(∆) ← AGGREGATE(C(∆1)  . . .  C(∆W ))
+∆(cid:48)
+m
+x
+
+← DECOMPRESS(C(∆))
+← λm + ∆(cid:48)
+← x − γ (∆(cid:48) + m)
+
+(cid:46) Memorize local errors
+(cid:46) Exchange gradients
+(cid:46) Reconstruct an update ∈ Rd
+
+(cid:46) Incorporate error-feedback into update
+
+end for
+
+4 Analysis of POWERSGD
+
+In this section  we consider different aspects of POWERSGD in isolation and hope to empirically
+understand: i) the effect of using error feedback  ii) the effect of ‘warm-start’  and iii) the trade-off
+between test accuracy and compression rate with varying approximation rank.
+
+4.1 Effect of error feedback
+
+Using error-feedback SGD as a base algorithm for POWERSGD has two advantages. First  it enables
+our use of a biased compressor. Secondly  EF-SGD improves convergence and obtains better test
+accuracy (Karimireddy et al.  2019).
+To illustrate the improved test accuracy  we compare POWERSGD—a biased compressor with error
+feedback—against an unbiased low-rank approximation. To approximate a matrix M ∈ Rn×m  the
+unbiased rank-r approximator samples a random matrix U ∈ Rm×r such that E[U U(cid:62)] = Im and
+outputs (M U  U ) as the low-rank approximation. This scheme is unbiased since
+
+E[(M U )U
+
+(cid:62)
+
+] = M E[U U
+
+(cid:62)
+
+] = M I = M .
+
+POWERSGD is the natural biased counterpart of this unbiased scheme. Table 1 demonstrates that our
+biased approximator with error feedback outperforms the unbiased operator on image classiﬁcation.
+
+4
+
+Table 1: Rank-based compression with and without
+error feedback. The biased POWERSGD outperforms
+an unbiased linear rank-r compressor on test accuracy.
+Data/epoch
+Algorithm
+SGD
+1023 MB
+Rank-1 POWERSGD
+4 MB
+8 MB
+Rank-2 POWERSGD
+3 MB
+Unbiased Rank 1
+Unbiased Rank 2
+4 MB
+
+94.3%
+93.6%
+94.4%
+71.2%
+75.9%
+
+Test accuracy
+
+Table 2: Best rank-2 approximation
+vs. POWERSGD. Warm-start improves
+test accuracy  even matching the perfor-
+mance of the best rank-2 approximation.
+
+Algorithm
+Best approximation
+Warm start (default)
+Without warm start
+
+Test accuracy
+
+94.4%
+94.4%
+94.0%
+
+Image classiﬁcation — RESNET18 on CIFAR10
+
+Algorithm Test accuracy
+SGD
+Rank 1
+Rank 2
+Rank 4
+
+94.3%
+93.6%
+94.4%
+94.5%
+
+Data sent per epoch
+1023 MB (1×)
+
+4 MB (243×)
+8 MB (136×)
+14 MB (72×)
+
+Time per batch
+312 ms
++0%
+229 ms −26%
+239 ms −23%
+260 ms −16%
+
+Language modeling — LSTM on WIKITEXT-2
+
+Algorithm
+SGD
+Rank 1
+Rank 2
+Rank 4
+
+91
+102
+93
+91
+
+Test perplexity Data sent per epoch
+7730 MB (1×)
+
+25 MB (310×)
+38 MB (203×)
+64 MB (120×)
+
+Time per batch
+300 ms
++0%
+131 ms −56%
+141 ms −53%
+134 ms −55%
+
+Table 3: POWERSGD with
+varying rank. With suf-
+ﬁcient rank  POWERSGD
+accelerates training of a
+RESNET18 and an LSTM
+by reducing communication 
+achieving test quality on par
+with regular SGD in the
+same number of iterations.
+The time per batch includes
+the forward/backward pass
+(constant). See Section 5 for
+the experimental setup.
+
+4.2 Effect of warm-start
+
+POWERSGD does not compute the best rank-r approximation of a gradient matrix  but uses a cheaper 
+low-ﬁdelity approximation based on power iteration. Comparing the time per batch of POWERSGD
+and Spectral Atomo in Table 6  we see the importance of avoiding a Singular Value Decomposition.
+With gradients shaped as in POWERSGD  computing the SVD of a stochastic gradient takes 673ms 
+the equivalent of computing 6 mini-batch gradients. In contrast  one full step of rank-2 POWERSGD 
+including communication between 16 workers  takes only 105ms.
+Given that we only use a single step of power iteration  the quality of the approximation suffers—
+compare the test accuracy of ‘without warm start’ and ‘best approximation’ in Table 2. A key feature
+of POWERSGD is the warm start strategy which reuses previously computed matrix approximations
+to initialize the power iteration algorithm. If the matrix on which we perform power iteration remains
+constant  then this recovers the best rank-r approximation (see Theorem I in the Appendix). We
+argue that this strategy sometimes makes sense even if the underlying matrices are varying.
+Suppose we approximate the sequence of gradient matrices {Mt} at timesteps t. At timestep t 
+we leverage the previous factorization Mt−1 ≈ Pt−1Q(cid:62)
+t−1. If Mt ≈ Mt−1 then we would beneﬁt
+from reusing Pt−1 and Qt−1 as our starting point. While this is unlikely to be true  if Mt and Mt−1
+are stochastic approximations of the full gradient  we can expect that E[Mt] ≈ E[Mt−1] since the
+function is smooth and we only take small update steps. The result is akin to Oja’s algorithm for
+stochastic power iteration (Oja  1982)  and hence could result in an improved approximation quality.
+As we show empirically in Table 2  this ‘warm starting’ strategy is sufﬁcient to close the gap in test
+accuracy between POWERSGD and the much more expensive best rank-r approximation.
+
+4.3 Effect of varying the rank
+
+POWERSGD allows users to choose the rank of its gradient approximations. The trade-off between
+approximation quality and compression  decompression and transfer cost is explored in Table 3. In
+both the image classiﬁcation and language modeling tasks we explore  the test quality achieved by
+POWERSGD grows with increasing rank. In both cases  it reaches a quality that is as good  or even
+slightly better than regular SGD.
+
+5
+
+Table 4: Comparing different compression operators for Error-feedback SGD in a uniﬁed setting;
+running 300 epochs of Error-feedback SGD with Momentum (Algorithm 2) with a learning rate
+tuned for full-precision SGD on 16 GPUs for CIFAR10. Note that the variations of POWERSGD with
+ranks 2 and 7 strikes the best balance between the achieved test accuracy and time per batch (total
+time for forward  backward  compression  decompression  and gradient aggregation).
+
+Test accuracy
+
+Sent/epoch All-reduce
+
+Time/batch
+
+No compression
+Medium Rank 7
+
+Random Block
+Random K
+Sign+Norm
+Top K
+Rank 2
+Random Block
+Random K
+Top K
+
+High
+
+5 Results
+
+94.3%
+
+94.6%
+93.3%
+94.0%
+93.9%
+94.4%
+
+94.4%
+87.8%
+92.6%
+93.6%
+
+1023 MB
+24 MB
+24 MB
+24 MB
+32 MB
+32 MB
+8 MB
+8 MB
+8 MB
+8 MB
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+312 ms
+285 ms
+243 ms
+540 ms
+429 ms
+444 ms
+239 ms
+240 ms
+534 ms
+411 ms
+
+Default experimental setting
+
+Momentum
+Learning rate
+
+Dataset
+Architecture
+
+CIFAR10
+RESNET18
+
+Number of workers
+Backend
+Batch size
+
+This section demonstrates the practicality of POW-
+ERSGD for distributed optimization of deep neural
+networks. We show that the compression scheme of
+POWERSGD i) is fast and matches test performance
+of SGD  ii) scales well with increasing workers even
+with a sub-optimal communication backend  and iii)
+signiﬁcantly reduces training time for larger models.
+Most of the analysis is performed on CIFAR10  in
+the setting described in the table on the right. We
+verify the generality of POWERSGD by an additional
+evaluation of an LSTM for language modeling on
+WIKITEXT-2. We use 16 GPUs on 8 machines  con-
+nected through a fast (10Gbit/s) network. To obtain
+meaningful timings  we have aimed to optimize all
+compared optimizers to a similar level. We provide a
+list of our performance optimizations in Appendix H. Throughout these results  we tune the learning
+rate for full-precision SGD  and use the same parameters for POWERSGD and other compression
+algorithms that use error feedback with momentum. Learning rates for the compared-to Spectral
+Atomo (Wang et al.  2018) and Signum (Bernstein et al.  2019) were separately tuned cf. Appendix I.
+
+16
+NCCL (fastest in PYTORCH)
+128 × number of workers
+0.9
+Tuned for 16 workers — 0.1 ×
+16 for SGD. Scaled linearly by the
+number of workers
+/10 at epoch 150 and 250
+Linearly within 5 epochs  starting
+from the single-worker LR
+300
+10−4 
+0 for BatchNorm parameters
+
+LR decay
+LR warmup
+
+# Epochs
+Weight decay
+
+Repetitions
+Error bars
+
+3  with varying seeds
+min — max
+
+5.1 Comparison with other compressors
+
+Error feedback in compressed optimization enables the use of a multitude of compression schemes 
+including biased ones. The potential compression operators illustrated in Figure 1 are compared in
+Table 4. We evaluate compressors based on the test accuracy achieved and the total time taken to
+process one mini-batch. The former is a holistic measure of the accuracy of the compression operator 
+and the latter is the net time required for a forward pass  backward pass  gradient compression and
+decompression and gradient communication. We study two compression regimes—medium and high.
+At around 32× compression  achieved by sign-based methods  all compression schemes (other than
+Random Block) achieve test accuracy close to full-precision SGD. This implies that all schemes in this
+regime (other than Random Block) obtain a good-enough compression quality. At high compression
+(128×)  POWERSGD particularly stands out as the only method to achieve the target test accuracy.
+In both the medium and high compression settings  the only schemes to be faster than full-precision
+SGD are POWERSGD and Random Block. Note that both are simple linear schemes and hence
+support all-reduce. While Random K also supports all-reduce  the overhead for random memory
+access during both the compression and decompression stages is substantial  making it slower overall
+
+6
+
+Table 5: Breakdown of time spent (in seconds) in one iteration of RESNET18 training. Because
+POWERSGD (Rank 2) uses all-reduce  time spent encoding/decoding gradients is constant.
+
+Forward pass  Backward pass  Gradient exchange  Encoding and decoding.
+
+2 workers
+
+4 workers
+
+8 workers
+
+16 workers
+
+Rank 2
+SGD
+Signum
+
+0.1
+
+0.2
+
+0.3
+
+0.1
+
+0.2
+
+0.3
+
+0.1
+
+0.2
+
+0.3
+
+0.1
+
+0.2
+
+0.3
+
+Figure 3: Scaling of POWERSGD on CIFAR10 compared to full-precision SGD and Signum (Bern-
+stein et al.  2019) on two communication backends. The batch size increases linearly with the number
+of workers. We compare training time for one epoch to 1-worker SGD. Note that the faster NCCL
+backend used throughout beneﬁts the baselines more than our method.
+
+than SGD. Thus  on modern GPU-enabled infrastructure  POWERSGD  which relies on matrix
+multiplication  is faster and much more accurate than the other compression schemes.
+
+5.2 Scalability of POWERSGD
+
+Here we investigate how POWERSGD scales with an increasing number of workers  shedding light on
+what we can expect if we use a signiﬁcantly larger number of workers. Additionally  we investigate
+how these results depend on the choice of communication backend. We benchmark POWERSGD
+against SGD and Signum (signSGD with majority vote) from Bernstein et al. (2019) which we believe
+is the current state-of-the-art for distributed algorithms.
+Table 5 provides a detailed breakdown of the time spent for each mini-batch (i.e. one step) into the
+forward pass  backward pass  gradient exchange (communication)  and compression/decompression.
+The time spent in the forward and backward pass is constant across all algorithms and numbers
+of workers. Since both SGD and POWERSGD use all-reduce  the gradient communication time
+(solid green in Table 5) scales gracefully with increasing number of workers. Signum—which uses
+all-gather instead of all-reduce—has a steeper increase. It has comparable time to POWERSGD for 4
+workers but becomes more expensive for 16 workers.
+There is another  more subtle  consequence of all-reduce vs. all-gather on the decoding times. In
+all-reduce  the aggregation step and the communication step happen simultaneously. Each worker
+receives a pre-aggregated gradient  making the cost of decompression independent of the number of
+workers. On the other hand  in all-gather  a worker receives W compressed gradients that need to be
+individually decompressed and aggregated (either using majority vote or averaging). The time for
+decompression with all-gather therefore scales linearly with number of workers. This shows when
+comparing the hatcheted regions in Table 5. This observation speaks to the importance of the reduce
+operation for scalability.
+We next study two different backends—the more optimized NCCL and the slower GLOO. All three
+methods scale reasonably well with the optimized NCCL backend  although Signum has a slope less
+than 1 in the log-log plot  indicating sub-linear scaling. On the slower GLOO backend  POWERSGD
+is notably the only method that retains excellent scaling due to its high compression rate.
+
+7
+
+124816Numberofworkers1×2×4×8×SpeedupoverSGDGLOObackendSGDRank2Signum124816NumberofworkersNCCLbackendSGDRank2SignumTable 6: Results on CIFAR10.
+Contrary to rank-2 Spectral
+Atomo (Wang et al.  2018) and
+Signum (Bernstein et al.  2019) 
+POWERSGD achieves the same
+test accuracy as full-precision
+SGD within the default epoch
+budget.
+
+Algorithm
+SGD
+Atomo
+Signum
+Rank 2
+
+Test accuracy
+
+Data/epoch
+
+Time per batch
+
+94.3%
+92.6%
+93.6%
+94.4%
+
+1023 MB 312 ms
++0%
+113 MB 948 ms +204%
+−3%
+32 MB 301 ms
+−23%
+8 MB 239 ms
+
+Table 7: In language modeling 
+rank-4 POWERSGD achieves the
+target test accuracy and provides
+a signiﬁcant speedup over SGD.
+
+Algorithm
+SGD
+Signum
+Rank 4
+
+Test perplexity Data/epoch
+
+Time per batch
+
+91
+142
+91
+
+7730 MB 300 ms
++0%
+242 MB 424 ms +41%
+64 MB 134 ms −55%
+
+5.3 Other tasks and methods
+
+In Table 6  we compare POWERSGD against the state-of-the-art compressed optimization algorithms
+Signum and Spectral Atomo. The cost of performing a full SVD at each step renders Spectral
+Atomo impractical in a high-performance setting  especially considering that it fails to match the test
+accuracies of the other methods. Signum performs much better  proving a minor speedup over SGD.
+POWERSGD is the fastest and most accurate of the compared methods.
+The advantage of POWERSGD truly shows when using really large models  i.e. where the commu-
+nication actually becomes a bottleneck. To verify this  we run Signum  full-precision SGD  and
+POWERSGD to train an LSTM on a language modeling task which has a substantially larger model
+size than RESNET18 (see Appendix F). To match the test score of full-precision SGD  we needed
+to use a rank-4 approximation (see Section 4.3). POWERSGD reduces communication by 90% and
+the overall running time by 55%  while Signum becomes slower than full-precision SGD and also
+obtains a worse test score.
+Convergence curves on test accuracy corresponding to Tables 3  6 and 7 are provided in Appendix C.
+In those ﬁgures  you can read our improvements in time-to-accuracy for any target accuracy. We also
+provide a case study on using PowerSGD for a novel task (language modeling with transformers on
+WIKITEXT-2) and more workers (32) on the public cloud in Appendix D.
+
+6 Conclusion
+
+Gradient compression is a promising approach to tackling the communication bottleneck in syn-
+chronous distributed optimization. Thus far  however  it has not found widespread adoption because
+existing compression schemes either run slower than SGD with optimized all-reduce gradient aggre-
+gation  or more importantly do not reach the same test performance. We see POWERSGD as the ﬁrst
+practical gradient compression method  and believe it is ready for adaptation in practice.
+The key to the practicality of POWERSGD is its linear compression scheme that is cheap to compute
+and allows for all-reduce gradient aggregation  while simultaneously matching the test performance of
+full-precision SGD. This speedup gained over SGD actually increases for larger models such as those
+commonly found in NLP. Further  as a result of our modiﬁcations to the error feedback algorithm 
+POWERSGD is a plug-in replacement for SGD with momentum  avoiding the need for additional
+hyper-parameter tuning. We expect that these properties of POWERSGD will enable training of even
+larger models with even more workers than what is possible with full-precision SGD.
+While POWERSGD enables faster training with larger batch sizes  increasing batch sizes are known
+to eventually suffer from a ‘generalization gap’ (Shallue et al.  2018). This is an orthogonal issue that
+we see as the next step towards solving large-scale training. In our experiments  we have observed
+that POWERSGD can achieve higher test accuracy than SGD. Combined with the intriguing links
+between low-rankedness and generalization  this indicates that POWERSGD may also be helpful for
+closing the generalization gap in large batch training.
+
+8
+
+Acknowledgements
+
+We thank Alp Yurtsever and Tao Lin for valuable discussions and the reviewers for their feedback.
+This project was supported by SNSF grant 200021_175796  as well as a Google Focused Research
+Award.
+
+References
+Alistarh  D.  Grubic  D.  Li  J.  Tomioka  R.  and Vojnovic  M. QSGD: Communication-efﬁcient sgd
+via gradient quantization and encoding. In Advances in Neural Information Processing Systems
+(NIPS)  2017.
+
+Arbenz  P. Lecture notes on solving large scale eigenvalue problems. D-MATH  ETH Zürich  2  2016.
+
+Arora  S.  Ge  R.  Neyshabur  B.  and Zhang  Y. Stronger generalization bounds for deep nets via a
+
+compression approach. In International Conference on Machine Learning (ICML)  2018.
+
+Awan  A. A.  Chu  C.-H.  Subramoni  H.  and Panda  D. K. Optimized broadcast for deep learning
+workloads on dense-GPU inﬁniband clusters: MPI or NCCL? In European MPI Users’ Group
+Meeting (EuroMPI)  2018.
+
+Baevski  A. and Auli  M. Adaptive input representations for neural language modeling. In Interna-
+
+tional Conference on Learning Representations (ICLR)  2019.
+
+Bernstein  J.  Wang  Y.-X.  Azizzadenesheli  K.  and Anandkumar  A.
+
+signSGD: compressed
+optimisation for non-convex problems. In International Conference on Machine Learning (ICML) 
+2018.
+
+Bernstein  J.  Zhao  J.  Azizzadenesheli  K.  and Anandkumar  A. signSGD with majority vote is com-
+munication efﬁcient and fault tolerant. In International Conference on Learning Representations
+(ICLR)  2019.
+
+Caldas  S.  Konecný  J.  McMahan  H. B.  and Talwalkar  A. Expanding the reach of federated
+
+learning by reducing client resource requirements. arXiv  abs/1812.07210  2018.
+
+Carlson  D.  Cevher  V.  and Carin  L. Stochastic Spectral Descent for Restricted Boltzmann Machines.
+
+In International Conference on Artiﬁcial Intelligence and Statistics (AISTATS)  2015.
+
+Collins  E.  Bigdeli  S. A.  and Süsstrunk  S. Detecting memorization in ReLU networks. arXiv 
+
+abs/1810.03372  2018.
+
+Dean  J.  Corrado  G.  Monga  R.  Chen  K.  Devin  M.  Mao  M.  Senior  A.  Tucker  P.  Yang  K.  Le 
+Q. V.  et al. Large scale distributed deep networks. In Advances in Neural Information Processing
+Systems (NIPS)  2012.
+
+Ghadimi  S. and Lan  G. Accelerated gradient methods for nonconvex nonlinear and stochastic
+
+programming. Mathematical Programming  156(1-2):59–99  2016.
+
+Goyal  P.  Dollar  P.  Girshick  R.  Noordhuis  P.  Wesolowski  L.  Kyrola  A.  Tulloch  A.  Jia  Y.  and
+He  K. Accurate  large minibatch SGD: training imagenet in 1 hour. arXiv  abs/1706.02677  2017.
+
+Gunasekar  S.  Lee  J.  Soudry  D.  and Srebro  N. Characterizing implicit bias in terms of optimization
+
+geometry. In International Conference on Machine Learning (ICML)  2018.
+
+Iandola  F. N.  Ashraf  K.  Moskewicz  M. W.  and Keutzer  K. FireCaffe: near-linear acceleration of
+
+deep neural network training on compute clusters. corr abs/1511.00175 (2015)  2015.
+
+Karimireddy  S. P.  Rebjock  Q.  Stich  S. U.  and Jaggi  M. Error feedback ﬁxes SignSGD and other
+gradient compression schemes. In International Conference on Machine Learning (ICML)  2019.
+
+Koneˇcn`y  J.  McMahan  H. B.  Yu  F. X.  Richtárik  P.  Suresh  A. T.  and Bacon  D. Federated
+
+learning: Strategies for improving communication efﬁciency. arXiv  abs/1610.05492  2016.
+
+Li  Y.  Ma  T.  and Zhang  H. Algorithmic regularization in over-parameterized matrix sensing and
+
+neural networks with quadratic activations. In Conference on Learning Theory (COLT)  2018.
+
+9
+
+Lin  Y.  Han  S.  Mao  H.  Wang  Y.  and Dally  W. J. Deep gradient compression: Reducing the
+communication bandwidth for distributed training. In International Conference on Learning
+Representations (ICLR)  2018.
+
+Martin  C. H. and Mahoney  M. W. Implicit self-regularization in deep neural networks: Evidence
+
+from random matrix theory and implications for learning. arXiv  abs/1810.01075  2018.
+
+Mazumder  R.  Hastie  T.  and Tibshirani  R. Spectral regularization algorithms for learning large
+
+incomplete matrices. Journal of Machine Learning Research  11(Aug):2287–2322  2010.
+
+Oja  E. Simpliﬁed neuron model as a principal component analyzer. Journal of Mathematical Biology 
+
+15(3):267–273  1982.
+
+Ott  M.  Edunov  S.  Baevski  A.  Fan  A.  Gross  S.  Ng  N.  Grangier  D.  and Auli  M. fairseq: A fast 
+extensible toolkit for sequence modeling. In Proceedings of NAACL-HLT 2019: Demonstrations 
+2019.
+
+Panda  D. K. D.  Subramoni  H.  and Awan  A. A. High performance distributed deep learning: A
+beginner’s guide. In Symposium on Principles and Practice of Parallel Programming (PPoPP) 
+2019.
+
+Robbins  H. and Monro  S. A Stochastic Approximation Method. The Annals of Mathematical
+
+Statistics  22(3):400–407  September 1951.
+
+Seide  F.  Fu  H.  Droppo  J.  Li  G.  and Yu  D. 1-bit stochastic gradient descent and its application to
+data-parallel distributed training of speech dnns. In Annual Conference of the International Speech
+Communication Association (INTERSPEECH)  2014.
+
+Shallue  C. J.  Lee  J.  Antognini  J.  Sohl-Dickstein  J.  Frostig  R.  and Dahl  G. E. Measuring the
+
+effects of data parallelism on neural network training. arXiv  abs/1811.03600  2018.
+
+Stewart  G. Simultaneous iteration for computing invariant subspaces of non-Hermitian matrices.
+
+Numerische Mathematik  25(2):123–136  1976.
+
+Stewart  G. and Miller  J. Methods of simultaneous iteration for calculating eigenvectors of matrices.
+
+Topics in Numerical Analysis II  pp. 169–185  1975.
+
+Stich  S. U. and Karimireddy  S. P. The error-feedback framework: Better rates for sgd with delayed
+
+gradients and compressed communication. arXiv  abs/1909.05350  2019.
+
+Stich  S. U.  Cordonnier  J.-B.  and Jaggi  M. Sparsiﬁed SGD with memory. In Advances in Neural
+
+Information Processing Systems (NeurIPS)  2018.
+
+Wang  H.  Sievert  S.  Liu  S.  Charles  Z.  Papailiopoulos  D.  and Wright  S. ATOMO:
+Communication-efﬁcient learning via atomic sparsiﬁcation. In Advances in Neural Information
+Processing Systems (NeurIPS)  2018.
+
+Wangni  J.  Wang  J.  Liu  J.  and Zhang  T. Gradient sparsiﬁcation for communication-efﬁcient
+distributed optimization. In Advances in Neural Information Processing Systems (NeurIPS)  2018.
+Wen  W.  Xu  C.  Yan  F.  Wu  C.  Wang  Y.  Chen  Y.  and Li  H. Terngrad: Ternary gradients to
+reduce communication in distributed deep learning. In Advances in Neural Information Processing
+Systems (NIPS)  pp. 1509–1519  2017.
+
+Yoshida  Y. and Miyato  T. Spectral norm regularization for improving the generalizability of deep
+
+learning. arXiv  abs/1705.10941  2017.
+
+Yu  M.  Lin  Z.  Narra  K.  Li  S.  Li  Y.  Kim  N. S.  Schwing  A. G.  Annavaram  M.  and Avestimehr 
+S. Gradiveq: Vector quantization for bandwidth-efﬁcient gradient aggregation in distributed CNN
+training. In Advances in Neural Information Processing Systems (NeurIPS)  2018.
+
+Yurtsever  A.  Udell  M.  Tropp  J. A.  and Cevher  V. Sketchy decisions: Convex low-rank matrix
+optimization with optimal storage. In International Conference on Artiﬁcial Intelligence and
+Statistics (AISTATS)  2017.
+
+Zhao  J. signSGD with majority vote. github.com/PermiJW/signSGD-with-Majority-Vote 
+
+2019. [Online; accessed 12-May-2019].
+
+10
+
+,Don Dennis
+Chirag Pabbaraju
+Harsha Vardhan Simhadri
+Prateek Jain
+Thijs Vogels
+Sai Praneeth Karimireddy
+Martin Jaggi

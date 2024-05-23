@@ -1,0 +1,1010 @@
+2019,A Kernel Loss for Solving the Bellman Equation,Value function learning plays a central role in many state-of-the-art reinforcement 
+learning algorithms.  Many popular algorithms like Q-learning do not optimize
+any objective function  but are fixed-point iterations of some variants of Bellman
+operator that are not necessarily a contraction. As a result  they may easily lose
+convergence guarantees  as can be observed in practice. In this paper  we propose a novel loss function  which can be optimized using standard gradient-based methods with guaranteed convergence. The key advantage is that its gradient can be easily approximated using sampled transitions  avoiding the need for double samples required by prior algorithms like residual gradient. Our approach may be combined with general function classes such as neural networks  using either on- or off-policy data  and is shown to work reliably and effectively in several benchmarks  including classic problems where standard algorithms are known to diverge.,A Kernel Loss for Solving the Bellman
+
+Equation
+
+Yihao Feng
+UT Austin
+
+Lihong Li
+
+Google Research
+
+Qiang Liu
+UT Austin
+
+yihao@cs.utexas.edu
+
+lihong@google.com
+
+lqiang@cs.utexas.edu
+
+Abstract
+
+Value function learning plays a central role in many state-of-the-art reinforcement-
+learning algorithms. Many popular algorithms like Q-learning do not optimize
+any objective function  but are ﬁxed-point iterations of some variants of Bellman
+operator that are not necessarily a contraction. As a result  they may easily lose
+convergence guarantees  as can be observed in practice. In this paper  we propose a
+novel loss function  which can be optimized using standard gradient-based methods
+with guaranteed convergence. The key advantage is that its gradient can be easily
+approximated using sampled transitions  avoiding the need for double samples
+required by prior algorithms like residual gradient. Our approach may be combined
+with general function classes such as neural networks  using either on- or off-policy
+data  and is shown to work reliably and effectively in several benchmarks  including
+classic problems where standard algorithms are known to diverge.
+
+1
+
+Introduction
+
+The goal of a reinforcement learning (RL) agent is to optimize its policy to maximize the long-term
+return through repeated interaction with an external environment. The interaction is often modeled as
+a Markov decision process  whose value functions are the unique ﬁxed points of their corresponding
+Bellman operators. Many state-of-the-art algorithms  including TD(λ)  Q-learning and actor-critic 
+have value function learning as a key component (Sutton & Barto  2018; Szepesv´ari  2010).
+
+A fundamental property of the Bellman operator is that it is a contraction in the value function
+space in the ℓ∞-norm (Puterman  1994). Therefore  starting from any bounded initial function  with
+repeated applications of the operator  the value function converges to the true value function. A
+number of algorithms are directly inspired by this property  such as temporal difference (Sutton 
+1988) and its many variants (Bertsekas & Tsitsiklis  1996; Sutton & Barto  2018; Szepesv´ari  2010).
+Unfortunately  when function approximation such as neural networks is used to represent the value
+function in large-scale problems  the critical property of contraction is generally lost (e.g.  Boyan &
+Moore  1995; Baird  1995; Tsitsiklis & Van Roy  1997)  except in rather restricted cases (e.g.  Gordon 
+1995; Tsitsiklis & Van Roy  1997). Not only is this instability one of the core theoretical challenges
+in RL  but it also has broad practical signiﬁcance  given the growing popularity of algorithms like
+DQN (Mnih et al.  2015)  A3C (Mnih et al.  2016) and their many variants (e.g.  Gu et al.  2016;
+Schulman et al.  2016; Wang et al.  2016; Wu et al.  2017)  whose stability largely depends on the
+contraction property. The instability becomes even harder to avoid  when training data (transitions)
+are sampled from an off-policy distribution  a situation known as the deadly triad (Sutton & Barto 
+2018  Sec. 11.3).
+
+The brittleness of Bellman operator’s contraction property has inspired a number of works that aim
+to reformulate value function learning as an optimization problem  where standard algorithms like
+stochastic gradient descent can be used to minimize the objective  without the risk of divergence
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+(under mild and typical assumptions). One of the earliest attempts is residual gradient  or RG (Baird 
+1995)  which relies on minimizing squared temporal differences. The algorithm is convergent  but
+its objective is not necessarily a good proxy due to a well-known “double sample” problem. As a
+result  it may converge to an inferior solution; see Sections 2 and 6 for further details and numerical
+examples. This drawback is inherited by similar algorithms like PCL (Nachum et al.  2017  2018).
+
+Another line of work seeks alternative objective functions  the minimization of which leads to desired
+value functions (e.g.  Sutton et al.  2009; Maei  2011; Liu et al.  2015; Dai et al.  2017). Most existing
+works are either for linear approximation  or for evaluation of a ﬁxed policy. An exception is the
+SBEED algorithm (Dai et al.  2018b)  which transforms the Bellman equation to an equivalent saddle-
+point problem  and can use nonlinear function approximations. While SBEED is provably convergent
+under fairly standard conditions  it relies on solving a minimax problem  whose optimization can be
+rather challenging in practice  especially with nonconvex approximation classes like neural networks.
+
+In this paper  we propose a novel loss function for value function learning. It avoids the double-sample
+problem (unlike RG)  and can be easily estimated and optimized using sampled transitions (in both
+on- and off-policy scenarios). This is made possible by leveraging an important property of integrally
+strictly positive deﬁnite kernels (Stewart  1976; Sriperumbudur et al.  2010). This new objective
+function allows us to derive simple yet effective algorithms to approximate the value function 
+without risking instability or divergence (unlike TD algorithms)  or solving a more sophisticated
+saddle-point problem (unlike SBEED). Our approach also allows great ﬂexibility in choosing the
+value function approximation classes  including nonlinear ones like neural networks. Experiments
+in several benchmarks demonstrate the effectiveness of our method  for both policy evaluation and
+optimization problems. We will focus on the batch setting (or the growing-batch setting with a
+growing replay buffer)  and leave the online setting for future work.
+
+2 Background
+
+This section starts with necessary notation and background information  then reviews two representa-
+tive algorithms that work with general  nonlinear (differentiable) function classes.
+
+Notation. A Markov decision process (MDP) is denoted by M = hS  A  P  R  γ)  where S is a
+(possibly inﬁnite) state space  A an action space  P (s′ | s  a) the transition probability  R(s  a) the
+average immediate reward  and γ ∈ (0  1) a discount factor. The value function of a policy π :
+S 7→ RA
+t=0 γtR(st  at) | s0 = s  at ∼ π(·  st)]   measures the expected
+long-term return of a state. It is well-known that V = V π is the unique solution to the Bellman
+equation (Puterman  1994)  V = BπV   where Bπ : RS → RS is the Bellman operator  deﬁned by
+
++  denoted V π(s) := E [P∞
+
+BπV (s) := E
+
+a∼π(·|s) s′∼P (·|s a)[R(s  a) + γV (s′) | s] .
+
+While we develop and analyze our approach mostly for Bπ given a ﬁxed π (policy evaluation)  we
+will also extend the approach to the controlled case of policy optimization  where the corresponding
+Bellman operator becomes
+
+BV (s) := max
+
+a
+
+E
+
+s′∼P (·|s a)[R(s  a) + γV (s′) | s  a] .
+
+The unique ﬁxed point of B is known as the optimal value function  denoted V ∗; that is  BV ∗ = V ∗.
+
+Our work is built on top of an alternative to the ﬁxed-point view above: given some ﬁxed distribution
+µ whose support is S  V π is the unique minimizer of the squared Bellman error:
+
+L2(V ) := kBπV − V k2
+
+µ = Es∼µ(cid:2) (BπV (s) − V (s))2(cid:3) .
+
+Denote by RπV := BπV − V the Bellman error operator. With a set D = {(si  ai  ri  s′
+i)}1≤i≤n
+of transitions where ai ∼ π(·|si)  the Bellman operator in state si can be approximated by boot-
+strapping: ˆBπV (si) := ri + γV (s′
+i) − V (si). Clearly  one
+has E[ ˆBπV (si)|si] = BπV (si) and E[ ˆRπV (si)|si] = RπV (si). In the literature  ˆRπV (si) is also
+known as the temporal difference or TD error  whose expectation is the Bellman error.
+
+i). Similarly  ˆRπV (si) := ri + γV (s′
+
+Finally  in this work  we use the same notation for a distribution and its probability density function.
+
+2
+
+Basic Algorithms. We are interested in estimating V π  from a parametric family {Vθ : θ ∈ Θ} 
+from data D. The residual gradient algorithm (Baird  1995) minimizes the squared TD error:
+
+ˆLRG(Vθ) :=
+
+1
+n
+
+n
+
+Xi=1(cid:16) ˆBπVθ(si) − Vθ(si)(cid:17)2
+
+with gradient descent update θt+1 = θt − ǫ∇θ ˆLRG(Vθt )  where
+
+ 
+
+(1)
+
+∇θ ˆLRG(Vθ) =
+
+2
+n
+
+n
+
+Xi=1(cid:16)(cid:0) ˆBπVθ(si) − Vθ(si)(cid:1) · ∇θ(cid:0) ˆBπVθ(si) − Vθ(si)(cid:1)(cid:17) .
+
+However  the objective in (1) is a biased and inconsistent estimate of the squared Bellman error. This
+
+is because Es∼µ[ ˆLRG(V )] = L2(V ) + Es∼µ(cid:2)var( ˆBπV (s)|s)(cid:3) 6= L2(V )  where there is an extra
+
+term that involves the conditional variance of the empirical Bellman operator  which does not vanish
+unless the state transitions are deterministic. As a result  RG can converge to incorrect value functions
+(see also Section 6). With random transitions  correcting the bias requires double samples (i.e.  at
+least two independent samples of (r  s′) for the same (s  a) pair) to estimate the conditional variance.
+More popular algorithms in the literature are instead based on ﬁxed-point iterations  using ˆBπ to
+construct a target value to update Vθ(si). An example is ﬁtted value iteration  or FVI (Bertsekas
+& Tsitsiklis  1996; Munos & Szepesv´ari  2008)  which includes as special cases the empirically
+successful DQN and variants  and also serves as a key component in many state-of-the-art actor-critic
+algorithms. In its basic form  FVI starts from an initial θ0  and iteratively updates the parameter by
+
+θt+1 = arg min
+
+FVI (Vθ) :=
+
+θ∈Θ ( ˆL(t+1)
+
+1
+n
+
+n
+
+Xi=1(cid:16)Vθ(si) − ˆBπVθt (si)(cid:17)2) .
+
+(2)
+
+Different from RG  when gradient-based methods are applied to solve (2)  the current parameter θt
+is treated as a constant: ∇θ ˆL(t+1)
+1988) may be viewed as a stochastic version of FVI  where a single sample (i.e.  n = 1) is drawn
+randomly (either from a stream of transitions or from a replay buffer) to estimate the gradient of (2).
+
+i=1(cid:0)Vθ(si) − ˆBπVθt (si)(cid:1)∇θVθ(si). TD(0) (Sutton 
+
+FVI (Vθ) = 2
+
+nPn
+
+Being ﬁxed-point iteration methods  FVI-style algorithms do not optimize any objective function 
+and their convergence is guaranteed only in rather restricted cases (e.g.  Gordon  1995; Tsitsiklis
+& Van Roy  1997; Antos et al.  2008). Such divergent behavior is well-known and empirically
+observed (Baird  1995; Boyan & Moore  1995); see Section 6 for more numerical examples. It creates
+substantial difﬁculty in parameter tuning and model selection in practice.
+
+3 Kernel Loss for Policy Evaluation
+
+Much of the algorithmic challenge described earlier lies in the difﬁculty in estimating squared Bellman
+error from data. In this section  we address this difﬁculty by proposing a new loss function that is
+more amenable to statistical estimation from empirical data. Proofs are deferred to the appendix.
+
+Our framework relies on an integrally strictly positive deﬁnite (ISPD) kernel K : S × S → R  which
+is a symmetric bi-variate function that satisﬁes kf k2
+non-zero L2-integrable function f . For simplicity  we consider two functions f and g equal if (f − g)
+has a zero L2 norm. We call kf kK the K-norm of f . Many commonly used kernels  such as Gaussian
+RBF kernel K(s  ¯s) = exp(− ks − ¯sk2
+2 /h) is ISPD. More discussion on ISPD kernels can be found
+in Stewart (1976) and Sriperumbudur et al. (2010).
+
+K := RS 2 K(s  ¯s)f (s)f (¯s) ds d¯s > 0  for any
+
+3.1 The New Loss Function
+
+Recall that RπV = BπV − V is the Bellman error operator. Our new loss function is deﬁned by
+
+LK(V ) = kRπV k2
+
+K µ := Es ¯s∼µ [K(s  ¯s) · RπV (s) · RπV (¯s)]  
+
+(3)
+
+where µ is any positive density function on states s  and s  ¯s ∼ µ means s and ¯s are drawn i.i.d. from µ.
+Here  k·kK µ is regarded as the K-norm under measure µ. It is easy to show that kf kK µ = kf µkK .
+Note that µ can be either the visitation distribution under policy π (the on-policy case)  or some other
+distribution (the off-policy case). Our approach handles both cases in a uniﬁed way. The following
+theorem shows that the loss LK is consistent:
+
+3
+
+Theorem 3.1. Let K be an ISPD kernel and assume µ(s) > 0 ∀s ∈ S. Then  LK(V ) ≥ 0 for any
+V ; and LK(V ) = 0 if and only if V = V π. In other words  V π = arg minV LK(V ).
+
+The next result relates the kernel loss to a “dual” kernel norm of the value function error  V − V π.
+
+Theorem 3.2. Under the same assumptions as Theorem 3.1  we have LK(V ) = kV − V πk2
+where k·kK ∗ µ is the K ∗-norm under measure µ with a “dual” kernel K ∗(s  ¯s)  deﬁned by
+
+K ∗ µ 
+
+K ∗(s′  ¯s′) := Es ¯s ∼ d∗
+
+and the expectation notation is shorthand for Es∼d∗
+
+π µhK(s′  ¯s′) + γ2K(s  ¯s) − γ(cid:0)K(s′  ¯s) + K(s  ¯s′)(cid:1) | s′  ¯s′i  
+π µ(s|s′) :=Xa
+
+π µ [f (s)|s′] =R f (s)d∗
+
+π µ(s|s′)ds   with
+
+d∗
+
+π(a|s)P (s′|s  a)µ(s)/µ(s′) .
+
+The norm involves a quantity  d∗
+tional probability of state s conditioning on observing the next state s′ (but note that d∗
+normalized to sum to one unless µ = dπ).
+
+π µ(s|s′)  which may be heuristically viewed as a “backward” condi-
+π µ(s|s′) is not
+
+Empirical Estimation The key advantage of the new loss LK is that it can be easily estimated and
+optimized from observed transitions  without requiring double samples. Given a set of empirical data
+D = {(si  ai  ri  s′
+
+i)}1≤i≤n  a way to estimate LK is to use the so-called V-statistics 
+
+ˆLK(Vθ) :=
+
+1
+
+n2 X1≤i j≤n
+
+K(si  sj) · ˆRπVθ(si) · ˆRπVθ(sj) .
+
+(4)
+
+Similarly  the gradient ∇θLK(Vθ) = 2Eµ[K(s  ¯s)RπVθ(s)∇θ(RπVθ(¯s))] can be estimated by
+
+∇θ ˆLK(Vθ) :=
+
+2
+
+n2 X1≤i j≤n
+
+K(si  sj) · ˆRπVθ(si) · ∇θ ˆRπVθ(sj) .
+
+Note that while calculating the exact gradient requires O(n2) computation  in practice we may use
+stochastic gradient descent on mini-batches of data instead. The precise formulas for unbiased
+estimates of the gradient of the kernel loss using a subset of samples are given in Appendix B.1.
+
+Remark (unbiasedness) An alternative approach is to use the U-statistics  which removes the
+diagonal (i = j) terms in the pairwise average in (4). In the case of i.i.d. samples  it is known that
+U-statistics forms an unbiased estimate of the true gradient  but may have higher variance than the
+V-statistics. In our experiments  we observe that V-statistics works better than U-statistics.
+
+Remark (consistency) Following standard statistical approximation theory (e.g.  Serﬂing  2009) 
+both U/V-statistics provide consistent estimation of the expected quadratic quantity given the sample
+is weakly dependent and satisﬁes certain mixing condition (e.g.  Denker & Keller  1983; Beutner
+& Z¨ahle  2012); this often amounts to saying that {si} forms a Markov chain that converges to its
+stationary distribution µ sufﬁciently fast. This is in contrast to the gradient computed by residual
+gradient  which is known to be inconsistent in general.
+
+Remark Another advantage of our kernel loss is that we have LK(V ) = 0 iff V = V π. Therefore 
+the magnitude of the empirical loss ˆLK(V ) reﬂects the closeness of V to the true value function V π.
+In fact  by using methods from kernel-based hypothesis testing (e.g.  Gretton et al.  2012; Liu et al. 
+2016; Chwialkowski et al.  2016)  one can design statistically calibrated methods to test if V = V π
+has been achieved  which may be useful for designing efﬁcient exploration strategies. In this work 
+we focus on estimating V π and leave it as future work to test value function proximity.
+
+3.2
+
+Interpretations of the Kernel Loss
+
+We now provide some insights into the new loss function  based on two interpretations.
+
+4
+
+Eigenfunction Interpretation Mercer’s theorem implies the following decomposition
+
+∞
+
+K(s  ¯s) =
+
+λiei(s)ei(¯s)  
+
+(5)
+
+of any continuous positive deﬁnite kernel on a compact domain  where {ei}∞
+of orthonormal eigenfunctions w.r.t. µ (i.e.  Es∼µ[ei(s)ej(s)] = 1{i = j})  and {λi}∞
+eigenvalues. For ISPD kernels  all the eigenvalues must be positive: ∀i  λi > 0.
+The following shows that LK is a squared projected Bellman error in the space spanned by {ei}∞
+
+i=1 is a countable set
+i=1 are their
+
+i=1.
+
+Xi=1
+
+Proposition 3.3. If (5) holds  then
+
+∞
+
+LK(V ) =
+
+λi (Es∼µ [RπV (s) × ei(s)])2 .
+
+Xi=1
+
+∞
+
+Xi=1
+
+Moreover  if {ei} is a complete orthonormal basis of L2-space under measure µ  then the L2 loss is
+
+L2(V ) =
+
+(Es∼µ [RπV (s) × ei(s)])2 .
+
+Therefore  LK(V ) ≤ λmaxL2(V )  where λmax := maxi{λi}.
+
+This result shows that the eigenvalue λi controls the contribution of the projected Bellman error to
+the eigenfunction ei in LK . It may be tempting to have λi ≡ 1  in which LK(V ) = L2(V )  but
+the Mercer expansion in (5) can diverge to inﬁnity  resulting in an ill-deﬁned kernel K(s  ¯s). To
+i=1 λi < ∞. Therefore  the
+kernel loss LK(V ) can be viewed as prioritizing the projections to the eigenfunctions with larger
+eigenvalues. In typical kernels such as Gaussian RBF kernels  these dominant eigenfunctions are
+Fourier bases with low frequencies (and hence high smoothness)  which may intuitively be more
+relevant than the higher frequency bases for practical purposes.
+
+avoid this  the eigenvalues must decay to zero fast enough such thatP∞
+
+RKHS Interpretation The squared Bellman error has the following variational form:
+
+L2(V ) = max
+
+f n(Es∼µ [RπV (s) × f (s)])2 :
+
+Es∼µ[(f (s))2] ≤ 1o  
+
+which involves ﬁnding a function f in the unit L2-ball  whose inner product with RπV (s) is maximal.
+Our kernel loss has a similar interpretation  with a different unit ball.
+
+Any positive kernel K(s  ¯s) is associated with a Reproducing Kernel Hilbert Space (RKHS) HK  
+which is the Hilbert space consisting of (the closure of) the linear span of K(·  s)  for s ∈ S  and
+satisﬁes the reproducing property  f (x) = hf  K(·  x)iHK   for any f ∈ HK . RKHS has been
+widely used as a powerful tool in various machine learning and statistical problems; see Berlinet &
+Thomas-Agnan (2011); Muandet et al. (2017) for overviews.
+
+Proposition 3.4. Let HK be the RKHS of kernel K(s  ¯s)  we have
+
+LK(V ) = max
+
+f ∈HKn(Es∼µ [RπV (s) × f (s)])2 :
+
+kf kHK
+
+≤ 1o .
+
+(7)
+
+Since RKHS is a subset of the L2 space that includes smooth functions  we can again see that LK(V )
+emphasizes more the projections to smooth basis functions  matching the intuitive from Theorem 3.3.
+It also draws a connection to the recent primal-dual reformulations of the Bellman equation (Dai
+et al.  2017  2018b)  which formulate V π as a saddle-point of the following minimax problem:
+
+min
+
+V
+
+max
+
+f
+
+Es∼µ(cid:2)2RπV (s) × f (s) − f (s)2(cid:3) .
+
+This is equivalent to minimizing L2(V ) as (6)  except that the L2 constraint is replaced by a quadratic
+penalty term. When only samples are available  the expectation in (8) is replaced by the empirical
+version. If the optimization domain of f is unconstrained  solving the empirical (8) reduces to the
+empirical L2 loss (1)  which yields inconsistent estimation. Therefore  existing works propose to
+further constrain the optimization of f in (8) to either RKHS (Dai et al.  2017) or neural networks (Dai
+et al.  2018b)  and hence derive a minimax strategy for learning V . Unfortunately  this is substantially
+more expensive than our method due to the cost of updating another neural network f jointly; the
+minimax procedure may also make the training less stable and more difﬁcult to converge in practice.
+
+(6)
+
+(8)
+
+5
+
+3.3 Connection to Temporal Difference (TD) Methods
+
+We now instantiate our algorithm in the tabular and linear cases to gain further insights. Interestingly 
+we show that our loss coincides with previous work  and as a result leads to the same value function
+as several classic algorithms. Hence  the approach developed here may be considered as their strict
+extensions to the much more general nonlinear function approximation classes.
+
+Again  let D be a set of n transitions sampled from distribution µ  and linear approximation be used:
+Vθ(s) = θTφ(s)  where φ : S → Rd is a feature function  and θ ∈ Rd is the parameter to be learned.
+The TD solution  ˆθTD  for either on- and off-policy cases  can be found by various algorithms (e.g. 
+Sutton  1988; Boyan  1999; Sutton et al.  2009; Dann et al.  2014)  and its theoretical properties have
+been extensively studied (e.g.  Tsitsiklis & Van Roy  1997; Lazaric et al.  2012).
+
+Corollary 3.5. When using a linear kernel of form k(s  ¯s) = φ(s)Tφ(¯s)  minimizing the kernel
+objective (4) gives the TD solution ˆθTD.
+
+Remark The result follows from the observation that our loss becomes the Norm of the Expected
+TD Update (NEU) in the linear case (Dann et al.  2014)  whose minimizer coincides with ˆθTD.
+Moreover  in ﬁnite-state MDPs  the corollary includes tabular TD as a special case  by using a one-hot
+vector (indicator basis) to represent states. In this case  the TD solution coincides with that of a
+model-based approach (Parr et al.  2008) known as certainty equivalence (Kumar & Varaiya  1986).
+It follows that our algorithm includes certainty equivalence as a special case in ﬁnite-state problems.
+
+4 Kernel Loss for Policy Optimization
+
+There are different ways to extend our approach to policy optimization. One is to use the kernel loss
+(3) inside an existing algorithm  as an alternative to RG or TD to learn V π(s). For example  our loss
+ﬁts naturally into an actor-critic algorithm  where we replace the critic update (often implemented
+by TD(λ) or its variant) with our method  and the actor updating part remains unchanged. Another 
+more general way is to design a kernelized loss for V (s) and policy π(a|s) jointly  so that the policy
+optimization can be solved using a single optimization procedure. Here  we take the ﬁrst approach 
+leveraging our method to improve the critic update step in Trust-PCL (Nachum et al.  2018).
+
+Trust-PCL is based on a temporal/path consistency condition resulting from policy smooth-
+ing (Nachum et al.  2017). We start with the smoothed Bellman operator  deﬁned by
+
+BλV (s) = max
+
+π(·|s)∈PA
+
+Eπ[R(s  a) + γV (s′) + λH(π | s) | s]  
+
+(9)
+
+where PA is the set of distributions over action space A; the conditional expectation Eπ[·|s] denotes
+a ∼ π(·|s)  and λ > 0 is a smoothing parameter; H is a state-dependent entropy term: H(π | s) :=
+
+−Pa∈A π(a|s) log π(a|s). Intuitively  Bλ is a smoothed approximation of B. It is known that Bλ
+
+is a γ-contraction (Fox et al.  2016)  so has a unique ﬁxed point V ∗
+recover the standard Bellman operator  and λ smoothly controls kV ∗
+The entropy regularization above implies the following path consistency condition. Let π∗
+optimal policy in (9) for Bλ  which yields V ∗
+
+λ . Furthermore  with λ = 0 we
+λ − V ∗k∞ (Dai et al.  2018b).
+λ be an
+
+λ . Then  (V  π) = (V ∗
+
+λ   π∗
+
+λ) uniquely solves
+
+∀(s  a) ∈ S × A :
+
+V (s) = R(s  a) + γE
+
+s′|s a[V (s′)] − λ log π(a|s) .
+
+This property inspires a natural extension of the kernel loss (3) to the controlled case:
+
+LK(V ) = E
+
+s ¯s∼µ a∼π(·|s) ¯a∼π(·|¯s)[K([s  a]  [¯s  ¯a]) · Rπ λV (s  a) · Rπ λV (¯s  ¯a)]  
+
+where Rπ λV (s  a) is given by
+
+Rπ λV (s  a) = R(s  a) + γE
+
+s′|s a[V (s′)] − λ log π(a|s) − V (s) .
+
+Given a set of transitions D = {(si  ai  ri  s′
+
+i)}1≤i≤n  the objective can be estimated by
+
+with
+
+ˆLK(Vθ) =
+
+1
+
+n2 X1≤i j≤n
+
+[K([si  ai]  [sj  aj]) ˆRi ˆRj]  
+
+ˆRi = ri + γVθ(s′
+
+i) − λ log πθ(ai|si) − Vθ(si) .
+
+The U-statistics version and multi-step bootstraps can be similarly obtained (Nachum et al.  2017).
+
+6
+
+5 Related Work
+
+In this work  we studied value function learning  one of the most-studied and fundamental problems
+in reinforcement learning. The dominant approach is based on ﬁxed-point iterations (Bertsekas
+& Tsitsiklis  1996; Szepesv´ari  2010; Sutton & Barto  2018)  which can risk instability and even
+divergence when function approximation is used  as discussed in the introduction.
+
+Our approach exempliﬁes more recent efforts that aim to improve stability of value function learning
+by reformulating it as an optimization problem. Our key innovation is the use of a kernel method
+to estimate the squared Bellman error  which is otherwise hard to estimate directly from samples 
+thus avoids the double-sample issue unaddressed by prior algorithms like residual gradient (Baird 
+1995) and PCL (Nachum et al.  2017  2018). As a result  our algorithm is consistent: it ﬁnds the
+true value function with enough data  using sufﬁciently expressive function approximation classes.
+Furthermore  the solution found by our algorithm minimizes the projected Bellman error  as in prior
+works when specialized to the same settings (Sutton et al.  2009; Maei et al.  2010; Liu et al.  2015;
+Macua et al.  2015). However  our algorithm is more general: it allows us to use nonlinear value
+function classes and can be naturally implemented for policy optimization. Compared to nonlinear
+GTD2/TDC (Maei et al.  2009)  our method is simpler (without having to do a local linear expansion)
+and empirically more effective (as demonstrated in the next section).
+
+As discussed in Section 3  our approach is related to the recently proposed SBEED algorithm (Dai
+et al.  2018b) which shares many advantages with this work. However  SBEED requires solving a
+minimax problem that can be rather challenging in practice. In contrast  our algorithm only needs to
+solve a minimization problem  for which a wide range of powerful methods exist (e.g.  Bertsekas 
+2016). Note that there exist other saddle-point formulations for RL  which is derived from the linear
+program of MDPs (Wang  2017; Chen et al.  2018; Dai et al.  2018a). The connection and comparison
+between these formulations would be interesting directions to investigate.
+
+Our work is also related to a line of interesting work on Bellman residual minimization (BRM) based
+on nested optimization (Antos et al.  2008; Farahmand et al.  2008  2016; Hoffman et al.  2011;
+Chen & Jiang  2019). They formulate the value function as the solution to a coupled optimization
+problem  where both the inner and outer optimization are over the same function space. While their
+inner optimization plays a similar role as our use of RKHS in the kernel loss deﬁnition  our loss is
+derived from a different way  and decouples the representations used in inner and outer optimizations.
+Furthermore  the nested optimization formulation also involves solving a minimax problem (similar
+to SBEED)  while our approach is much simpler as it only requires solving a minimization problem.
+
+Finally  the kernel method has been widely used in machine learning (e.g.  Sch¨olkopf & Smola 
+2001; Muandet et al.  2017). In RL  authors have used kernels either to smooth the estimates of
+transition probabilities and rewards (Ormoneit & Sen  2002)  or to represent the value function (e.g. 
+Xu et al.  2005  2007; Taylor & Parr  2009). Our method differs from these works in that we leverage
+kernels for designing proper loss functions to address the double-sampling problem  while putting
+no constraints on which approximation classes to represent the value function. Our approach is thus
+expected to be more ﬂexible and scalable in practice  allowing the value function to lie in ﬂexible
+function classes like neural networks.
+
+6 Experiments
+
+We compare our method (labelled “K-loss” in all experiments) with several representative baselines in
+both classic examples and popular benchmark problems  for both policy evaluation and optimization.
+
+6.1 Modiﬁed Example of Tsitsiklis & Van Roy
+
+Fig. 1 (a) shows a modiﬁed problem of the classic example by Tsitsiklis & Van Roy (1997)  by
+making transitions stochastic.1 It consists of 5 states  including 4 nonterminal (circles) and 1 terminal
+states (square)  and 1 action. The arrows represent transitions between states. The value function
+estimate is linear in the weight w = [w1  w2  w3]: for example  the leftmost and bottom-right states’
+values are w1 and 2w3  respectively. Furthermore  we set γ = 1  so V (s) is exact with the optimal
+
+1Recall that the double-sample issue exists only in stochastic problems  so the modiﬁcation is necessary to
+
+make the comparison to residual gradient meaningful.
+
+7
+
+r = 0
+W1
+r = 0
+
+W2
+
+p=0.8
+p=0.2
+W3
+
+r =  1
+
+p=0.1
+
+r = 0
+
+r = 0
+
+2W3
+
+p = 0.9
+
+(a) Our MDP Example
+
+(b) MSE vs. Iteration
+
+(c) ||w − w
+
+∗|| vs. Iteration
+
+Figure 1: Modiﬁed example of Tsitsiklis & Van Roy (1997).
+
+(a) MSE
+
+(b) Bellman Error
+
+(c) L2/K-Loss vs MSE
+
+(d) L2/K-Loss vs Bellman Error
+
+Figure 2: Results on Puddle World.
+
+weight w∗ = [0.8  1.0  0]. In the experiment  we randomly collect 2 000 transition tuples for training.
+We use a linear kernel in our method  so that it will ﬁnd the TD solution (Corollary 3.5).
+Fig. 1 (b&c) show the learning curves of mean squared error (kV −V ∗k2) and weight error (kwww−w∗k)
+of different algorithms over iterations. Results are consistent with theory: our method converges to
+the true weight w∗  while both FVI and TD(0) diverge  and RG converges to a wrong solution.
+
+6.2 Policy Evaluation with Neural Networks
+
+While popular in recent RL literature  neural networks are known to be unstable for a long time. Here 
+we revisit the classic divergence example of Puddle World (Boyan & Moore  1995)  and demonstrate
+the stability of our method. Experimental details are found in Appendix B.2.
+Fig. 2 summarizes the result using a neural network as value function for two metrics: kV − V ∗k2
+2
+and kBV − V k2
+2  both evaluated on the training transitions. First  as shown in (a-b)  our method
+works well while residual gradient converged to inferior solutions. In contrast  FVI and TD(0) exhibit
+unstable/oscilating behavior  and can even diverge  which is consistent with past ﬁndings (Boyan
+& Moore  1995). In addition  non-linear GTD2 (Maei et al.  2009) and SBEED (Dai et al.  2017 
+2018b)  which do not ﬁnd a better solution than our method in terms of MSE.
+
+Second  Fig. 2 (c&d) show the correlation between MSE  empirical Bellman error of the value
+function estimation and an algorithm’s training objective respectively. Our kernel loss appears to be a
+good proxy for learning the value function  for both MSE and Bellman error. In contrast  the L2 loss
+(used by residual gradient) does not correlate well  which also explains why residual gradient has
+been observed not to work well empirically.
+
+Fig. 3 shows more results on value function learning on CartPole and Mountain Car  which again
+demonstrate that our method performs better than other methods in general.
+
+6.3 Policy Optimization
+
+To demonstrate the use of our method in policy optimization  we combine it with Trust-PCL  and
+compare with variants of Trust-PCL combined with FVI  TD(0) and RG. To fairly evaluate the
+performance of all these four methods  we use Trust-PCL (Nachum et al.  2018) framework and the
+public code for our experiments. We only modify the training of Vθ(s) for each of the method and
+keep rest same as original release. Experimental details can be found in Appendix B.3.1.
+
+8
+
+02004006008001000Iterations103010201010100101002004006008001000Iterations0.00.51.01.52.0K-lossTD(0)FVIRG0500100015002000Epochs1001021041061080500100015002000Epochs1.641.661.681.701.721.31.51.71.9L2/K-Loss0.00.71.42.12.81.31.51.71.9L2/K-Loss1.631.651.671.691.711.73GTD2(nonlinear)TD0FVIRGSBEEDK-loss(a) CartPole MSE
+
+(b) CartPole Bellman Error
+
+(c) Mountain Car MSE
+
+(d) Mountain Car Bellman Error
+
+Figure 3: Policy evaluation results on CartPole and Mountain Car.
+
+s
+n
+r
+u
+t
+e
+R
+e
+g
+a
+r
+e
+v
+A
+
+(a) Swimmer
+
+(b) InvertedDoublePendulum
+
+(c) Ant
+
+(d) InvertedPendulum
+
+Figure 4: Results of various variants of Trust-PCL on Mujoco Benchmark.
+
+We evaluate the performance of these four methods on Mujoco benchmark and report the best
+performance of these four methods in Figure 4 (averaged on ﬁve different random seeds). K-
+loss consistently outperforms all the other methods  learning better policy with fewer data. Note that
+we only modify the update of value functions inside Trust-PCL  which can be implemented relatively
+easily. We expect that we can improve many other algorithms in similar ways by improving the value
+function using our kernel loss.
+
+7 Conclusion
+
+This paper studies the fundamental problem of solving Bellman equations with parametric value
+functions. A novel kernel loss is proposed  which is easy to be estimated and optimized using sampled
+transitions. Empirical results show that  compared to prior algorithms  our method is convergent 
+produces more accurate value functions  and can be easily adapted for policy optimization.
+
+These promising results open the door to many interesting directions for future work. An important
+question is ﬁnite-sample analysis  quantifying how fast the minimizer of the empirical kernel loss
+converges to the true minimizer of the population loss  when data is not i.i.d. Another is to extend the
+loss to the online setting  where data arrives in a stream and the learner cannot store all previous data.
+Such an online version may provide computational beneﬁts in certain applications. Finally  it may be
+possible to quantify uncertainty in the value function estimate  and use this uncertainty information
+to guide efﬁcient exploration.
+
+Acknowledgment
+
+This work is supported in part by NSF CRII 1830161 and NSF CAREER 1846421. We would like to
+acknowledge Google Cloud and and Amazon Web Services (AWS) for their support. We also thank
+an anonymous reviewer and Bo Dai for helpful suggestions on related work that improved the paper.
+
+9
+
+0500100015002000Epochs1021001021040500100015002000Epochs1.61.51.41.31.21.1GTD2(nonlinear)TD0FVIRGSBEEDK-loss0100020003000Epochs102.5103103.5104104.50100020003000Epochs1.00.50.00.51.01.50.00.20.40.60.81.0million steps501001502002503003500.00.20.40.60.8million steps2000400060008000100000.00.30.60.91.21.5million steps5001000150020000.00.10.20.30.40.5million steps2004006008001000K-lossTD(0)FVIRGReferences
+
+Antos  A.  Szepesv´ari  C.  and Munos  R. Learning near-optimal policies with Bellman-residual
+minimizing based ﬁtted policy iteration and a single sample path. Machine Learning  71(1):89–129 
+2008.
+
+Baird  L. C. Residual algorithms: Reinforcement learning with function approximation. In Proceed-
+
+ings of the Twelfth International Conference on Machine Learning  pp. 30–37  1995.
+
+Berlinet  A. and Thomas-Agnan  C. Reproducing kernel Hilbert spaces in probability and statistics.
+
+Springer Science & Business Media  2011.
+
+Bertsekas  D. P. Nonlinear Programming. Athena Scientiﬁc  3rd edition  2016.
+
+Bertsekas  D. P. and Tsitsiklis  J. N. Neuro-Dynamic Programming. Athena Scientiﬁc  September
+
+1996.
+
+Beutner  E. and Z¨ahle  H. Deriving the asymptotic distribution of U- and V-statistics of dependent
+
+data using weighted empirical processes. Bernoulli  pp. 803–822  2012.
+
+Boyan  J. A. Least-squares temporal difference learning. In Proceedings of the Sixteenth International
+
+Conference on Machine Learning  pp. 49–56  1999.
+
+Boyan  J. A. and Moore  A. W. Generalization in reinforcement learning: Safely approximating the
+
+value function. In Advances in Neural Information Processing Systems 7  pp. 369–376  1995.
+
+Chen  J. and Jiang  N. Information-theoretic considerations in batch reinforcement learning. In
+Proceedings of the 36th International Conference on Machine Learning (ICML)  pp. 1042–1051 
+2019.
+
+Chen  Y.  Li  L.  and Wang  M. Scalable bilinear π-learning using state and action features. In
+Proceedings of the Thirty-Fifth International Conference on Machine Learning  pp. 833–842 
+2018.
+
+Chwialkowski  K.  Strathmann  H.  and Gretton  A. A kernel test of goodness of ﬁt. In Proceedings
+
+of The 33rd International Conference on Machine Learning  2016.
+
+Dai  B.  He  N.  Pan  Y.  Boots  B.  and Song  L. Learning from conditional distributions via dual
+
+embeddings. In Artiﬁcial Intelligence and Statistics  pp. 1458–1467  2017.
+
+Dai  B.  Shaw  A.  He  N.  Li  L.  and Song  L. Boosting the actor with dual critic. In Proceedings of
+
+the Sixth International Conference on Learning Representations (ICLR)  2018a.
+
+Dai  B.  Shaw  A.  Li  L.  Xiao  L.  He  N.  Liu  Z.  Chen  J.  and Song  L. SBEED: Convergent
+reinforcement learning with nonlinear function approximation. In Proceedings of the Thirty-Fifth
+International Conference on Machine Learning  pp. 1133–1142  2018b.
+
+Dann  C.  Neumann  G.  and Peters  J. Policy evaluation with temporal differences: A survey and
+
+comparison. Journal of Machine Learning Research  15(1):809–883  2014.
+
+Denker  M. and Keller  G. On U-statistics and v. mise statistics for weakly dependent processes.
+
+Zeitschrift f¨ur Wahrscheinlichkeitstheorie und verwandte Gebiete  64(4):505–522  1983.
+
+Farahmand  A. M.  Ghavamzadeh  M.  Szepesv´ari  C.  and Mannor  S. Regularized policy iteration.
+
+In Advances in Neural Information Processing Systems 21  pp. 441–448  2008.
+
+Farahmand  A. M.  Ghavamzadeh  M.  Szepesv´ari  C.  and Mannor  S. Regularized policy iteration
+with nonparametric function spaces. Journal of Machine Learning Research  17(130):1–66  2016.
+
+Fox  R.  Pakman  A.  and Tishby  N. Taming the noise in reinforcement learning via soft updates. In
+
+Proceedings of the Thirty-Second Conference on Uncertainty in Artiﬁcial Intelligence  2016.
+
+Gordon  G. J. Stable function approximation in dynamic programming. In Proceedings of the Twelfth
+
+International Conference on Machine Learning  pp. 261–268  1995.
+
+10
+
+Gretton  A.  Borgwardt  K. M.  Rasch  M. J.  Sch¨olkopf  B.  and Smola  A. A kernel two-sample test.
+
+Journal of Machine Learning Research  13(Mar):723–773  2012.
+
+Gu  S.  Lillicrap  T. P.  Sutskever  I.  and Levine  S. Continuous deep Q-learning with model-based
+acceleration. In Proceedings of the Thirty-third International Conference on Machine Learning 
+pp. 2829–2838  2016.
+
+Hoffman  M. W.  Lazaric  A.  Ghavamzadeh  M.  and Munos  R. Regularized least squares temporal
+difference learning with nested ℓ2 and ℓ1 penalization. In Recent Advances in Reinforcement
+Learning. EWRL 2011  volume 7188 of Lecture Notes in Computer Science  pp. 102–114  2011.
+
+Kumar  P. and Varaiya  P. Stochastic Systems: Estimation  Identiﬁcation  and Adaptive Control.
+
+Prentice Hall  1986.
+
+Lazaric  A.  Ghavamzadeh  M.  and Munos  R. Finite-sample analysis of least-squares policy iteration.
+
+Journal of Machine Learning Research  pp. 3041–3074  2012.
+
+Liu  B.  Liu  J.  Ghavamzadeh  M.  Mahadevan  S.  and Petrik  M. Finite-sample analysis of proximal
+gradient TD algorithms. In Proceedings of the Thirty-First Conference on Uncertainty in Artiﬁcial
+Intelligence  pp. 504–513  2015.
+
+Liu  Q.  Lee  J.  and Jordan  M. A kernelized Stein discrepancy for goodness-of-ﬁt tests.
+
+In
+
+International Conference on Machine Learning  pp. 276–284  2016.
+
+Macua  S. V.  Chen  J.  Zazo  S.  and Sayed  A. H. Distributed policy evaluation under multiple
+
+behavior strategies. IEEE Transactions on Automatic Control  60(5):1260–1274  2015.
+
+Maei  H. R. Gradient Temporal-Difference Learning Algorithms. PhD thesis  University of Alberta 
+
+Edmonton  Alberta  Canada  2011.
+
+Maei  H. R.  Szepesv´ari  C.  Bhatnagar  S.  Precup  D.  Silver  D.  and Sutton  R. S. Convergent
+temporal-difference learning with arbitrary smooth function approximation. In Advances in Neural
+Information Processing Systems 22  pp. 1204–1212  2009.
+
+Maei  H. R.  Szepesv´ari  C.  Bhatnagar  S.  and Sutton  R. S. Toward off-policy learning control
+with function approximation. In Proceedings of the Twenty-Seventh International Conference on
+Machine Learning  pp. 719–726  2010.
+
+Mnih  V.  Kavukcuoglu  K.  Silver  D.  Rusu  A. A.  Veness  J.  Bellemare  M. G.  Graves  A. 
+Riedmiller  M.  Fidjeland  A. K.  Ostrovski  G.  Petersen  S.  Beattie  C.  Sadik  A.  Antonoglou 
+I.  King  H.  Kumaran  D.  Wierstra  D.  Legg  S.  and Hassabis  D. Human-level control through
+deep reinforcement learning. Nature  518:529–533  2015.
+
+Mnih  V.  Adri`a  Badia  P.  Mirza  M.  Graves  A.  Lillicrap  T. P.  Harley  T.  Silver  D.  and
+Kavukcuoglu  K. Asynchronous methods for deep reinforcement learning. In Proceedings of the
+Thirty-third International Conference on Machine Learning  pp. 1928–1937  2016.
+
+Muandet  K.  Fukumizu  K.  Sriperumbudur  B.  Sch¨olkopf  B.  et al. Kernel mean embedding of
+distributions: A review and beyond. Foundations and Trends R(cid:13) in Machine Learning  10(1-2):
+1–141  2017.
+
+Munos  R. and Szepesv´ari  C. Finite-time bounds for sampling-based ﬁtted value iteration. Journal
+
+of Machine Learning Research  9:815–857  2008.
+
+Nachum  O.  Norouzi  M.  Xu  K.  and Schuurmans  D. Bridging the gap between value and policy
+based reinforcement learning. In Advances in Neural Information Processing Systems 30  pp.
+2772–2782  2017.
+
+Nachum  O.  Norouzi  M.  Xu  K.  and Schuurmans  D. Trust-PCL: An off-policy trust region method
+
+for continuous control. In International Conference on Learning Representations  2018.
+
+Ormoneit  D. and Sen  ´S. Kernel-based reinforcement learning. Machine Learning  49:161–178 
+
+2002.
+
+11
+
+Parr  R.  Li  L.  Taylor  G.  Painter-Wakeﬁeld  C.  and Littman  M. L. An analysis of linear models  lin-
+ear value-function approximation  and feature selection for reinforcement learning. In Proceedings
+of the Twenty-Fifth International Conference on Machine Learning  pp. 752–759  2008.
+
+Puterman  M. L. Markov Decision Processes: Discrete Stochastic Dynamic Programming. Wiley-
+
+Interscience  New York  1994.
+
+Sch¨olkopf  B. and Smola  A. J. Learning with kernels: Support vector machines  regularization 
+
+optimization  and beyond. MIT press  2001.
+
+Schulman  J.  Moritz  P.  Levine  S.  Jordan  M.  and Abbeel  P. High-dimensional continuous
+control using generalized advantage estimation. In Proceedings of the International Conference on
+Learning Representations  2016.
+
+Serﬂing  R. J. Approximation theorems of mathematical statistics  volume 162. John Wiley & Sons 
+
+2009.
+
+Sriperumbudur  B. K.  Gretton  A.  Fukumizu  K.  Sch¨olkopf  B.  and Lanckriet  G. R. Hilbert space
+embeddings and metrics on probability measures. Journal of Machine Learning Research  11(Apr):
+1517–1561  2010.
+
+Stewart  J. Positive deﬁnite functions and generalizations  an historical survey. The Rocky Mountain
+
+Journal of Mathematics  6(3):409–434  1976.
+
+Sutton  R. S. Learning to predict by the methods of temporal differences. Machine Learning  3(1):
+
+9–44  1988.
+
+Sutton  R. S. and Barto  A. G. Reinforcement Learning: An Introduction. Adaptive Computation and
+
+Machine Learning. MIT Press  2nd edition  2018.
+
+Sutton  R. S.  Maei  H.  Precup  D.  Bhatnagar  S.  Szepesv´ari  C.  and Wiewiora  E. Fast gradient-
+descent methods for temporal-difference learning with linear function approximation. In Pro-
+ceedings of the Twenty-Sixth International Conference on Machine Learning  pp. 993–1000 
+2009.
+
+Szepesv´ari  C. Algorithms for Reinforcement Learning. Morgan & Claypool  2010.
+
+Taylor  G. and Parr  R. Kernelized value function approximation for reinforcement learning. In
+Proceedings of the Twenty-Sixth International Conference on Machine Learning  pp. 1017–1024 
+2009.
+
+Tsitsiklis  J. N. and Van Roy  B. An analysis of temporal-difference learning with function approxi-
+
+mation. IEEE Transactions on Automatic Control  42:674–690  1997.
+
+Wang  M. Primal-dual π learning: Sample complexity and sublinear run time for ergodic Markov
+
+decision problems  2017. CoRR abs/1710.06100.
+
+Wang  Z.  Schaul  T.  Hessel  M.  van Hasselt  H.  Lanctot  M.  and de Freitas  N. Dueling network
+architectures for deep reinforcement learning. In Proceedings of the Third International Conference
+on Machine Learning  pp. 1995–2003  2016.
+
+Wu  Y.  Mansimov  E.  Grosse  R. B.  Liao  S.  and Ba  J. Scalable trust-region method for deep rein-
+forcement learning using Kronecker-factored approximation. In Advances in Neural Information
+Processing Systems 30  pp. 5285–5294  2017.
+
+Xu  X.  Xie  T.  Hu  D.  and Lu  X. Kernel least-squares temporal difference learning. International
+
+Journal of Information and Technology  11(9):54–63  2005.
+
+Xu  X.  Hu  D.  and Lu  X. Kernel-based least-squares policy iteration for reinforcement learning.
+
+IEEE Transactions on Neural Networks  18(4):973–992  2007.
+
+12
+
+,Yihao Feng
+Lihong Li
+Qiang Liu

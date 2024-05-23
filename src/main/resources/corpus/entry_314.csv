@@ -1,0 +1,903 @@
+2018,ATOMO: Communication-efficient Learning via Atomic Sparsification,Distributed model training suffers from communication overheads due to frequent gradient updates transmitted between compute nodes. To mitigate these overheads  several studies propose the use of sparsified stochastic gradients. We argue that these are facets of a general sparsification method that can operate on any possible atomic decomposition. Notable examples include element-wise  singular value  and Fourier decompositions. We present ATOMO  a general framework for atomic sparsification of stochastic gradients. Given a gradient  an atomic decomposition  and a sparsity budget  ATOMO gives a random unbiased sparsification of the atoms minimizing variance. We show that recent methods such as QSGD and TernGrad are special cases of ATOMO  and that sparsifiying the singular value decomposition of neural networks gradients  rather than their coordinates  can lead to significantly faster distributed training.,ATOMO: Communication-efﬁcient Learning via
+
+Atomic Sparsiﬁcation
+
+Hongyi Wang1⇤  Scott Sievert2⇤  Zachary Charles2  Shengchao Liu1 
+
+Stephen Wright1  Dimitris Papailiopoulos2
+
+1Department of Computer Sciences 
+
+2Department of Electrical and Computer Engineering
+
+University of Wisconsin-Madison
+
+Abstract
+
+Distributed model training suffers from communication overheads due to frequent
+gradient updates transmitted between compute nodes. To mitigate these overheads 
+several studies propose the use of sparsiﬁed stochastic gradients. We argue that
+these are facets of a general sparsiﬁcation method that can operate on any possible
+atomic decomposition. Notable examples include element-wise  singular value 
+and Fourier decompositions. We present ATOMO  a general framework for atomic
+sparsiﬁcation of stochastic gradients. Given a gradient  an atomic decomposition 
+and a sparsity budget  ATOMO gives a random unbiased sparsiﬁcation of the atoms
+minimizing variance. We show that recent methods such as QSGD and TernGrad
+are special cases of ATOMO and that sparsiﬁying the singular value decomposition
+of neural networks gradients  rather than their coordinates  can lead to signiﬁcantly
+faster distributed training.
+
+1
+
+Introduction
+
+Several machine learning frameworks such as TensorFlow [1]  MXNet [2]  and Caffe2[3]  come with
+distributed implementations of popular training algorithms  such as mini-batch SGD. However  the
+empirical speed-up gains offered by distributed training  often fall short of the optimal linear scaling
+one would hope for. It is now widely acknowledged that communication overheads are the main
+source of this speedup saturation phenomenon [4  5  6  7  8].
+Communication bottlenecks are largely attributed to frequent gradient updates transmitted between
+compute nodes. As the number of parameters in state-of-the-art models scales to hundreds of millions
+[9  10]  the size of gradients scales proportionally. These bottlenecks become even more pronounced
+in the context of federated learning [11  12]  where edge devices (e.g.  mobile phones  sensors  etc)
+perform decentralized training  but suffer from low-bandwidth during up-link.
+To reduce the cost of of communication during distributed model training  a series of recent studies
+propose communicating low-precision or sparsiﬁed versions of the computed gradients during model
+updates. Partially initiated by a 1-bit implementation of SGD by Microsoft in [5]  a large number of
+recent studies revisited the idea of low-precision training as a means to reduce communication [13 
+14  15  16  17  18  19  17  20  21]. Other approaches for low-communication training focus on
+sparsiﬁcation of gradients  either by thresholding small entries or by random sampling [6  22  23  24 
+25  26  27  28]. Several approaches  including QSGD and TernGrad  implicitly combine quantization
+and sparsiﬁcation to maximize performance gains [14  16  12  29  30]  while providing provable
+guarantees for convergence and performance. We note that quantization methods in the context of
+gradient based updates have a rich history  dating back to at least as early as the 1970s [31  32  33].
+
+⇤These authors contributed equally
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+Our Contributions An atomic decomposition represents a vector as a linear combination of simple
+building blocks in an inner product space. In this work  we show that stochastic gradient sparsiﬁcation
+and quantization are facets of a general approach that sparsiﬁes a gradient in any possible atomic
+decomposition  including its entry-wise or singular value decomposition  its Fourier decomposition 
+and more. With this in mind  we develop ATOMO  a general framework for atomic sparsiﬁcation of
+stochastic gradients. ATOMO sets up and optimally solves a meta-optimization that minimizes the
+variance of the sparsiﬁed gradient  subject to the constraints that it is sparse on the atomic basis  and
+also is an unbiased estimator of the input.
+We show that 1-bit QSGD and TernGrad are in fact special cases of
+ATOMO  and each is optimal (in terms of variance and sparsity)  in
+different parameter regimes. Then  we argue that for some neural
+network applications  viewing the gradient as a concatenation of
+matrices (each corresponding to a layer)  and applying atomic spar-
+siﬁcation to their SVD is meaningful and well-motivated by the fact
+that these matrices are approximately low-rank (see Fig. 1). We show
+that ATOMO on the SVD of each layer’s gradient  can lead to less
+variance  and faster training  for the same communication budget
+as that of QSGD or TernGrad. We present extensive experiments
+showing that using ATOMO with SVD sparsiﬁcation can lead to up
+to 2⇥/3⇥ faster training time (including the time to compute the
+SVD) compared to QSGD/TernGrad. This holds using VGG and
+ResNet-18 on SVHN and CIFAR-10.
+Relation to Prior Work ATOMO is closely related to work on
+communication-efﬁcient distributed mean estimation in [29] and
+[30]. These works both note  as we do  that variance (or equivalently
+the mean squared error) controls important quantities such as convergence  and they seek to ﬁnd a
+low-communication vector averaging scheme that minimizes it. Our work differs in two key aspects.
+First  we derive a closed-form solution to the variance minimization problem for all input gradients.
+Second  ATOMO applies to any atomic decomposition  which allows us to compare entry-wise against
+singular value sparsiﬁcation for matrices. Using this  we derive explicit conditions for which SVD
+sparsiﬁcation leads to lower variance for the same sparsity budget.
+The idea of viewing gradient sparsiﬁcation through a meta-optimization lens was also used in [34].
+Our work differs in two key ways. First  [34] consider the problem of minimizing the sparsity of a
+gradient for a ﬁxed variance  while we consider the reverse problem  that is  minimizing the variance
+subject to a sparsity budget. The second more important difference is that while [34] focuses on
+entry-wise sparsiﬁcation  we consider a general problem where we sparsify according to any atomic
+decomposition. For instance  our approach directly applies to sparsifying the singular values of a
+matrix  which gives rise to faster training algorithms.
+Finally  low-rank factorizations and sketches of the gradients when viewed as matrices were proposed
+in [35  36  37  38  12]; arguably most of these methods (with the exception of [12]) aimed to address
+the high ﬂops required when training low-rank models. Though they did not directly aim to reduce
+communication  this arises as a useful side effect.
+
+Figure 1: The singular values
+of a convolutional layer’s gradi-
+ent  for ResNet-18 while training
+on CIFAR-10. The gradient of
+a layer can be seen as a matrix 
+once we vectorize and appropri-
+ately stack the conv-ﬁlters. For
+all presented data passes  there is
+a sharp decay in singular values 
+with the top 3 standing out.
+
+2 Problem Setup
+In machine learning  we often wish to ﬁnd a model w minimizing the empirical risk
+
+f (w) =
+
+1
+n
+
+nXi=1
+
+`(w; xi)
+
+(1)
+
+where xi 2 Rd is the i-th data point. One way to approximately minimize f (w) is by using stochastic
+gradient methods that operate as follows:
+
+an unbiased estimate of the true gradient g(w) = rf (w). Mini-batch SGD  one of the most common
+randomly sampled data from the training set. Mini-batch SGD is easily parallelized in the parameter
+
+where w0 is some initial model   is the stepsize  andbg(w) is a stochastic gradient of f (w)  i.e.it is
+algorithms for distributed training  computesbg as an average of B gradients  each evaluated on
+
+wk+1 = wk  bg(wk)
+
+2
+
+510155DnkV0.20.40.60.86igulDr VDlueVDDtD PDVV: 0DDtD PDVV: 5DDtD PDVV: 10server (PS) setup  where a PS stores the global model  and P compute nodes split the effort of
+computing the B gradients. Once the PS receives these gradients  it applies them to the model  and
+sends it back to the compute nodes.
+
+To prove convergence bounds for stochastic-gradient based methods  we usually requirebg(w) to
+be an unbiased estimator of the full-batch gradient  and to have small variance Ekbg(w)k2  as this
+
+controls the speed of convergence. To see this  suppose w⇤ is a critical point of f  then we have
+
+E[kwk+1  w⇤k2
+
+2] = E[kwk  w⇤k2
+
+.
+
+2] 2hrf (wk)  wk  w⇤i  2E[kbg(wk)k2
+2]
+}
+|
+
+progress at step t
+
+{z
+
+term E[kbg(wk)k]2
+upper bounds on E[kbg(wk)k]2
+
+In particular  the progress made by the algorithm at a single step is  in expectation  controlled by the
+2; the smaller it is  the bigger the progress. This is a well-known fact in optimization 
+and most convergence bounds for stochastic-gradient based methods  including minibatch  involve
+2  in a multiplicative form  for both convex and nonconvex setups
+[39  40  41  42  42  43  44  45  46  47]. Hence  recent results on low-communication variants of SGD
+design unbiased quantized or sparse gradients  and try to minimize their variance [14  29  34].
+Since variance is a proxy for speed of convergence  in the context of communication-efﬁcient
+stochastic gradient methods  one can ask: What is the smallest possible variance of a stochastic
+gradient that is represented with k bits? This can be cast as the following meta-optimization:
+
+min
+
+g Ekbg(w)k2
+s.t. E[bg(w)] = g(w)
+bg(w) can be expressed with k bits
+
+tractable version of the last constraint. In the next section  we replace this with a simpler constraint
+
+Here  the expectation is taken over the randomness ofbg. We are interested in designing a stochastic
+approximationbg that “solves” this optimization. However  it seems difﬁcult to design a formal 
+that instead requires thatbg(w) is sparse with respect to a given atomic decomposition.
+
+3 ATOMO: Atomic Decomposition and Sparsiﬁcation
+Let (V h· ·i) be an inner product space over R and let k·k denote the induced norm on V . In what
+follows  you may think of g as a stochastic gradient of the function we wish to optimize. An atomic
+decomposition of g is any decomposition of the form g =Pa2A aa for some set of atoms A✓ V .
+Intuitively  A consists of simple building blocks. We will assume that for all a 2A   kak = 1  as this
+can be achieved by a positive rescaling of the a.
+An example of an atomic decomposition is the entry-wise decomposition g =Pi giei where {ei}n
+
+i=1
+is the standard basis. More generally  any orthonormal basis of V gives rise to a unique atomic
+decomposition of g. While we focus on ﬁnite dimensional vectors  one could use Fourier and wavelet
+decompositions in this framework. When considering matrices  the singular value decomposition
+gives an atomic decomposition in the set of rank-1 matrices. More general atomic decompositions
+have found uses in a variety of situations  including solving linear inverse problems [48].
+We are interested in ﬁnding an approximation to g with fewer atoms. Our primary motivation is that
+this reduces communication costs  as we only need to send atoms with non-zero weights. We can use
+whichever decomposition is most amenable for sparsiﬁcation. For instance  if X is a low rank matrix 
+then its singular value decomposition is naturally sparse  so we can save communication costs by
+sparsifying its singular value decomposition instead of its entries.
+Suppose A = {ai}n
+
+i=1 iai. We wish to ﬁnd an
+
+i=1 and we have an atomic decomposition g =Pn
+
+unbiased estimatorbg of g that is sparse in these atoms  and with small variance. Sincebg is unbiased 
+minimizing its variance is equivalent to minimizing E[kbgk2]. We use the following estimator:
+
+(2)
+
+ai
+
+where ti ⇠ Bernoulli(pi)  for 0 < pi  1. We refer to this sparsiﬁcation scheme as atomic
+sparsiﬁcation. Note that the ti’s are independent. Recall that we assumed above that kaik2 = 1 for
+
+iti
+pi
+
+nXi=1
+
+bg =
+all ai. We have the following lemma aboutbg.
+Lemma 1. E[bg] = g and E[kbgk2] =Pn
+
+i=1 2
+
+i p1
+
+i +Pi6=j ijhai  aji.
+
+3
+
+Let  = [1  . . .   n]T   p = [p1  . . .   pn]T . In order to ensure that this estimator is sparse  we ﬁx
+
+some sparsity budget s. That is  we requirePi pi = s. This is a sparsity on average constraint. We
+wish to minimize E[kbgk2] subject to this constraint. By Lemma 1  this is equivalent to
+
+s.t. 8i  0 < pi  1 
+
+pi = s.
+
+min
+
+(3)
+
+2
+i
+pi
+
+p
+
+An equivalent form of this problem was presented in [29] (Section 6.1). The authors considered this
+problem for entry-wise sparsiﬁcation and found a closed-form solution for s  kk1/kk1. We
+give a version of their result but extend it to all s. A similar optimization problem was given in [34] 
+which instead minimizes sparsity subject to a variance constraint.
+
+nXi=1
+
+nXi=1
+
+: 2 Rn with |1| . . .|n|; sparsity
+budget s such that 0 < s  n.
+
+Algorithm 1: ATOMO probabilities
+Input
+Output :p 2 Rn solving (3).
+i = 1;
+while i  n do
+if |i|s Pn
+
+for k = i  . . .   n do
+
+j=i |i| then
+
+pk = |k|s⇣Pn
+
+j=i |i|⌘1
+
+;
+
+end
+i = n + 1;
+
+pi = 1  s = s  1;
+i = i + 1;
+
+else
+
+end
+
+end
+
+We will show that Algorithm 1 produces p 2 Rn
+solving (3). While we show in Appendix B that this
+can be derived via the KKT conditions  we focus on
+an alternative method relaxes (3) to better understand
+its structure. This approach also analyzes the variance
+achieved by solving (3) more directly.
+Note that (3) has non-empty feasible set only for
+i /pi. To under-
+stand how to solve (3)  we ﬁrst consider the following
+relaxation:
+
+0 < s  n. Deﬁne f (p) :=Pn
+s.t. 8i  0 < pi 
+following
+the
+
+pi = s.
+
+(4)
+
+nXi=1
+
+nXi=1
+
+lemma
+
+i=1 2
+
+2
+i
+pi
+
+min
+
+p
+
+to
+
+(4) 
+
+ﬁrst
+
+shown
+
+about
+in
+
+have
+solutions
+
+We
+the
+[29].
+
+1
+skk2
+
+1. This is achieved iff pi = |i|s
+Lemma 2 ([29]). Any feasible vector p to (4) satisﬁes f (p) 
+.
+kk1
+Lemma 2 implies that if we ignore the constraint that pi  1  then the optimal p is achieved by setting
+pi = |i|s/kk1. If the quantity in the right-hand side is greater than 1  this does not give us an
+actual probability. This leads to the following deﬁnition.
+Deﬁnition 1. An atomic decomposition g =Pn
+i=1 iai is s-unbalanced at entry i if |i|s > kk1.
+We say that g is s-balanced otherwise. Clearly  an atomic decomposition is s-balanced iff s 
+kk1/kk1. Lemma 2 gives us the optimal way to sparsify s-balanced vectors  since the optimal p
+for (4) is feasible for (3). If g is s-unbalanced at entry j  we cannot assign this pj as it is larger than 1.
+In the following lemma  we show that in pj = 1 is optimal in this setting.
+Lemma 3. Suppose that g is s-unbalanced at entry j and that q is feasible in (3). Then 9p that is
+feasible such that f (p)  f (q) and pj = 1.
+Let (g) =Pi6=j ijhai  aji. Lemmas 2 and 3 imply the following theorem about solutions to (3).
+Theorem 4. If g is s-balanced  then E[kbgk2]  s1kk2
+pi = |i|s/kk1. If g is s-unbalanced  then E[kbgk2] > s1kk2
+pj = 1 where j = argmaxi=1 ... n |i|.
+Due to the sorting requirement in the input  Algorithm 1 requires O(n log n) operations.
+In
+Appendix B we describe a variant that uses only O(sn) operations. Thus  we can solve (3) in
+O(min{n  s} log(n)) operations.
+4 Relation to QSGD and TernGrad
+
+1 + (g) with equality if and only if
+1 + (g) and is minimized by p with
+
+In this section  we will discuss how ATOMO is related to two recent quantization schemes  1-bit
+QSGD [14] and TernGrad [16]. We will show that in certain cases  these schemes are versions of the
+ATOMO for a speciﬁc sparsity budget s. Both schemes use the entry-wise atomic decomposition.
+
+4
+
+QSGD takes as input g 2 Rn and b  1. This b governs the number of quantization buckets. When
+b = 1  QSGD produces a random vector Q(g) deﬁned by
+
+Q(g)i = kgk2 sign(gi)⇣i.
+
+T (g)i = kgk1 sign(gi)⇣i
+
+Here  the ⇣i ⇠ Bernoulli(|gi|/kgk2) are independent random variables. One can show this is
+equivalent to (2) with pi = |gi|/kgk2 and sparsity budget s = kgk1/kgk2. Note that by deﬁnition 
+any g is s-balanced for this s. Therefore  Theorem 4 implies that the optimal way to assign pi with
+this given s is pi = |gi|/kgk2  which agrees with 1-bit QSGD.
+TernGrad takes g 2 Rn and produces a sparsiﬁed version T (g) given by
+where ⇣i ⇠ Bernoulli(|gi|/kgk1). This is equivalent to (2) with pi = |gi|/kgk1 and sparsity budget
+s = kgk1/kgk1. Once again  any g is s-balanced for this s by deﬁnition. Therefore  Theorem
+4 implies that the optimal assignment of the pi for this s is pi = |gi|/kgk1  which agrees with
+TernGrad.
+We can generalize both of these with the following quantization method. Fix q 2 (0 1]. Given
+g 2 Rn  we deﬁne the `q-quantization of g  denoted Lq(g)  by
+Lq(v)i = kgkq sign(gi)⇣i
+where ⇣i ⇠ Bernoulli(|gi|/kgkq). By the reasoning above  we derive the following theorem.
+Theorem 5. `q-quantization performs atomic sparsiﬁcation in the standard basis with pi = |gi|/kgkq.
+This solves (3) for s = kgk1/kgkq and satisﬁes E[kLq(g)k2
+In particular  for q = 2 we get 1-bit QSGD while for q = 1  we get TernGrad.
+
+2] = kgk1kgkq.
+
+5 Spectral-ATOMO: Sparsifying the Singular Value Decomposition
+
+Var.
+
+s
+
+1 1
+
+i=1 iuivT
+
+Decomposition Comm.
+
+Table 1: Communication cost and variance
+of ATOMO for matrices.
+
+For a rank r matrix X  denote its singular value de-
+composition (SVD) by X = Pr
+i . Let  =
+[1  . . .   r]T . We deﬁne the `p q norm of a matrix
+j=1(Pn
+X by kXkp q = (Pm
+i=1 |Xi j|p)q/p)1/q. When
+p = q = 1  we deﬁne this to be kXkmax where
+kXkmax := maxi j |Xi j|.
+Let V be the space of real n ⇥ m matrices. Given X 2 V  
+there are two standard atomic decompositions of X. The
+ﬁrst is the entry-wise decomposition X =Pi j Xi jeieT
+j .
+The second is its SVD X =Pr
+i . If r is small 
+of the matrix. Let bX and bX denote the random variables in (2) corresponding to the entry-wise
+
+decomposition and singular value decomposition of X  respectively. We wish to compare these two
+sparsiﬁcations.
+In Table 1  we compare the communication cost and variance of these two methods. The communica-
+tion cost is the expected number of non-zero elements (real numbers) that need to be communicated.
+
+it may be more efﬁcient to communicate the r(n + m) entries of the SVD  rather than the nm entries
+
+1
+skXk2
+1
+skXk2
+⇤
+
+i=1 iuivT
+
+Entry-wise
+
+SVD
+
+s(n + m)
+
+For bX  a sparsity budget of s corresponds to s non-zero entries we need to communicate. For bX  a
+sparsity budget of s gives a communication cost of s(n + m) due to the singular vectors. We compare
+the optimal variance from Theorem 4.
+To compare the variance of these two methods under the same communication cost  we want X to be
+s-balanced in its entry-wise decomposition. This holds iff s  kXk1 1/kXkmax. By Theorem 4  this
+gives E[kbXk2
+1 1. To achieve the same communication cost with bX  we take a sparsity
+budget of s0 = s/(n + m). The SVD of X is s0-balanced iff s0  kXk⇤/kXk2. By Theorem 4 
+E[kbXk2
+Theorem 6. Suppose X 2 Rn⇥m and
+s  min⇢ kXk1 1
+
+. This leads to the following theorem.
+
+F ] = (n + m)s1kXk2
+⇤
+
+F ] = s1kXk2
+
+  (n + m)kXk⇤
+
+kXk2 .
+
+kXkmax
+5
+
+Then bX with sparsity s0 = s/(n + m) incurs the same communication cost as bX with sparsity s 
+and E[kbXk2]  E[kbXk2] if and only if (n + m)kXk2
+To better understand this condition  we will make use of the following well-known fact.
+Lemma 7. For any n ⇥ m matrix X over R 
+For expository purposes  we give a proof of this Appendix C and show that these bounds are the best
+possible. As a result  if the ﬁrst inequality is tight  then E[kbXk2]  E[kbXk2]  while if the second is
+tight then E[kbXk2]  E[kbXk2]. As we show in the next section  using singular value sparsiﬁcation
+
+can translate in to signiﬁcantly reduced distributed training time.
+6 Experiments
+
+1 1.
+⇤  kXk2
+
+1pnmkXk1 1  kXk⇤  kXk1 1.
+
+We present an empirical study of Spectral-ATOMO and compare it to the recently proposed QSGD
+[14]  and TernGrad [16]  on a different neural network models and data sets  under real distributed
+environments. Our main ﬁndings are as follows:
+• We observe that spectral-ATOMO provides a useful alternative to entry-wise sparsiﬁcation methods 
+it reduces communication compared to vanilla mini-batch SGD  and can reduce training time
+compared to QSGD and TernGrad by up to a factor of 2⇥ and 3⇥ respectively. For instance 
+on VGG11-BN trained on CIFAR-10  spectral-ATOMO with sparsity budget 3 achieves 3.96⇥
+speedup over vanilla SGD  while 4-bit QSGD achieves 1.68⇥ on a cluster of 16  g2.2xlarge
+instances. Both ATOMO and QSGD greatly outperform TernGrad as well.
+• We observe that spectral-ATOMO in distributed settings leads to models with negligible accuracy
+
+loss when combined with parameter tuning.
+
+Implementation and setup We compare spectral-ATOMO2 with different sparsity budgets to b-
+bit QSGD across a distributed cluster with a parameter server (PS)  implemented in mpi4py [49]
+and PyTorch [50] and deployed on multiple types of instances in Amazon EC2 (e.g.m5.4xlarge 
+m5.2xlarge  and g2.2xlarge)  both PS and compute nodes are of the same type of instance. The PS
+implementation is standard  with a few important modiﬁcations. At the most basic level  it receives
+gradients from the compute nodes and broadcasts the updated model once a batch has been received.
+In our experiments  we use data augmentation (random crops  and ﬂips)  and tuned the step-size for
+every different setup as shown in Table 5 in Appendix D. Momentum and regularization terms are
+switched off to make the hyperparamter search tractable and the results more legible. Tuning the
+step sizes for this distributed network for three different datasets and eight different coding schemes
+can be computationally intensive. As such  we only used small networks so that multiple networks
+could ﬁt into GPU memory. To emulate the effect of larger networks  we use synchronous message
+communication  instead of asynchronous.
+Each compute node evaluates gradients sampled from its partition of data. Gradients are then
+sparsiﬁed through QSGD or spectral-ATOMO  and then are sent back to the PS. Note that spectral-
+ATOMO transmits the weighted singular vectors sampled from the true gradient of a layer. The PS then
+combines these  and updates the model with the average gradient. Our entire experimental pipeline
+is implemented in PyTorch [50] with mpi4py [49]  and deployed on either g2.2xlarge  m5.2xlarge
+and m5.4xlarge instances in Amazon AWS EC2. We conducted our experiments on various models 
+datasets  learning tasks  and neural network models as detailed in Table 2.
+
+Dataset
+
+# Data points
+
+Model
+# Classes
+
+CIFAR-10
+
+60 000
+
+CIFAR-100
+
+60 000
+
+ResNet-18 / VGG-11-BN
+
+ResNet-18
+
+10
+
+100
+
+SVHN
+600 000
+ResNet-18
+
+10
+
+# Parameters
+
+11 173k / 9 756k
+
+11 173k
+
+11 173k
+
+Table 2: The datasets used and their associated learning models and hyper-parameters.
+
+2code available at: https://github.com/hwang595/ATOMO
+
+6
+
+Figure 2: The timing of the gradient coding methods (QSGD and spectral-ATOMO) for different quantization
+levels  b bits and s sparsity budget respectively for each worker when using a ResNet-34 model on CIFAR10.
+For brevity  we use SVD to denote spectral-ATOMO. The bars represent the total iteration time and are divided
+into computation time (bottom  solid)  encoding time (middle  dotted) and communication time (top  faded).
+
+Scalability We study the scalability of these sparsiﬁcation methods on clusters of different sizes.
+We used clusters with one PS and n = 2  4  8  16 compute nodes. We ran ResNet-34 on CIFAR-10
+using mini-batch SGD with batch size 512 split among compute nodes. The experiment was run on
+m5.4xlarge instances of AWS EC2 and the results are shown in Figure 2.
+While increasing the size of the cluster  decreases the computational cost per worker  it causes the
+communication overhead to grow. We denote as computational cost  the time cost required by each
+worker for gradient computations  while the communication overhead is represented by the amount
+time the PS waits to receive the gradients by the slowest worker. This increase in communication
+cost is non-negligible  even for moderately-sized networks with sparsiﬁed gradients. We observed a
+trade-off in both sparsiﬁcation approaches between the information retained in the messages after
+sparsiﬁcation and the communication overhead.
+End-to-end convergence performance We evaluate the end-to-end convergence performance on
+different datasets and neural networks  training with spectral-ATOMO(with sparsity budget s =
+1  2  3  4)  QSGD (with n = 1  2  4  8 bits)  and ordinary mini-batch SGD. The datasets and models
+are summarized in Table 2. We use ResNet-18 [9] and VGG11-BN [51] for CIFAR-10 [52] and
+SVHN [53]. Again  for each of these methods we tune the step size. The experiments were run on a
+cluster of 16 compute nodes instantiated on g2.2xlarge instances.
+The gradients of convolutional layers are 4 dimensional tensors with shape of [x  y  k  k] where x  y
+are two spatial dimensions and k is the size of the convolutional kernel. However  matrices are
+required to compute the SVD for spectral-ATOMO  and we choose to reshape each layer into a matrix
+of size [xy/2  2k2]. This provides more ﬂexibility on the sparsity budget for the SVD sparsiﬁcation.
+For QSGD  we use the bucketing and Elias recursive coding methods proposed in [14]  with bucket
+size equal to the number of parameters in each layer of the neural network.
+
+(a) CIFAR-10  ResNet-18 
+Best of QSGD and SVD
+
+(b) SVHN 
+Best of QSGD and SVD
+
+ResNet-18 
+
+(c) CIFAR-10  VGG11 
+Best of QSGD and SVD
+
+Figure 3: Convergence rates for the best performance of QSGD and spectral-ATOMO  alongside TernGrad and
+vanilla SGD. (a) uses ResNet-18 on CIFAR-10  (b) uses ResNet-18 on SVHN  and (c) uses VGG-11-BN on
+CIFAR-10. For brevity  we use SVD to denote spectral-ATOMO.
+
+7
+
+248161umber of WorNerV05101520Time Ser iWerDWioQ (Vec)6VD V 16VD V 26VD V 36VD V 446GD b 146GD b 246GD b 446GD b 801020WDOOcORck Time (hrV)406080TeVW VeW AccTeVW AccurDcy vV RuQWimeBeVW Rf AT202BeVW Rf 46GDTerQGrDGVDQiOOD 6GD05101520WDOOcORck Time (hrV)20406080TeVW VeW AccTeVW AccurDcy vV 5uQWimeBeVW Rf AT202BeVW Rf 46GDTerQGrDGVDQiOOD 6GD01020WDOOcORck Time (hrV)20406080TeVW VeW AccTeVW AccurDcy vV RuQWimeBeVW Rf AT202BeVW Rf 46GDTerQGrDGVDQiOOD 6GDFigure 3 shows how the testing accuracy varies with wall clock time. Tables 3 and 4 give a detailed
+account of speedups of singular value sparsiﬁcation compared to QSGD. In these tables  each method
+is run until a speciﬁed accuracy.
+
+Table 3: Speedups of spectral-ATOMO with sparsity budget s  b-bit QSGD  and TernGrad using ResNet-18 on
+CIFAR10 over vanilla SGD. N/A stands for the method fails to reach a certain Test accuracy in ﬁxed iterations.
+
+Table 4: Speedups of spectral-ATOMO with sparsity budget s and b-bit QSGD  and TernGrad using ResNet-18
+on SVNH over vanilla SGD. N/A stands for the method fails to reach a certain Test accuracy in ﬁxed iterations.
+
+We observe that QSGD and ATOMO speed up model training signiﬁcantly and achieve similar
+accuracy to vanilla mini-batch SGD. We also observe that the best performance is not achieve with
+the most sparsiﬁed  or quantized method  but the optimal method lies somewhere in the middle
+where enough information is preserved during the sparsiﬁcation. For instance  8-bit QSGD converges
+faster than 4-bit QSGD  and spectral-ATOMO with sparsity budget 3  or 4 seems to be the fastest.
+Higher sparsity can lead to a faster running time  but extreme sparsiﬁcation can adversely affect
+convergence. For example  for a ﬁxed number of iterations  1-bit QSGD has the smallest time cost 
+but may converge much more slowly to an accurate model.
+
+7 Conclusion
+
+In this paper  we present and analyze ATOMO  a general sparsiﬁcation method for distributed stochastic
+gradient based methods. ATOMO applies to any atomic decomposition  including the entry-wise and
+the SVD of a matrix. ATOMO generalizes 1-bit QSGD and TernGrad  and provably minimizes the
+variance of the sparsiﬁed gradient subject to a sparsity constraint on the atomic decomposition. We
+focus on the use ATOMO for sparsifying matrices  especially the gradients in neural network training.
+We show that applying ATOMO to the singular values of these matrices can lead to faster training than
+both vanilla SGD or QSGD  for the same communication budget. We present extensive experiments
+showing that ATOMO can lead to up to a 2⇥ speed-up in training time over QSGD and up to 3⇥
+speed-up in training time over TernGrad.
+In the future  we plan to explore the use of ATOMO with Fourier decompositions  due to its utility
+and prevalence in signal processing. More generally  we wish to investigate which atomic sets lead to
+reduced communication costs. We also plan to examine how we can sparsify and compress gradients
+in a joint fashion to further reduce communication costs. Finally  when sparsifying the SVD of a
+matrix  we only sparsify the singular values. We also note that it would be interesting to explore
+jointly sparsiﬁcation of the SVD and and its singular vectors  which we leave for future work.
+
+8
+
+69DV 169DV 246GDb 146GDb 27erQGrDG0ethoG 60% 63% 65% 68%7eVt DccurDcy3.06x3.51x2.19x2.31x1.45x3.67x3.6x1.88x2.22x1.65x3.01x3.6x1.46x2.21x2.19x2.36x2.78x1.15x2.01x1.77x69DV 369DV 446GDb 446GDb 87erQGrDG0ethoG 65% 71% 75% 78%7eVt DccurDcy2.63x1.84x2.62x1.79x2.19x2.81x2.04x1.81x2.62x1.22x2.01x1.79x1.41x1.78x1.18x1.81x1.8x1.67x1.73x1/A69DV 369DV 446GDb 446GDb 87erQGrDGMethoG 75% 78% 82% 84%7eVt DccurDcy3.55x2.75x3.22x2.36x1.33x2.84x2.75x2.68x1.89x1.23x2.95x2.28x2.23x2.35x1.18x3.11x2.39x2.34x2.35x1.34x69DV 369DV 446GDb 446GDb 87erQGrDG0ethoG 85% 86% 88% 89%7eVt DccurDcy3.15x2.43x2.67x2.35x1.21x2.58x2.19x2.29x2.1x1/A2.58x2.19x1.69x2.09x1/A2.72x2.27x2.11x2.14x1/AReferences
+[1] Martín Abadi  Paul Barham  Jianmin Chen  Zhifeng Chen  Andy Davis  Jeffrey Dean  Matthieu
+Devin  Sanjay Ghemawat  Geoffrey Irving  Michael Isard  et al. TensorFlow: A system for
+large-scale machine learning. In OSDI  volume 16  pages 265–283  2016.
+
+[2] Tianqi Chen  Mu Li  Yutian Li  Min Lin  Naiyan Wang  Minjie Wang  Tianjun Xiao  Bing Xu 
+Chiyuan Zhang  and Zheng Zhang. Mxnet: A ﬂexible and efﬁcient machine learning library for
+heterogeneous distributed systems. arXiv preprint arXiv:1512.01274  2015.
+
+[3] Yangqing Jia  Evan Shelhamer  Jeff Donahue  Sergey Karayev  Jonathan Long  Ross Girshick 
+Sergio Guadarrama  and Trevor Darrell. Caffe: Convolutional architecture for fast feature
+embedding. arXiv preprint arXiv:1408.5093  2014.
+
+[4] Jeffrey Dean  Greg Corrado  Rajat Monga  Kai Chen  Matthieu Devin  Mark Mao  Andrew
+Senior  Paul Tucker  Ke Yang  Quoc V Le  et al. Large scale distributed deep networks. In
+Advances in neural information processing systems  pages 1223–1231  2012.
+
+[5] Frank Seide  Hao Fu  Jasha Droppo  Gang Li  and Dong Yu. 1-bit stochastic gradient descent
+and its application to data-parallel distributed training of speech dnns. In Fifteenth Annual
+Conference of the International Speech Communication Association  2014.
+
+[6] Nikko Strom. Scalable distributed DNN training using commodity gpu cloud computing. In
+Sixteenth Annual Conference of the International Speech Communication Association  2015.
+
+[7] Hang Qi  Evan R. Sparks  and Ameet Talwalkar. Paleo: A performance model for deep neural
+networks. In Proceedings of the International Conference on Learning Representations  2017.
+
+[8] Demjan Grubic  Leo Tam  Dan Alistarh  and Ce Zhang. Synchronous multi-GPU deep learning
+
+with low-precision communication: An experimental study. 2018.
+
+[9] Kaiming He  Xiangyu Zhang  Shaoqing Ren  and Jian Sun. Deep residual learning for image
+recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition 
+pages 770–778  2016.
+
+[10] Gao Huang  Zhuang Liu  Kilian Q Weinberger  and Laurens van der Maaten. Densely connected
+convolutional networks. In Proceedings of the IEEE conference on computer vision and pattern
+recognition  volume 1  page 3  2017.
+
+[11] H Brendan McMahan  Eider Moore  Daniel Ramage  Seth Hampson  et al. Communication-
+efﬁcient learning of deep networks from decentralized data. arXiv preprint arXiv:1602.05629 
+2016.
+
+[12] Jakub Koneˇcn`y  H Brendan McMahan  Felix X Yu  Peter Richtárik  Ananda Theertha Suresh 
+and Dave Bacon. Federated learning: Strategies for improving communication efﬁciency. arXiv
+preprint arXiv:1610.05492  2016.
+
+[13] Christopher M De Sa  Ce Zhang  Kunle Olukotun  and Christopher Ré. Taming the wild: A
+uniﬁed analysis of hogwild-style algorithms. In Advances in neural information processing
+systems  pages 2674–2682  2015.
+
+[14] Dan Alistarh  Demjan Grubic  Jerry Li  Ryota Tomioka  and Milan Vojnovic. Qsgd:
+Communication-efﬁcient SGD via gradient quantization and encoding. In Advances in Neural
+Information Processing Systems  pages 1707–1718  2017.
+
+[15] Shuchang Zhou  Yuxin Wu  Zekun Ni  Xinyu Zhou  He Wen  and Yuheng Zou. DoReFa-Net:
+training low bitwidth convolutional neural networks with low bitwidth gradients. arXiv preprint
+arXiv:1606.06160  2016.
+
+[16] Wei Wen  Cong Xu  Feng Yan  Chunpeng Wu  Yandan Wang  Yiran Chen  and Hai Li. Terngrad:
+Ternary gradients to reduce communication in distributed deep learning. In Advances in Neural
+Information Processing Systems  pages 1508–1518  2017.
+
+9
+
+[17] Christopher De Sa  Matthew Feldman  Christopher Ré  and Kunle Olukotun. Understanding
+and optimizing asynchronous low-precision stochastic gradient descent. In Proceedings of the
+44th Annual International Symposium on Computer Architecture  pages 561–574. ACM  2017.
+
+[18] Hantian Zhang  Jerry Li  Kaan Kara  Dan Alistarh  Ji Liu  and Ce Zhang. Zipml: Training
+linear models with end-to-end low precision  and a little bit of deep learning. In International
+Conference on Machine Learning  pages 4035–4043  2017.
+
+[19] Mohammad Rastegari  Vicente Ordonez  Joseph Redmon  and Ali Farhadi. Xnor-net: Imagenet
+classiﬁcation using binary convolutional neural networks. In European Conference on Computer
+Vision  pages 525–542. Springer  2016.
+
+[20] Christopher De Sa  Megan Leszczynski  Jian Zhang  Alana Marzoev  Christopher R Aberger 
+Kunle Olukotun  and Christopher Ré. High-accuracy low-precision training. arXiv preprint
+arXiv:1803.03383  2018.
+
+[21] Jeremy Bernstein  Yu-Xiang Wang  Kamyar Azizzadenesheli  and Anima Anandkumar.
+signSGD: compressed optimisation for non-convex problems. arXiv preprint arXiv:1802.04434 
+2018.
+
+[22] Horia Mania  Xinghao Pan  Dimitris Papailiopoulos  Benjamin Recht  Kannan Ramchandran 
+and Michael I Jordan. Perturbed iterate analysis for asynchronous stochastic optimization.
+arXiv preprint arXiv:1507.06970  2015.
+
+[23] Rémi Leblond  Fabian Pedregosa  and Simon Lacoste-Julien. ASAGA: asynchronous parallel
+
+SAGA. arXiv preprint arXiv:1606.04809  2016.
+
+[24] Alham Fikri Aji and Kenneth Heaﬁeld. Sparse communication for distributed gradient descent.
+
+arXiv preprint arXiv:1704.05021  2017.
+
+[25] Yujun Lin  Song Han  Huizi Mao  Yu Wang  and William J Dally. Deep gradient com-
+pression: Reducing the communication bandwidth for distributed training. arXiv preprint
+arXiv:1712.01887  2017.
+
+[26] Chia-Yu Chen  Jungwook Choi  Daniel Brand  Ankur Agrawal  Wei Zhang  and Kailash
+Gopalakrishnan. Adacomp: Adaptive residual gradient compression for data-parallel distributed
+training. arXiv preprint arXiv:1712.02679  2017.
+
+[27] Cèdric Renggli  Dan Alistarh  and Torsten Hoeﬂer. SparCML: high-performance sparse
+
+communication for machine learning. arXiv preprint arXiv:1802.08021  2018.
+
+[28] Yusuke Tsuzuku  Hiroto Imachi  and Takuya Akiba. Variance-based gradient compression for
+
+efﬁcient distributed deep learning. arXiv preprint arXiv:1802.06058  2018.
+
+[29] Jakub Koneˇcn`y and Peter Richtárik. Randomized distributed mean estimation: Accuracy vs
+
+communication. arXiv preprint arXiv:1611.07555  2016.
+
+[30] Ananda Theertha Suresh  Felix X Yu  Sanjiv Kumar  and H Brendan McMahan. Distributed
+
+mean estimation with limited communication. arXiv preprint arXiv:1611.00429  2016.
+
+[31] R Gitlin  J Mazo  and M Taylor. On the design of gradient algorithms for digitally implemented
+
+adaptive ﬁlters. IEEE Transactions on Circuit Theory  20(2):125–136  1973.
+
+[32] S Alexander. Transient weight misadjustment properties for the ﬁnite precision LMS algorithm.
+
+IEEE Transactions on Acoustics  Speech  and Signal Processing  35(9):1250–1258  1987.
+
+[33] José Carlos M Bermudez and Neil J Bershad. A nonlinear analytical model for the quan-
+tized LMS algorithm-the arbitrary step size case. IEEE Transactions on Signal Processing 
+44(5):1175–1183  1996.
+
+10
+
+[34] Jianqiao Wangni  Jialei Wang  Ji Liu  and Tong Zhang. Gradient sparsiﬁcation for
+
+communication-efﬁcient distributed optimization. arXiv preprint arXiv:1710.09854  2017.
+
+[35] Jian Xue  Jinyu Li  and Yifan Gong. Restructuring of deep neural network acoustic models
+
+with singular value decomposition. In Interspeech  pages 2365–2369  2013.
+
+[36] Tara N Sainath  Brian Kingsbury  Vikas Sindhwani  Ebru Arisoy  and Bhuvana Ramabhadran.
+Low-rank matrix factorization for deep neural network training with high-dimensional output
+targets.
+In Acoustics  Speech and Signal Processing (ICASSP)  2013 IEEE International
+Conference on  pages 6655–6659. IEEE  2013.
+
+[37] Max Jaderberg  Andrea Vedaldi  and Andrew Zisserman. Speeding up convolutional neural
+
+networks with low rank expansions. arXiv preprint arXiv:1405.3866  2014.
+
+[38] Simon Wiesler  Alexander Richard  Ralf Schluter  and Hermann Ney. Mean-normalized
+stochastic gradient for large-scale deep learning. In Acoustics  Speech and Signal Processing
+(ICASSP)  2014 IEEE International Conference on  pages 180–184. IEEE  2014.
+
+[39] Andrew Cotter  Ohad Shamir  Nati Srebro  and Karthik Sridharan. Better mini-batch algorithms
+via accelerated gradient methods. In Advances in neural information processing systems  pages
+1647–1655  2011.
+
+[40] Saeed Ghadimi and Guanghui Lan. Stochastic ﬁrst-and zeroth-order methods for nonconvex
+
+stochastic programming. SIAM Journal on Optimization  23(4):2341–2368  2013.
+
+[41] Benjamin Recht  Christopher Re  Stephen Wright  and Feng Niu. Hogwild: A lock-free
+In Advances in neural information
+
+approach to parallelizing stochastic gradient descent.
+processing systems  pages 693–701  2011.
+
+[42] Sébastien Bubeck et al. Convex optimization: Algorithms and complexity. Foundations and
+
+Trends R in Machine Learning  8(3-4):231–357  2015.
+
+[43] Christopher De Sa  Christopher Re  and Kunle Olukotun. Global convergence of stochastic
+gradient descent for some non-convex matrix problems. In International Conference on Machine
+Learning  pages 2332–2341  2015.
+
+[44] Sashank J Reddi  Ahmed Hefny  Suvrit Sra  Barnabas Poczos  and Alex Smola. Stochastic
+variance reduction for nonconvex optimization. In International conference on machine learning 
+pages 314–323  2016.
+
+[45] Hamed Karimi  Julie Nutini  and Mark Schmidt. Linear convergence of gradient and proximal-
+gradient methods under the Polyak-łojasiewicz condition. In Joint European Conference on
+Machine Learning and Knowledge Discovery in Databases  pages 795–811. Springer  2016.
+
+[46] Soham De  Abhay Yadav  David Jacobs  and Tom Goldstein. Big Batch SGD: Automated
+
+inference using adaptive batch sizes. arXiv preprint arXiv:1610.05792  2016.
+
+[47] Dong Yin  Ashwin Pananjady  Max Lam  Dimitris Papailiopoulos  Kannan Ramchandran 
+and Peter Bartlett. Gradient diversity: a key ingredient for scalable distributed learning. In
+International Conference on Artiﬁcial Intelligence and Statistics  pages 1998–2007  2018.
+
+[48] Venkat Chandrasekaran  Benjamin Recht  Pablo A Parrilo  and Alan S Willsky. The convex
+geometry of linear inverse problems. Foundations of Computational mathematics  12(6):805–
+849  2012.
+
+[49] Lisandro D Dalcin  Rodrigo R Paz  Pablo A Kler  and Alejandro Cosimo. Parallel distributed
+
+computing using python. Advances in Water Resources  34(9):1124–1139  2011.
+
+[50] Adam Paszke  Sam Gross  Soumith Chintala  Gregory Chanan  Edward Yang  Zachary DeVito 
+Zeming Lin  Alban Desmaison  Luca Antiga  and Adam Lerer. Automatic differentiation in
+PyTorch. 2017.
+
+11
+
+[51] Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale
+
+image recognition. arXiv preprint arXiv:1409.1556  2014.
+
+[52] Alex Krizhevsky and Geoffrey Hinton. Learning multiple layers of features from tiny images.
+
+2009.
+
+[53] Yuval Netzer  Tao Wang  Adam Coates  Alessandro Bissacco  Bo Wu  and Andrew Y Ng.
+Reading digits in natural images with unsupervised feature learning. In NIPS workshop on deep
+learning and unsupervised feature learning  volume 2011  page 5  2011.
+
+12
+
+,Hongyi Wang
+Scott Sievert
+Shengchao Liu
+Zachary Charles
+Dimitris Papailiopoulos
+Stephen Wright

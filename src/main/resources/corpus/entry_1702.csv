@@ -1,0 +1,699 @@
+2015,Efficient Exact Gradient Update for training Deep Networks with Very Large Sparse Targets,An important class of problems involves training deep neural networks with sparse prediction targets of very high dimension D. These occur naturally in e.g. neural language models or the learning of word-embeddings  often posed as predicting the probability of next words among a vocabulary of size D (e.g. 200 000). Computing the equally large  but typically non-sparse D-dimensional output vector from a last hidden layer of reasonable dimension d (e.g. 500) incurs a prohibitive $O(Dd)$ computational cost for each example  as does updating the $D \times d$ output weight matrix and computing the gradient needed for backpropagation to previous layers. While efficient handling of large sparse network inputs is trivial  this case of large sparse targets is not  and has thus so far been sidestepped with approximate alternatives such as hierarchical softmax or sampling-based approximations during training. In this work we develop an original algorithmic approach that  for a family of loss functions that includes squared error and spherical softmax  can compute the exact loss  gradient update for the output weights  and gradient for backpropagation  all in $O(d^2)$  per example instead of $O(Dd)$  remarkably without ever computing the D-dimensional output. The proposed algorithm yields a speedup of $\frac{D}{4d}$  i.e. two orders of magnitude for typical sizes  for that critical part of the computations that often dominates the training time in this kind of network architecture.,Efﬁcient Exact Gradient Update for training Deep
+
+Networks with Very Large Sparse Targets
+
+Pascal Vincent∗  Alexandre de Brébisson  Xavier Bouthillier
+Département d’Informatique et de Recherche Opérationnelle
+
+Université de Montréal  Montréal  Québec  CANADA
+
+∗ and CIFAR
+
+Abstract
+
+An important class of problems involves training deep neural networks with sparse
+prediction targets of very high dimension D. These occur naturally in e.g. neural
+language models or the learning of word-embeddings  often posed as predicting
+the probability of next words among a vocabulary of size D (e.g. 200 000). Com-
+puting the equally large  but typically non-sparse D-dimensional output vector
+from a last hidden layer of reasonable dimension d (e.g. 500) incurs a prohibitive
+O(Dd) computational cost for each example  as does updating the D × d output
+weight matrix and computing the gradient needed for backpropagation to previous
+layers. While efﬁcient handling of large sparse network inputs is trivial  the case
+of large sparse targets is not  and has thus so far been sidestepped with approxi-
+mate alternatives such as hierarchical softmax or sampling-based approximations
+during training. In this work we develop an original algorithmic approach which 
+for a family of loss functions that includes squared error and spherical softmax 
+can compute the exact loss  gradient update for the output weights  and gradi-
+ent for backpropagation  all in O(d2) per example instead of O(Dd)  remarkably
+without ever computing the D-dimensional output. The proposed algorithm yields
+a speedup of D
+4d  i.e. two orders of magnitude for typical sizes  for that critical part
+of the computations that often dominates the training time in this kind of network
+architecture.
+
+1
+
+Introduction
+
+Many modern applications of neural networks have to deal with data represented  or representable 
+as very large sparse vectors. Such representations arise in natural language related tasks  where
+the dimension D of that vector is typically (a multiple of) the size of the vocabulary  and also in
+the sparse user-item matrices of collaborative-ﬁltering applications. It is trivial to handle very large
+sparse inputs to a neural network in a computationally efﬁcient manner: the forward propagation
+and update to the input weight matrix after backpropagation are correspondingly sparse. By con-
+trast  training with very large sparse prediction targets is problematic: even if the target is sparse  the
+computation of the equally large network output and the corresponding gradient update to the huge
+output weight matrix are not sparse and thus computationally prohibitive. This has been a practical
+problem ever since Bengio et al. [1] ﬁrst proposed using a neural network for learning a language
+model  in which case the computed output vector represents the probability of the next word and
+is the size of the considered vocabulary  which is becoming increasingly large in modern applica-
+tions [2]. Several approaches have been proposed to attempt to address this difﬁculty essentially by
+sidestepping it. They fall in two categories:
+• Sampling or selection based approximations consider and compute only a tiny fraction of the
+output’s dimensions sampled at random or heuristically chosen. The reconstruction sampling of
+Dauphin et al. [3]  the efﬁcient use of biased importance sampling in Jean et al. [4]  the use of
+
+1
+
+Noise Contrastive Estimation [5] in Mnih and Kavukcuoglu [6] and Mikolov et al. [7] all fall
+under this category. As does the more recent use of approximate Maximum Inner Product Search
+based on Locality Sensitive Hashing techniques[8  9] to select a good candidate subset.
+
+computation of the normalized probability of the target class.
+
+• Hierarchical softmax [10  7] imposes a heuristically deﬁned hierarchical tree structure for the
+Compared to the initial problem of considering all D output dimensions  both kinds of approaches
+are crude approximations. In the present work  we will instead investigate a way to actually perform
+the exact gradient update that corresponds to considering all D outputs  but do so implicitly  in a
+computationally efﬁcient manner  without actually computing the D outputs. This approach works
+for a relatively restricted class of loss functions  the simplest of which is linear output with squared
+error (a natural choice for sparse real-valued regression targets). The most common choice for
+multiclass classiﬁcation  the softmax loss is not part of that family  but we may use an alternative
+spherical softmax  which will also yield normalized class probabilities. For simplicity and clarity 
+our presentation will focus on squared error and on an online setting. We will brieﬂy discuss its
+extension to minibatches and to the class of possible loss functions in sections 3.5 and 3.6.
+
+2 The problem
+
+2.1 Problem deﬁnition and setup
+
+We are concerned with gradient-descent based training of a deep feed-forward neural network with
+target vectors of very high dimension D (e.g. D = 200 000) but that are sparse  i.e. a comparatively
+small number  at most K (cid:28) D  of the elements of the target vector are non-zero. Such a K-
+sparse vector will typically be stored and represented compactly as 2K numbers corresponding
+to pairs (index  value). A network to be trained with such targets will naturally have an equally
+large output layer of dimension D. We can also optionally allow the input to the network to be a
+similarly high dimensional sparse vector of dimension Din. Between the large sparse target  output 
+and (optionally large sparse) input  we suppose the network’s intermediate hidden layers to be of
+smaller  more typically manageable  dimension d (cid:28) D (e.g. d = 500)1.
+Mathematical notation: Vectors are denoted using lower-case letters  e.g. h  and are considered
+column-vectors; corresponding row vectors are denoted with a transpose  e.g. hT . Matrices are
+denoted using upper-case letters  e.g. W   with W T the transpose of W . The ith column of W is
+
+denoted Wi   and its ith row W:i (both viewed as a column vector). U−T =(cid:0)U−1(cid:1)T denotes the
+transpose of the inverse of a square matrix. Id is the d × d identity matrix.
+Network architecture: We consider a standard feed forward neural network architecture as de-
+picted in Figure 1. An input vector x ∈ RDin is linearly transformed into a linear activation
+a(1) = W (1)T x + b(1) through a Din × d input weight matrix W (1) (and an optional bias vector
+b(1) ∈ Rd). This is typically followed by a non-linear transformation s to yield the representation of
+the ﬁrst hidden layer h(1) = s(a(1)). This ﬁrst hidden layer representation is then similarly trans-
+formed through a number of subsequent non-linear layers (that can be of any usual kind amenable to
+backpropagation) e.g. h(k) = s(a(k)) with a(k) = W (k)T h(k−1) + b(k) until we obtain last hidden
+layer representation h = h(m). We then obtain the ﬁnal D-dimensional network output as o = W h
+where W is a D × d output weight matrix  which will be our main focus in this work. Finally  the
+network’s D-dimensional output o is compared to the D-dimensional target vector y associated with
+input x using squared error  yielding loss L = (cid:107)o − y(cid:107)2.
+Training procedure: This architecture is a typical (possibly deep) multi-layer feed forward neural
+network architecture with a linear output layer and squared error loss. Its parameters (weight matri-
+ces and bias vectors) will be trained by gradient descent  using gradient backpropagation [11  12  13]
+to efﬁciently compute the gradients. The procedure is shown in Figure 1. Given an example from
+the training set as an (input target) pair (x  y)  a pass of forward propagation proceeds as out-
+lined above  computing the hidden representation of each hidden layer in turn based on the pre-
+vious one  and ﬁnally the network’s predicted output o and associated loss L. A pass of gradient
+backpropagation then works in the opposite direction  starting from ∇o = ∂L
+∂o = 2(o − y) and
+1Our approach does not impose any restriction on the architecture nor size of the hidden layers  as long as
+
+they are amenable to usual gradient backpropagation.
+
+2
+
+Figure 1: The computational problem posed by very large sparse targets. Dealing with sparse in-
+put efﬁciently is trivial  with both the forward and backward propagation phases easily achieved in
+O(Kd). However this is not the case with large sparse targets. They incur a prohibitive compu-
+tational cost of O(Dd) at the output layer as forward propagation  gradient backpropagation and
+weight update each require accessing all D × d elements of the large output weight matrix.
+
+∂h(k) and ∇a(k) = ∂L
+
+propagating back the gradients ∇h(k) = ∂L
+∂a(k) upstream through the network.
+The corresponding gradient contributions on parameters (weights and biases)  collected along the
+way  are straightforward once we have the associated ∇a(k). Speciﬁcally they are ∇b(k) = ∇a(k)
+and ∇W (k) = h(k−1)(∇a(k))T . Similarly for the input layer ∇W (1) = x(∇a(1))T   and for the
+output layer ∇W = (o − y)hT . Parameters are then updated through a gradient descent step
+W (k) ← W (k) − η∇W (k) and b(k) ← b(k) − η∇b(k)  where η is a positive learning-rate. Similarly
+for the output layer which will be our main focus here: W ← W − η∇W .
+
+2.2 The easy part: input layer forward propagation and weight update
+
+It is easy and straightforward to efﬁciently compute the forward propagation  and the backpropa-
+gation and weight update part for the input layer when we have a very large Din-dimensional but
+K−sparse input vector x with appropriate sparse representation. Speciﬁcally we suppose that x is
+represented as a pair of vectors u  v of length (at most) K  where u contains integer indexes and v
+the associated real values of the elements of x such that xi = 0 if i /∈ u  and xuk = vk.
+• Forward propagation through the input layer: The sparse representation of x as the positions
+of K elements together with their value makes it cheap to compute W (1)T x. Even though W (1)
+may be a huge full Din × d matrix  only K of its rows (those corresponding to the non-zero
+entries of x) need to be visited and summed to compute W (1)T x. Precisely  with our (u  v) sparse
+representation of x this operation can be written as W (1)T x =(cid:80)K
+:uk where each W (1)
+:uk
+• Gradient and update through input layer: Let us for now suppose that we were able to get
+gradients (through backpropagation) up to the ﬁrst hidden layer activations a(1) ∈ Rd in the form
+∂a(1) . The corresponding gradient-based update to input layer weights
+of gradient vector ∇a(1) = ∂L
+W (1) is simply W (1) ← W (1) − ηx(∇a(1))T . This is a rank-one update to W (1). Here again  we
+see that only the K rows of W (1) associated to the (at most) K non-zero entries of x need to be
+modiﬁed. Precisely this operation can be written as: W (1)
+:uk −ηvk∇a(1) ∀k ∈ {1  . . .   K}
+making this again a O(Kd) operation rather than O(Dd).
+
+k=1 vkW (1)
+is a d-dimensional vector  making this an O(Kd) operation rather than O(Dd).
+
+:uk ← W (1)
+
+3
+
+Efﬁcient Exact Gradient Update for Training Deep Networks with Very Large Sparse TargetsPascal Vincent * Alexandre de Brébisson Xavier BouthillierAbstractAn important class of problems involves training deep neural networks with sparse prediction targets of very high dimension D. These occur naturally in e.g. neural language models or the learning of word-embeddings  often posed as predicting the probability of next words among a vocabulary of size D (e.g. 500 000). Computing the equally large  but typically non-sparse D-dimensional output vector from a last hidden layer of reasonable dimension d (e.g. 500) incurs a prohibitive O(Dd) computational cost for each example  as does updating the D ! d output weight matrix and computing the gradient needed for backpropagation to previous layers. While efﬁcient handling of large sparse network inputs is trivial  this case of large sparse targets is not  and has thus so far been sidestepped with approximate alternatives such as hierarchical softmax or sampling-based approximations during training. In this work we develop an original algorithmic approach that  for a family of loss functions that includes squared error and spherical softmax  can compute the exact loss  gradient update for the output weights  and gradient for backpropagation  all in O(d2) per example instead of O(Dd)  remarkably without ever computing the D-dimensional output. Training time is thus independent of output-layer size (or number of classes). Compared to naive backprop  the proposed algorithm is expected to yield an actual speedup of at least D/4d   i.e. two orders of magnitude for typical sizes  for that critical part of the computation that often dominates the training time in this kind of network architecture.The Problem‣Training deep neural networks with very large sparse targets is an important problem‣Arises e.g. in Neural Language Models [1] with large vocabulary size (e.g. D = 500 000 one-hot target).‣Efﬁcient handling of large sparse inputs is trivial.‣But backprop training with large sparse targets is prohibitively expensive.‣Focus on output layer: maps last hidden representation h of reasonable dimension d (e.g. 500)to very large output o of dimension D (e.g. 500 000) with a Dxd parameter matrix W:Experimental validationTiming of output layer computations  for CPU implementation on 2 GHz Intel Core i7. Minibatch size m =10.Both naive backprop version and the proposed factorised parameter version learn the same actual W. Detailed algorithm  beneﬁts and limitationsAcceptedasaworkshopcontributionatICLR20153.5PUTTINGITALLTOGETHER:ALGORITHMFORCOMPUTINGTHECOSTL GRADIENTONh ANDUPDATINGUANDVEfﬁcientcomputationofcostL gradientwithrespecttoh(tobelaterbackpropagatedfurther)aswellasupdatingUandVandperformingthebookkeepingforU−TandQ.Thefollowingtabledescribesthealgorithmicstepsthatweputtogetherfromtheequationsderivedabove.Step#OperationComputationalcomplexityNumberofmultiply-adds1:ˆh=QhO(d2)d22:ˆy=UT(VTy)O(Kd+d2)Kd+d23:ˆz=ˆh−ˆyO(d)d4:∇h=2ˆzO(d)d5:L=hTˆh−2hTˆy+yTyO(2d+K)2d+K+16:Unew=U−2η(Uh)hTO(d2)2d2+d7:U−Tnew=U−T+2η1−2η￿h￿2(U−Th)hTO(d2)2d2+2d+38:Vnew=V+2ηy(U−Tnewh)TO(d2+Kd)d2+K+Kd9:Qnew=Q−2η￿hˆzT+ˆzhT￿+(4η2L)hhTO(d2)4+2d+3d24DISCUSSION:EXPECTEDBENEFITS EXTENSIONSANDLIMITATIONSHavingK￿d￿DweseethattheproposedalgorithmrequiresO(d2)operationswhereasthestandardapproachrequiredO(Dd)operations.IfwetakeK≈d wemaystatemorepreciselythattheproposedalgorithm forcomputingthelossandthegradientupdateswillrequiresroughly12d2operationswhereasthestandardapproachrequiredroughly3Ddoperations.SooveralltheproposedalgorithmchangecorrespondstoacomputationalspeedupbyafactorofD4d.ForD=200000andd=500theexpectedspeedupisthus100.Notethattheadvantageisnotonlyincomputationalcomplexity butalsoinmemoryaccess.Foreachexample thestandardapproachneedstoaccessandchangeallD×delementsofmatrixW whereastheproposedapproachonlyaccessesthemuchsmallernumberK×delementofVaswellasthethreed×dmatricesU U−T andQ.Sooverallwehaveamuchfasteralgorithm whichwhiledoingsoimplicitly willhoweverperformtheexactsamegradientupdateasthestandardapproach.Wewanttoemphasizeherethatwhatwearedoingisnotatallthesameassimplychaining2linearlayersUandVandperformingordinarygradientdescentupdatesonthese:thiswouldresultinthesameprohibitivecomputationalcomplexityasthestandardapproach andsuchordinaryseparategradientupdatestoUandVwouldnotbeequivalenttotheordinarygradientupdatetoW=VU.Ouralgorithmcanbestraightforwardlyextendedtotheminibatchcase andisexpectedtoyieldthesamespeedupfactorcomparedtothestandardapproach.ButoneneedstobecarefulinordertokeepthecomputationofU−Threasonablyefﬁcient.Indeed dependingonthesizeoftheminibatchm itmaybemoreefﬁcienttoresolvethecorrepsondinglinearequationforeachminibatchfromscratchratherthanupdatingU−TwiththeWoodburyequation(whichgeneralizestheSheman-Morrisonformulaform>1).Thisapproachthatwedetailedforlinearoutputandsquarederrorcaneasilybeextendedtoslightlymoreexoticlossfunctions:basicallyanylossfunctionthatcanbeexpressedusingonlytheocassociatedtonon-zeroycand￿o￿2=￿jo2jthesquarednormofthewholeoutputvector whichwecancomputecheaply.Thisfamilyoflossfunctionsdoesnotincludethestandardsoftmax butincludestheso-calledsphericalsoftmax:logo2c￿jo2j(wherecisthecorrectclasslabel).Itremainstobeseeninpracticehowthisapproachperformscomputationally andwhetherwelosesomethingduetousingthismorelimitedfamilyoflossfunctions.7...￿￿￿￿...￿￿￿￿(large D  but K-sparse) (large D  but K-sparse) ...(small d)...large D  not sparse LossInput xTarget yOutput olast hidden hL=￿o−y￿2hidden 2(small d)hidden 1(small d)O(Kd) O(d2) O(d2) O(Dd) Prohibitivley expensive!Ex: D = 500 000  K=5Ex: d = 500O(D) O(d2) O(d2) O(d2) Forward propagationBackpropagation(dxd)W(2)O(D) !o = 2(o-y) O(Dd) !h = W T !o O(Dd) W "W- ! !o hT O(Kd) W(1) "W (1)- ! x !aT cheap!W(1)(Dxd)Prohibitivley expensive!Altogether: O( Dd ) 3Problem: expensive computationwe suppose K << d << D o = Wh* and CIFARProposed approachWe can do much better than O( Dd ). We can compute!loss L!gradient w.r.t. last hidden layer !h !exact same gradient update to Wall in O(d2) without ever computing full output o=Wh !First trick: L and !h can be computed efﬁciently if we keep an up-to-date d x d matrix Q = WTW Second trick: represent W implicitly as factorization and update U and V instead5.1ComputingthesquarederrorlosseﬃcientlySupposewehave foranetworkinputexamplex computedlasthiddenrepre-sentationh∈Rdthroughforwardpropagation.Thenetwork’sDdimensionaloutputo=Whistheninprinciplecomparedtohighdimensionaltargety∈RD.ThecorrespondingsquarederrorlossisL=￿Wh−y￿2.AswehaveseeninSection3.3 computingitinthedirectnaivewaywouldhaveaprohibitivecom-putationalcomplexityofO(Dd+D)=O(Dd)becausecomputingoutputWhwithafullD×dmatrixWandatypicallynon-sparsehisO(Dd).Notehoweverthatwecanrewritethisas:L=￿Wh−y￿2=(Wh−y)T(Wh−y)=hTWTWh−yTWh−hTWTy+yTy=hTQh−2hT(WTy)+yTy=hTQh−2hTUTVTy+yTy=hT(Qh)−2hT(UT(VTy))+yTy=hT(Qh￿￿￿￿ˆh−2(UT(VTy)￿￿￿￿ˆy)+yTySHORTIDEAFORMULATIONFORSLIDES:L=￿O(Dd)￿￿￿￿Wh−y￿2=(Wh−y)T(Wh−y)=hTWTWh−2hT(WTy)+yTy=hT(Qh￿￿￿￿O(d2)−2(WTy)￿￿￿￿O(Kd))+yTy￿￿￿￿O(K)withQ=WTWSupposingwehavemaintainedanup-to-dateQ=WTW whichisacompactd×dmatrix(wewillseehowweupdateQcheaplyinsection??????) computingˆh=QhhasacomplexityofO(d2).ThankstotheK−sparsityandsparserepresentationofy computingVTyisO(Kd)andresultsinad−dimensionalvector sothatcomputingˆy=UT(VTy)isO(Kd+d2).ThelasttermisO(K).SotheoverallcomputationalcomplexityforcomputingLinthiswayisO(Kd+d2)=O((K+d)d).WithK￿Dandd￿DthiscanbeseveralordersofmagnitudecheaperthantheprohibitiveO(Dd)ofthedirectapproach.Ifwedeﬁneintermediatevectorsˆh=Qhandˆy=WTy=UT(VTy)thecomputationofLcanberewrittenalittlemorecompactlyasL=hT(ˆh−2ˆy)+￿y￿25this is O(Kd +d2 +K) = O(d2)Computing loss L5.2ComputingthegradientonheﬃcientlyTobackpropagatethegradientthroughthenetwork weneedtocomputethegradientoflossLwithrespecttolasthiddenlayerrepresentationh.Thisis∇h=∂L∂h=∂￿Wh−y￿2∂h=2WT(Wh−y).Again ifweweretocomputeitdirectlyinthismannerthecomputationalcomplexitywouldbeaprohibitiveO(Dd).Butwecaninsteadrewriteitas∇h=∂L∂h=∂￿Wh−y￿2∂h=2WT(Wh−y)=2￿WTWh−WTy￿=2￿Qh−UTVTy￿=2￿Qh−UT(VTy)￿=2(ˆh−ˆy)Again supposingwehavemaintainedanup-to-dateQ(wewillseehowweupdateQcheaplyinsection?????)computing∂L∂hthiswayisO(Kd+d2)=O((K+d)d) muchcheaperthantheO(Dd)ofthedirectapproach.SHORTIDEAFORMULATIONFORSLIDES:∇h=∂L∂h=∂￿Wh−y￿2∂h=2WT(Wh−y)=2(Qh￿￿￿￿O(d2)−WTy￿￿￿￿O(Kd))5.3EﬃcientgradientupdateofWThegradientofthesquarederrorlosswithrespecttooutputlayerweightmatrixWis∂L∂W=∂￿Wh−y￿2∂W=2(Wh−y)hT.AndthecorrespondinggradientdescentupdatetoWwouldbeWnew←W−2η(Wh−y)hTwhereηisapositivelearningrate.Again computedinthismanner thisinducesaprohibitiveO(Dd)computationalcomplexity bothtocomputeoutputandresidueWh−y andthentoupdatealltheDdelementsofW(sincegenerallyneitherWh−ynorhwillbesparse).ToovercomethisdiﬃcultyletusﬁrstrewritetheupdateasWnew=W−2η(Wh−y)hT=W−2ηWhhT+2ηyhTNotethatwecandecomposethisupdateintotwoconsecutiveupdatesteps:6this is O(Kd +d2) = O(d2)Provided we maintain an up-to-date Q = WTW (achievable cheaply) Computing gradient !h w.r.t. last hidden layerW￿￿￿￿D×d=V￿￿￿￿D×dU￿￿￿￿d×d5.2ComputingthegradientonheﬃcientlyTobackpropagatethegradientthroughthenetwork weneedtocomputethegradientoflossLwithrespecttolasthiddenlayerrepresentationh.Thisis∇h=∂L∂h=∂￿Wh−y￿2∂h=2WT(Wh−y).Again ifweweretocomputeitdirectlyinthismannerthecomputationalcomplexitywouldbeaprohibitiveO(Dd).Butwecaninsteadrewriteitas∇h=∂L∂h=∂￿Wh−y￿2∂h=2WT(Wh−y)=2￿WTWh−WTy￿=2￿Qh−UTVTy￿=2￿Qh−UT(VTy)￿=2(ˆh−ˆy)Again supposingwehavemaintainedanup-to-dateQ(wewillseehowweupdateQcheaplyinsection?????)computing∂L∂hthiswayisO(Kd+d2)=O((K+d)d) muchcheaperthantheO(Dd)ofthedirectapproach.SHORTIDEAFORMULATIONFORSLIDES:∇h=∂L∂h=∂￿Wh−y￿2∂h=2WT(Wh−y)=2(Qh￿￿￿￿O(d2)−WTy￿￿￿￿O(Kd))5.3EﬃcientgradientupdateofWThegradientofthesquarederrorlosswithrespecttooutputlayerweightmatrixWis∂L∂W=∂￿Wh−y￿2∂W=2(Wh−y)hT.AndthecorrespondinggradientdescentupdatetoWwouldbeWnew←W−2η(Wh−y)hTwhereηisapositivelearningrate.Again computedinthismanner thisinducesaprohibitiveO(Dd)computationalcomplexity bothtocomputeoutputandresidueWh−y andthentoupdatealltheDdelementsofW(sincegenerallyneitherWh−ynorhwillbesparse).ToovercomethisdiﬃcultyletusﬁrstrewritetheupdateasWnew=W−2η(Wh−y)hT=W−2ηWhhT+2ηyhTNotethatwecandecomposethisupdateintotwoconsecutiveupdatesteps:6Naive gadient update is a rank-one update to W (all Dd elements of W modiﬁed!)Equivalently decomposed in 2 sequential steps:O( Dd ) a)W←W−2ηWhhTb)W←W+2ηyhTWewillnowseehowwecanperformeachoftheseupdatesimplicitlybyupdatingonlyUandVrespectively aswellashowwemaintaincorrespondinglyup-to-dateversionsofQ=VTV(neededtoeﬃcientlycomputecostLandgradientonhinEquations????and????above)andU−T=(U−1)T(thatwillbeneededforupdateb)).Solution:a)Unew=U−2η(Uh)hTb)Vnew=V+2ηy(U−Tnewh)TProof:VnewUnew=(V+2ηy(U−Tnewh)T)Unew=VUnew+2ηy(U−Tnewh)TUnew=VUnew+2ηyhTU−1newUnew=V(U−2η(Uh)hT)+2ηyhT(U−1newUnew)=VU−2ηVUhhT+2ηyhT=VU−2η(VUh−y)hT=W−2η(Wh−y)ThT=Wnewa)FirstupdateoftheformW←W−2ηWhhTThiscanbeachievedimplicitlybyupdatingonlyUasfollows:Unew=U−2η(Uh)hTProof:Wnew=VUnew=V(U−2η(Uh)hT)=VU−2ηVUhhT=W−2ηWhhTChangingUdoesn’tchangeQ=VTV.Butwewillneedanup-to-dateU−Tinthesecondupdateb).ProvidedwealreadyhaveU−TthiscanbeachievedcheaplybyusingtheSherman-Morissonformulafortherank-oneupdatetotheinverseofU:(U+uvT)−1=U−1−11+vTU−1uU−1uvTU−17a)W←W−2ηWhhTb)W←W+2ηyhTWewillnowseehowwecanperformeachoftheseupdatesimplicitlybyupdatingonlyUandVrespectively aswellashowwemaintaincorrespondinglyup-to-dateversionsofQ=VTV(neededtoeﬃcientlycomputecostLandgradientonhinEquations????and????above)andU−T=(U−1)T(thatwillbeneededforupdateb)).Solution:a)Unew=U−2η(Uh)hTb)Vnew=V+2ηy(U−Tnewh)TProof:VnewUnew=(V+2ηy(U−Tnewh)T)Unew=VUnew+2ηy(U−Tnewh)TUnew=VUnew+2ηyhTU−1newUnew=V(U−2η(Uh)hT)+2ηyhT(U−1newUnew)=VU−2ηVUhhT+2ηyhT=VU−2η(VUh−y)hT=W−2η(Wh−y)ThT=Wnewa)FirstupdateoftheformW←W−2ηWhhTThiscanbeachievedimplicitlybyupdatingonlyUasfollows:Unew=U−2η(Uh)hTProof:Wnew=VUnew=V(U−2η(Uh)hT)=VU−2ηVUhhT=W−2ηWhhTChangingUdoesn’tchangeQ=VTV.Butwewillneedanup-to-dateU−Tinthesecondupdateb).ProvidedwealreadyhaveU−TthiscanbeachievedcheaplybyusingtheSherman-Morissonformulafortherank-oneupdatetotheinverseofU:(U+uvT)−1=U−1−11+vTU−1uU−1uvTU−17That can be performed implicity through U and V:rank-1 update to U: O(d2)O(Kd)O(d2)provided we updated U-1 cheaplyusing Sherman-MorrisonSparse update: only K rows of V instead of all D rows of W !O( Dd ) Proof:AcceptedasaworkshopcontributionatICLR2015a)W←W−2ηWhhTb)W←W+2ηyhTNoticethatwecanperformeachoftheseupdatesimplicitlybyupdatingonlyUandVrespectively.:a)Unew=U−2η(Uh)hT(4)b)Vnew=V+2ηy(U−Tnewh)T(5)ThisresultsinimplicitlyupdatingWaswedidexplicitlyinthenaiveapproachofEq.3.Proof:VnewUnew=(V+2ηy(U−Tnewh)T)Unew=VUnew+2ηy(U−Tnewh)TUnew=VUnew+2ηyhTU−1newUnew=V(U−2η(Uh)hT)+2ηyhT(U−1newUnew)=VU−2ηVUhhT+2ηyhT=VU−2η(VUh−y)hT=W−2η(Wh−y)ThT=WnewWeseethattheupdateofUinEq.4isasimpleO(d2)operation.Followingthissimplerank-oneupdatetoU wecanusetheSherman-Morrisonformulatoderivethecorrespondingrank-oneupdatetoU−TwhichwillalsobeO(d2):U−Tnew=U−T+2η1−2η￿h￿2(U−Th)hT(6)ItistheneasytocomputetheU−Tnewh anO(d2)operationneededinEq.5 andtheensuingrank-oneupdateofV thankstotheK-sparsityofyisonlyO(Kd).ThankstotheK−sparsityandsparserepresentationofy computingˆy=VTyisO(Kd)and￿t￿2isO(K).Computationofˆh=U−ThisO(d2).Giventhese theupdateofQisO(d2)andtherank-oneupdateofV thankstotheK-sparsityofyisO(Kd).SotheseoperationstogetherhavecomputationalcomplexityofO(Kd+d2)=O((K+d)d) whichismuchcheaperthantheprohibitiveO(Dd)ofthedirectapproach.3.4BOOKKEEPING:KEEPINGANUP-TO-DATEQANDU−TWehavealreadyseen inEq.6 howwecancheaplymaintainanup-to-dateU−TfollowingourupdateofU.Similarly followingourupdatestoUandV weneedtokeepanup-to-dateQ=WTWwhichisneededtoefﬁcientlycomputethelossL(Eq.1)andgradient∇h(Eq.2).TheupdatestoUandVinEquations4and5areequivalenttoimplicitlyupdatingWasinEq.3 andthistranslatesintothefollowingupdatetoQ=WTW:ˆz=Qh−UT(VTy)Qnew=Q−2η￿hˆzT+ˆzhT￿+(4η2L)hhT(7)Proofisstraightforwardbutnotprovidedhereduetospaceconstraints.6Bookkeeping operations as we update U and V:!Using factored representation of W=VU does not change the complexity of the computation of L and !h .!Need to maintain an up-to-date U-1 following rank-1 update to U. " achieved in O(d2) through Sherman-Morrison formula. !Need to maintain an up-to-date Q = WTW following updates to U and V. " achieved in O(d2) as follows:a)W←W−2ηWhhTb)W←W+2ηyhTWewillnowseehowwecanperformeachoftheseupdatesimplicitlybyupdatingonlyUandVrespectively aswellashowwemaintaincorrespondinglyup-to-dateversionsofQ=VTV(neededtoeﬃcientlycomputecostLandgradientonhinEquations????and????above)andU−T=(U−1)T(thatwillbeneededforupdateb)).Solution:a)Unew=U−2η(Uh)hTb)Vnew=V+2ηy(U−Tnewh)TProof:VnewUnew=(V+2ηy(U−Tnewh)T)Unew=VUnew+2ηy(U−Tnewh)TUnew=VUnew+2ηyhTU−1newUnew=V(U−2η(Uh)hT)+2ηyhT(U−1newUnew)=VU−2ηVUhhT+2ηyhT=VU−2η(VUh−y)hT=W−2η(Wh−y)ThT=WnewSHORTFORMULATIONFORSLIDESOFUPDATEOFQINON-LINECASE:ˆz=Qh−UT(VTy)Qnew=Q−2η￿hˆzT+ˆzhT￿+(4η2L)hhTa)FirstupdateoftheformW←W−2ηWhhTThiscanbeachievedimplicitlybyupdatingonlyUasfollows:Unew=U−2η(Uh)hTProof:Wnew=VUnew=V(U−2η(Uh)hT)=VU−2ηVUhhT=W−2ηWhhT7Note: this is NOT the same as a ordinary backprop update on two consecutive layers U and V which would still be O( Dd ).Altogether: O( d2 ) we suppose K << d << D we suppose K << d << D Current workarounds are approximations:‣Sampling based approximations compute only a tiny fraction of the output’s dimensions sampled at random. Reconstruction sampling [2] and the use of Noise Contrastive Estimation [3] in [4  5] fall under this category.‣Hierarchical softmax [6  4] imposes a heuristically deﬁned hierarchical tree structure for the computation of the normalized probability of the target class.[1] Bengio  Y.  Ducharme  R.  and Vincent  P. (2001). A neural probabilistic language model. NIPS 2000.[2] Dauphin  Y.  Glorot  X.  and Bengio  Y. (2011). Large-scale learning of embeddings with reconstruction sampling. ICML 2011.[5] Mnih  A. and Kavukcuoglu  K. (2013). Learning word embeddings efﬁciently with noise-contrastive estimation. NIPS 2013.[6] Morin  F. and Bengio  Y. (2005). Hierarchical probabilistic neural network language model. AISTATS 2005.[3] Gutmann  M. and Hyvarinen  A. (2010). Noise-contrastive estimation: A new estimation principle for unnormalized statistical models. AISTATS 2010.[4] Mikolov  T.  Chen  K.  Corrado  G.  and Dean  J. (2013). Efﬁcient estimation of word representations in vector space. ICLR 2013 workshop track.we suppose K << d << D Full algorithm (online version):!Computation: O(12 d2) v.s. O(3 Dd) " speedup of D/4d for typical sizes: between 50 and 300!Memory access: for each example access only Kd elements of V and d2 elements of U  U-1 and Q v.s. Dd elements of W.Anticipated beneﬁts:!Approach limited to loss functions expressible using ||o||2 and the oc associated to non-zero yc only:✓ linear output + squared error# not regular log softmax✓ linear+spherical softmax: !Step 6 can lead over time to ill conditioning " must periodically apply numerical stabilization strategy.LimitationsExtension for minibatch of size m:!Straightforward except for step 7:!Update of U-T no longer with simple Sherman-Morrison. !Several possibilities: Woodbury identity (must invert m x m matrix)  or iterated Sherman-Morrison  or solving UTx = h each time. Best choice will depends on m.!" complexity remains O(d2) per example.AcceptedasaworkshopcontributionatICLR20153.5PUTTINGITALLTOGETHER:ALGORITHMFORCOMPUTINGTHECOSTL GRADIENTONh ANDUPDATINGUANDVEfﬁcientcomputationofcostL gradientwithrespecttoh(tobelaterbackpropagatedfurther)aswellasupdatingUandVandperformingthebookkeepingforU−TandQ.Thefollowingtabledescribesthealgorithmicstepsthatweputtogetherfromtheequationsderivedabove.Step#OperationComputationalcomplexityNumberofmultiply-adds1:ˆh=QhO(d2)d22:ˆy=UT(VTy)O(Kd+d2)Kd+d23:ˆz=ˆh−ˆyO(d)d4:∇h=2ˆzO(d)d5:L=hTˆh−2hTˆy+yTyO(2d+K)2d+K+16:Unew=U−2η(Uh)hTO(d2)2d2+d7:U−Tnew=U−T+2η1−2η￿h￿2(U−Th)hTO(d2)2d2+2d+38:Vnew=V+2ηy(U−Tnewh)TO(d2+Kd)d2+K+Kd9:Qnew=Q−2η￿hˆzT+ˆzhT￿+(4η2L)hhTO(d2)4+2d+3d24DISCUSSION:EXPECTEDBENEFITS EXTENSIONSANDLIMITATIONSHavingK￿d￿DweseethattheproposedalgorithmrequiresO(d2)operationswhereasthestandardapproachrequiredO(Dd)operations.IfwetakeK≈d wemaystatemorepreciselythattheproposedalgorithm forcomputingthelossandthegradientupdateswillrequiresroughly12d2operationswhereasthestandardapproachrequiredroughly3Ddoperations.SooveralltheproposedalgorithmchangecorrespondstoacomputationalspeedupbyafactorofD4d.ForD=200000andd=500theexpectedspeedupisthus100.Notethattheadvantageisnotonlyincomputationalcomplexity butalsoinmemoryaccess.Foreachexample thestandardapproachneedstoaccessandchangeallD×delementsofmatrixW whereastheproposedapproachonlyaccessesthemuchsmallernumberK×delementofVaswellasthethreed×dmatricesU U−T andQ.Sooverallwehaveamuchfasteralgorithm whichwhiledoingsoimplicitly willhoweverperformtheexactsamegradientupdateasthestandardapproach.Wewanttoemphasizeherethatwhatwearedoingisnotatallthesameassimplychaining2linearlayersUandVandperformingordinarygradientdescentupdatesonthese:thiswouldresultinthesameprohibitivecomputationalcomplexityasthestandardapproach andsuchordinaryseparategradientupdatestoUandVwouldnotbeequivalenttotheordinarygradientupdatetoW=VU.Ouralgorithmcanbestraightforwardlyextendedtotheminibatchcase andisexpectedtoyieldthesamespeedupfactorcomparedtothestandardapproach.ButoneneedstobecarefulinordertokeepthecomputationofU−Threasonablyefﬁcient.Indeed dependingonthesizeoftheminibatchm itmaybemoreefﬁcienttoresolvethecorrepsondinglinearequationforeachminibatchfromscratchratherthanupdatingU−TwiththeWoodburyequation(whichgeneralizestheSheman-Morrisonformulaform>1).Thisapproachthatwedetailedforlinearoutputandsquarederrorcaneasilybeextendedtoslightlymoreexoticlossfunctions:basicallyanylossfunctionthatcanbeexpressedusingonlytheocassociatedtonon-zeroycand￿o￿2=￿jo2jthesquarednormofthewholeoutputvector whichwecancomputecheaply.Thisfamilyoflossfunctionsdoesnotincludethestandardsoftmax butincludestheso-calledsphericalsoftmax:logo2c￿jo2j(wherecisthecorrectclasslabel).Itremainstobeseeninpracticehowthisapproachperformscomputationally andwhetherwelosesomethingduetousingthismorelimitedfamilyoflossfunctions.7Prohibitive!Time taken by naive backprop (dotted lines) and the proposed factorised parameter version (full lines).Speedup of factorised parameter version v.s. naive backprop (theoretical and experimentally measured).Conclusion and future work‣We developed an original algorithm that yields a huge speedup for performing a full exact gradient update in networks with very large sparse targets: remarkably time is independent of output size (number of classes).‣Gain is from a fundamental algorithmic computational complexity improvement  not from low-level hardware-speciﬁc tricks or tuning. ‣Future: GPU implementation; spherical softmax cost; compare quality of word embeddings learned with these costs to standard softmax. References:2.3 The hard part: output layer propagation and weight update
+
+Given some network input x  we suppose we can compute without difﬁculty through forward prop-
+agation the associated last hidden layer representation h ∈ Rd. From then on:
+• Computing the ﬁnal output o = W h incurs a prohibitive computational cost of O(Dd) since W
+is a full D × d matrix. Note that there is a-priori no reason for representation h to be sparse (e.g.
+with a sigmoid non-linearity) but even if it was  this would not fundamentally change the problem
+since it is D that is extremely large  and we supposed d reasonably sized already. Computing the
+residual (o − y) and associated squared error loss (cid:107)o − y(cid:107)2 incurs an additional O(D) cost.
+which is another O(Dd) matrix-vector product.
+
+• The gradient on h that we need to backpropagate to lower layers is ∇h = ∂L
+∂h = 2W T (o − y)
+• Finally  when performing the corresponding output weight update W ← W − η(o− y)hT we see
+that it is a rank-one update that updates all D× d elements of W   which again incurs a prohibitive
+O(Dd) computational cost.
+
+For very large D  all these three O(Dd) operations are prohibitive  and the fact that y is sparse  seen
+from this perspective  doesn’t help  since neither o nor o − y will be sparse.
+
+3 A computationally efﬁcient algorithm for performing the exact online
+
+gradient update
+
+Previously proposed workarounds are approximate or use stochastic sampling. We propose a differ-
+ent approach that results in the exact same  yet efﬁcient gradient update  remarkably without ever
+having to compute large output o.
+
+3.1 Computing the squared error loss L and the gradient with respect to h efﬁciently
+
+Suppose that  we have  for a network input example x  computed the last hidden representation
+h ∈ Rd through forward propagation. The network’s D dimensional output o = W h is then in
+principle compared to the high dimensional target y ∈ RD. The corresponding squared error loss
+is L = (cid:107)W h − y(cid:107)2. As we saw in Section 2.3  computing it in the direct naive way would have
+a prohibitive computational complexity of O(Dd + D) = O(Dd) because computing output W h
+with a full D × d matrix W and a typically non-sparse h is O(Dd). Similarly  to backpropagate
+the gradient through the network  we need to compute the gradient of loss L with respect to last
+hidden layer representation h. This is ∇h = ∂L
+= 2W T (W h − y). So again  if
+we were to compute it directly in this manner  the computational complexity would be a prohibitive
+O(Dd). Provided we have maintained an up-to-date matrix Q = W T W   which is of reasonable
+size d × d and can be cheaply maintained as we will see in Section 3.3  we can rewrite these two
+operations so as to perform them in O(d2):
+
+∂h = ∂(cid:107)W h−y(cid:107)2
+
+∂h
+
+Loss computation:
+
+Gradient on h:
+
+L = (cid:107)
+
+O(Dd)
+
+(cid:122)(cid:125)(cid:124)(cid:123)W h −y(cid:107)2
+
+= (W h − y)T (W h − y)
+= hT W T W h − yT W h − hT W T y + yT y
+= hT Qh − 2hT (W T y) + yT y
+) + yT y
+= hT ( Qh
+(cid:124)(cid:123)(cid:122)(cid:125)O(K)
+
+−2 W T y
+(cid:124)(cid:123)(cid:122)(cid:125)
+
+(cid:124)(cid:123)(cid:122)(cid:125)O(d2)
+
+O(Kd)
+
+(1)
+
+∇h =
+
+∂L
+∂h
+
+∂h
+
+∂(cid:107)W h − y(cid:107)2
+=
+= 2W T (W h − y)
+= 2(cid:0)W T W h − W T y(cid:1)
+
+= 2( Qh
+
+)
+
+− W T y
+(cid:124)(cid:123)(cid:122)(cid:125)
+
+O(Kd)
+
+(cid:124)(cid:123)(cid:122)(cid:125)O(d2)
+
+(2)
+
+The terms in O(Kd) and O(K) are due to leveraging the K-sparse representation of target vector
+y. With K (cid:28) D and d (cid:28) D  we get altogether a computational cost of O(d2) which can be several
+orders of magnitude cheaper than the prohibitive O(Dd) of the direct approach.
+
+4
+
+3.2 Efﬁcient gradient update of W
+
+∂W
+
+The gradient of the squared error loss with respect to output layer weight matrix W is ∂L
+∂W =
+∂(cid:107)W h−y(cid:107)2
+= 2(W h − y)hT . And the corresponding gradient descent update to W would be
+Wnew ← W − 2η(W h− y)hT   where η is a positive learning rate. Again  computed in this manner 
+this induces a prohibitive O(Dd) computational complexity  both to compute output and residual
+W h − y  and then to update all the Dd elements of W (since generally neither W h − y nor h will
+be sparse). All D× d elements of W must be accessed during this update. On the surface this seems
+hopeless. But we will now see how we can achieve the exact same update on W in O(d2). The trick
+
+and update U and V instead
+
+is to represent W implicitly as the factorization W(cid:124)(cid:123)(cid:122)(cid:125)D×d
+
+= V(cid:124)(cid:123)(cid:122)(cid:125)D×d
+
+U(cid:124)(cid:123)(cid:122)(cid:125)d×d
+
+a) Unew = U − 2η(U h)hT
+b) Vnew = V + 2ηy(U−T
+
+newh)T
+
+(3)
+(4)
+
+This results in implicitly updating W as we did explicitly in the naive approach as we now prove:
+
+VnewUnew = (V + 2ηy(U−T
+
+newh)T ) Unew
+
+newUnew
+
+newh)T Unew
+
+= V Unew + 2ηy(U−T
+= V Unew + 2ηyhT U−1
+= V (U − 2η(U h)hT ) + 2ηyhT (U−1
+= V U − 2ηV U hhT + 2ηyhT
+= V U − 2η(V U h − y)hT
+= W − 2η(W h − y)T hT
+= Wnew
+
+newUnew)
+
+We see that the update of U in Eq. 3 is a simple O(d2) operation. Following this simple rank-one
+update to U  we can use the Sherman-Morrison formula to derive the corresponding rank-one update
+to U−T which will also be O(d2):
+
+U−T
+new = U−T +
+
+2η
+
+1 − 2η (cid:107)h(cid:107)2 (U−T h)hT
+
+(5)
+
+newh  an O(d2) operation needed in Eq. 4. The ensuing rank-one
+It is then easy to compute the U−T
+update of V in Eq 4  thanks to the K-sparsity of y is only O(Kd): only the K rows V associated
+to non-zero elements in y are accessed and updated  instead of all D rows of W we had to modify
+in the naive update! Note that with the factored representation of W as V U  we only have W
+implicitly  so the W T y terms that entered in the computation of L and ∇h in the previous paragraph
+need to be adapted slightly as ˆy = W T y = U T (V T y)  which becomes O(d2 + Kd) rather than
+O(Kd) in computational complexity. But this doesn’t change the overall O(d2) complexity of these
+computations.
+
+3.3 Bookkeeping: keeping an up-to-date Q and U−T
+
+We have already seen  in Eq. 5  how we can cheaply maintain an up-to-date U−T following our
+update of U. Similarly  following our updates to U and V   we need to keep an up-to-date Q =
+W T W which is needed to efﬁciently compute the loss L (Eq. 1) and gradient ∇h (Eq. 2). We have
+shown that updates to U and V in equations 3 and 4 are equivalent to implicitly updating W as
+Wnew ← W − 2η(W h − y)hT   and this translates into the following update to Q = W T W :
+
+ˆz = Qh − U T (V T y)
+Qnew = Q − 2η(cid:0)hˆzT + ˆzhT(cid:1) + (4η2L)hhT
+
+(6)
+
+The proof is straightforward but due to space constraints we put it in supplementary material. One
+can see that this last bookkeeping operation also has a O(d2) computational complexity.
+
+5
+
+3.4 Putting it all together: detailed algorithm and expected beneﬁts
+
+We have seen that we can efﬁciently compute cost L  gradient with respect to h (to be later back-
+propagated further) as well as updating U and V and performing the bookkeeping for U−T and
+Q. Algorithm 1 describes the detailed algorithmic steps that we put together from the equations
+derived above. Having K (cid:28) d (cid:28) D we see that the proposed algorithm requires O(d2) operations 
+whereas the standard approach required O(Dd) operations. If we take K ≈ d   we may state more
+precisely that the proposed algorithm  for computing the loss and the gradient updates will require
+roughly 12d2 operations whereas the standard approach required roughly 3Dd operations. So over-
+all the proposed algorithm change corresponds to a computational speedup by a factor of D
+4d. For
+D = 200 000 and d = 500 the expected speedup is thus 100. Note that the advantage is not only
+in computational complexity  but also in memory access. For each example  the standard approach
+needs to access and change all D × d elements of matrix W   whereas the proposed approach only
+accesses the much smaller number K × d elements of V as well as the three d× d matrices U  U−T  
+and Q. So overall we have a substantially faster algorithm  which  while doing so implicitly  will
+nevertheless perform the exact same gradient update as the standard approach. We want to empha-
+size here that our approach is completely different from simply chaining 2 linear layers U and V
+and performing ordinary gradient descent updates on them: this would result in the same prohibitive
+computational complexity as the standard approach  and such ordinary separate gradient updates to
+U and V would not be equivalent to the ordinary gradient update to W = V U.
+
+Algorithm 1 Efﬁcient computation of cost L  gradient on h  and update to parameters U and V
+
+Step
+#
+1:
+2:
+3:
+4:
+5:
+6:
+7:
+
+8:
+9:
+
+Operation
+
+ˆh = Qh
+ˆy = U T (V T y)
+ˆz = ˆh − ˆy
+∇h = 2ˆz
+L = hT ˆh − 2hT ˆy + yT y
+Unew = U − 2η(U h)hT
+U−T
+new =
+U−T +
+Vnew = V + 2ηy(U−T
+Qnew =
+
+1−2η(cid:107)h(cid:107)2 (U−T h)hT
+newh)T
+Q − 2η(cid:0)hˆzT + ˆzhT(cid:1) +
+
+2η
+
+(4η2L)hhT
+Altogether:
+
+Computational
+complexity
+
+Number of
+
+multiply-adds
+
+O(d2)
+
+d2
+
+O(Kd + d2)
+
+Kd + d2
+
+O(d)
+O(d)
+
+O(2d + K)
+
+O(d2)
+O(d2)
+
+d
+d
+
+2d + K + 1
+
+2d2 + d
+
+2d2 + 2d + 3
+
+O(d2 + Kd)
+
+O(d2)
+
+d2 + K + Kd
+4 + 2d + 3d2
+
+O(d2)
+provided
+K < d (cid:28) D
+
+≈ 12d2
+elementary
+operations
+
+3.5 Controlling numerical stability and extension to the minibatch case
+
+The update of U in Equation 3 may over time lead U to become ill-conditioned. To prevent this 
+we regularly (every 100 updates) monitor its conditioning number. If either the smallest or largest
+singular value moves outside an acceptable range2  we bring it back to 1 by doing an appropriate
+rank-1 update to V (which costs Dd operations  but is only done rarely). Our algorithm can also
+be straightforwardly extended to the minibatch case (the derivations are given in the supplemen-
+tary material section) and yields the same theoretical speedup factor with respect to the standard
+naive approach. But one needs to be careful in order to keep the computation of U−T h reasonably
+efﬁcient: depending on the size of the minibatch m  it may be more efﬁcient to solve the correspond-
+ing linear equation for each minibatch from scratch rather than updating U−T with the Woodbury
+equation (which generalizes the Sherman-Morrison formula for m > 1).
+
+2More details on our numerical stabilization procedure can be found in the supplementary material
+
+6
+
+3.6 Generalization to a broader class of loss functions
+
+The approach that we just detailed for linear output and squared error can be extended to a broader 
+though restricted  family of loss functions. We call it the spherical family of loss functions because
+it includes the spherical alternative to the softmax  thus named in [14]. Basically it contains any loss
+function that can be expressed as a function of only the oc associated to non-zero yc and of (cid:107)o(cid:107)2 =
+(cid:80)j o2
+j the squared norm of the whole output vector  which we can compute cheaply  irrespective of
+D  as we did above3. This family does not include the standard softmax loss log exp(oc)
+(cid:80)j exp(oj )  but it
+does include the spherical softmax4: log
+j +). Due to space constraints we will not detail this
+extension here  only give a sketch of how it can be obtained. Deriving it may not appear obvious at
+ﬁrst  but it is relatively straightforward once we realize that: a) the gain in computing the squared
+error loss comes from being able to very cheaply compute the sum of squared activations (cid:107)o(cid:107)2 (a
+scalar quantity)  and will thus apply equally well to other losses that can be expressed based on that
+quantity (like the spherical softmax). b) generalizing our gradient update trick to such losses follows
+naturally from gradient backpropagation: the gradient is ﬁrst backpropagated from the ﬁnal loss to
+the scalar sum of squared activations  and from there on follows the same path and update procedure
+as for the squared error loss.
+
+c+(cid:80)j (o2
+
+o2
+
+4 Experimental validation
+
+We implemented both a CPU version using blas and a parallel GPU (Cuda) version using cublas
+of the proposed algorithm5. We evaluated the GPU and CPU implementations by training word
+embeddings with simple neural language models  in which a probability map of the next word
+given its preceding n-gram is learned by a neural network. We used a Nvidia Titan Black GPU
+and a i7-4820K @ 3.70GHz CPU and ran experiments on the one billion word dataset[15]  which
+is composed of 0.8 billions words belonging to a vocabulary of 0.8 millions words. We evaluated
+the resulting word embeddings with the recently introduced Simlex-999 score [16]  which measures
+the similarity between words. We also compared our approach to unfactorised versions and to a
+two-layer hierarchical softmax. Figure 2 and 3 (left) illustrate the practical speedup of our approach
+for the output layer only. Figure 3 (right) shows that out LST (Large Sparse Target) models are
+much faster to train than the softmax models and converge to only slightly lower Simlex-999 scores.
+Table 1 summarizes the speedups for the different output layers we tried  both on CPU and GPU.
+We also empirically veriﬁed that our proposed factored algorithm learns the model weights (V U ) as
+the corresponding naive unfactored algorithm’s W   as it theoretically should  and followed the same
+learning curves (as a function of number of iterations  not time!).
+
+5 Conclusion and future work
+
+We introduced a new algorithmic approach to efﬁciently compute the exact gradient updates for
+training deep networks with very large sparse targets. Remarkably the complexity of the algorithm
+is independent of the target size  which allows tackling very large problems. Our CPU and GPU
+implementations yield similar speedups to the theoretical one and can thus be used in practical
+applications  which could be explored in further work. In particular  neural language models seem
+good candidates. But it remains unclear how using a loss function other than the usual softmax might
+affect the quality of the resulting word embeddings so further research needs to be carried out in this
+direction. This includes empirically investigating natural extensions of the approach we described
+to other possible losses in the spherical family such as the spherical-softmax.
+Acknowledgements: We wish to thank Yves Grandvalet for stimulating discussions  Ça˘glar
+Gülçehre for pointing us to [14]  the developers of Theano [17  18] and Blocks [19] for making
+these libraries available to build on  and NSERC and Ubisoft for their ﬁnancial support.
+
+3In addition loss functions in this family are also allowed to depend on sum(o) =(cid:80)
+compute cheaply without computing o  by tracking ¯w =(cid:80)
+j W:j whereby sum(o) =(cid:80)
+
+j oj which we can also
+j W T
+
+:j h = ¯wT h.
+
+4where c is the correct class label  and  is a small positive constant that we added to the spherical interpre-
+
+tation in [14] for numerical stability: to guarantee we never divide by 0 nor take the log of 0.
+5Open source code is available at: https://github.com/pascal20100/factored_output_layer
+
+7
+
+Table 1: Speedups with respect to the baseline naive model on CPU  for a minibatch of 128 and the
+whole vocabulary of D = 793471 words. This is a model with two hidden layers of d = 300 neurons.
+
+Model
+
+output layer only speedup whole model speedup
+
+cpu unfactorised (naive)
+gpu unfactorised (naive)
+gpu hierarchical softmax
+
+cpu factorised
+gpu factorised
+
+1
+6.8
+125.2
+763.3
+3257.3
+
+1
+4.7
+178.1
+501
+
+1852.3
+
+Figure 2: Timing of different algorithms. Time taken by forward and backward propagations in the
+output layer  including weight update  on a minibatch of size 128 for different sizes of vocabulary
+D on both CPU and GPU. The input size d is ﬁxed to 300. The Timing of a 2 layer hierarchical
+softmax efﬁcient GPU implementation (h_softmax) is also provided for comparison. Right plot is
+in log-log scale. As expected  the timings of factorized versions are independent of vocabulary size.
+
+Figure 3: Left: Practical and theoretical speedups for different sizes of vocabulary D and ﬁxed input
+size d=300. The practical unfact / fact speedup is similar to the theoretical one. Right: Evolution
+of the Simlex-999 score obtained with different models as a function of training time (CPU softmax
+times were extrapolated from fewer iterations). Softmax models are zero hidden-layer models  while
+our large sparse target (LST) models have two hidden layers. These were the best architectures
+retained in both cases (surprisingly the softmax models with hidden layers performed no better on
+this task). The extra non-linear layers in LST may help compensate for the lack of a softmax. LST
+models converge to slightly lower scores at similar speed as the hierarchical softmax model but
+signiﬁcantly faster than softmax models.
+
+8
+
+0200040006000800010000Size of the vocabulary D0.0000.0020.0040.0060.0080.010Timing (sec) of a minibatch of size 128un-factorised CPUun-factorised GPUfactorised GPUfactorised CPUh_softmax GPU101102103104105106Size of the vocabulary D10-310-210-1100101Timing (sec) of a minibatch of size 128un-factorised CPUun-factorised GPUfactorised GPUfactorised CPUh_softmax GPU0100200300400500600700800Size of the vocabulary D (in thousands)0200400600800100012001400Speedupcpu_unfact / cpu_fact  experimentalgpu_unfact / gpu_fact  experimentalunfact / fact  theoreticalcpu_unfact / gpu_fact  experimentalcpu_unfact / gpu_unfact  experimental10-1100101102103Training time (hours)−0.10−0.050.000.050.100.150.200.25SimLex-999LST CPULST GPUSoftmax CPUSoftmax GPUH-Softmax GPUReferences
+[1] Y. Bengio  R. Ducharme  and P. Vincent. A neural probabilistic language model. In Advances in Neural
+
+Information Processing Systems 13 (NIPS’00)  pages 932–938  2001.
+
+[2] R. Collobert  J. Weston  L. Bottou  M. Karlen  K. Kavukcuoglu  and P. Kuksa. Natural language process-
+
+ing (almost) from scratch. Journal of Machine Learning Research  12:2493–2537  2011.
+
+[3] Y. Dauphin  X. Glorot  and Y. Bengio. Large-scale learning of embeddings with reconstruction sampling.
+
+In Proceedings of the 28th International Conference on Machine learning  ICML ’11  2011.
+
+[4] S. Jean  K. Cho  R. Memisevic  and Y. Bengio. On using very large target vocabulary for neural machine
+
+translation. In ACL-IJCNLP’2015  2015. arXiv:1412.2007.
+
+[5] M. Gutmann and A. Hyvarinen. Noise-contrastive estimation: A new estimation principle for unnormal-
+ized statistical models. In Proceedings of The Thirteenth International Conference on Artiﬁcial Intelli-
+gence and Statistics (AISTATS’10)  2010.
+
+[6] A. Mnih and K. Kavukcuoglu. Learning word embeddings efﬁciently with noise-contrastive estimation.
+
+In Advances in Neural Information Processing Systems 26  pages 2265–2273. 2013.
+
+[7] T. Mikolov  I. Sutskever  K. Chen  G. Corrado  and J. Dean. Distributed representations of words and
+
+phrases and their compositionality. In NIPS’2013  pages 3111–3119. 2013.
+
+[8] A. Shrivastava and P. Li. Asymmetric LSH (ALSH) for sublinear time maximum inner product search
+
+(MIPS). In Advances in Neural Information Processing Systems 27  pages 2321–2329. 2014.
+
+[9] S. Vijayanarasimhan  J. Shlens  R. Monga  and J. Yagnik. Deep networks with large output spaces.
+
+arxiv:1412.7479  2014.
+
+[10] F. Morin and Y. Bengio. Hierarchical probabilistic neural network language model. In Proceedings of the
+
+Tenth International Workshop on Artiﬁcial Intelligence and Statistics  pages 246–252  2005.
+
+[11] D. Rumelhart  G. Hinton  and R. Williams. Learning representations by back-propagating errors. Nature 
+
+323:533–536  1986.
+
+[12] Y. LeCun. Une procédure d’apprentissage pour Réseau à seuil assymétrique.
+
+In Cognitiva 85: A la
+Frontière de l’Intelligence Artiﬁcielle  des Sciences de la Connaissance et des Neurosciences  pages 599–
+604  1985.
+
+[13] Y. LeCun. Learning processes in an asymmetric threshold network. In Disordered Systems and Biological
+
+Organization  pages 233–240. Les Houches 1985  1986.
+
+[14] Y. Ollivier. Riemannian metrics for neural networks. CoRR  abs/1303.0818  2013.
+
+[15] C. Chelba  T. Mikolov  M. Schuster  Q. Ge  T. Brants  P. Koehn  and T. Robinson. One billion word
+benchmark for measuring progress in statistical language modeling. In INTERSPEECH 2014  15th Annual
+Conference of the International Speech Communication Association  Singapore  September 14-18  2014 
+pages 2635–2639  2014.
+
+[16] F. Hill  R. Reichart  and A. Korhonen. Simlex-999: Evaluating semantic models with (genuine) similarity
+
+estimation. CoRR  abs/1408.3456  2014.
+
+[17] J. Bergstra  O. Breuleux  F. Bastien  P. Lamblin  R. Pascanu  G. Desjardins  J. Turian  D. Warde-Farley 
+and Y. Bengio. Theano: a CPU and GPU math expression compiler. In Proceedings of the Python for
+Scientiﬁc Computing Conference (SciPy)  2010. Oral Presentation.
+
+[18] F. Bastien  P. Lamblin  R. Pascanu  J. Bergstra  I. J. Goodfellow  A. Bergeron  N. Bouchard  and Y. Bengio.
+Theano: new features and speed improvements. Deep Learning and Unsupervised Feature Learning NIPS
+2012 Workshop  2012.
+
+[19] B. van Merriënboer  D. Bahdanau  V. Dumoulin  D. Serdyuk  D. Warde-Farley  J. Chorowski  and Y. Ben-
+
+gio. Blocks and Fuel: Frameworks for deep learning. ArXiv e-prints  June 2015.
+
+9
+
+,Yann Dauphin
+Yoshua Bengio
+Nishant Mehta
+Robert Williamson
+Pascal Vincent
+Alexandre de Brébisson
+Xavier Bouthillier
+Taylor Mordan
+Nicolas THOME
+Gilles Henaff
+Matthieu Cord

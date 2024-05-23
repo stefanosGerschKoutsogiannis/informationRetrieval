@@ -1,0 +1,949 @@
+2019,Leader Stochastic Gradient Descent for Distributed Training of Deep Learning Models,We consider distributed optimization under communication constraints for training deep learning models. We propose a new algorithm  whose parameter updates rely on two forces: a regular gradient step  and a corrective direction dictated by the currently best-performing worker (leader). Our method differs from the parameter-averaging scheme EASGD in a number of ways: (i) our objective formulation does not change the location of stationary points compared to the original optimization problem; (ii) we avoid convergence decelerations caused by pulling local workers descending to different local minima to each other (i.e. to the average of their parameters); (iii) our update by design breaks the curse of symmetry (the phenomenon of being trapped in poorly generalizing sub-optimal solutions in symmetric non-convex landscapes); and (iv) our approach is more communication efficient since it broadcasts only parameters of the leader rather than all workers. We provide theoretical analysis of the batch version of the proposed algorithm  which we call Leader Gradient Descent (LGD)  and its stochastic variant (LSGD). Finally  we implement an asynchronous version of our algorithm and extend it to the multi-leader setting  where we form groups of workers  each represented by its own local leader (the best performer in a group)  and update each worker with a corrective direction comprised of two attractive forces: one to the local  and one to the global leader (the best performer among all workers). The multi-leader setting is well-aligned with current hardware architecture  where local workers forming a group lie within a single computational node and different groups correspond to different nodes. For training convolutional neural networks  we empirically demonstrate that our approach compares favorably to state-of-the-art baselines.,Leader Stochastic Gradient Descent for Distributed
+
+Training of Deep Learning Models
+
+Yunfei Teng∗ 1
+yt1208@nyu.edu
+
+Wenbo Gao∗ 2
+
+wg2279@columbia.edu
+
+Francois Chalus
+
+chalusf3@gmail.com
+
+Anna Choromanska
+ac5455@nyu.edu
+
+Donald Goldfarb
+
+goldfarb@columbia.edu
+
+Adrian Weller
+
+aw665@cam.ac.uk
+
+Abstract
+
+We consider distributed optimization under communication constraints for training
+deep learning models. We propose a new algorithm  whose parameter updates
+rely on two forces: a regular gradient step  and a corrective direction dictated
+by the currently best-performing worker (leader). Our method differs from the
+parameter-averaging scheme EASGD [1] in a number of ways: (i) our objective
+formulation does not change the location of stationary points compared to the
+original optimization problem; (ii) we avoid convergence decelerations caused by
+pulling local workers descending to different local minima to each other (i.e. to the
+average of their parameters); (iii) our update by design breaks the curse of symmetry
+(the phenomenon of being trapped in poorly generalizing sub-optimal solutions in
+symmetric non-convex landscapes); and (iv) our approach is more communication
+efﬁcient since it broadcasts only parameters of the leader rather than all workers.
+We provide theoretical analysis of the batch version of the proposed algorithm 
+which we call Leader Gradient Descent (LGD)  and its stochastic variant (LSGD).
+Finally  we implement an asynchronous version of our algorithm and extend it to
+the multi-leader setting  where we form groups of workers  each represented by its
+own local leader (the best performer in a group)  and update each worker with a
+corrective direction comprised of two attractive forces: one to the local  and one to
+the global leader (the best performer among all workers). The multi-leader setting
+is well-aligned with current hardware architecture  where local workers forming
+a group lie within a single computational node and different groups correspond
+to different nodes. For training convolutional neural networks  we empirically
+demonstrate that our approach compares favorably to state-of-the-art baselines.
+
+1
+
+Introduction
+
+As deep learning models and data sets grow in size  it becomes increasingly helpful to parallelize
+their training over a distributed computational environment. These models lie at the core of many
+modern machine-learning-based systems for image recognition [2]  speech recognition [3]  natural
+language processing [4]  and more. This paper focuses on the parallelization of the data  not the
+model  and considers collective communication scheme [5] that is most commonly used nowadays.
+A typical approach to data parallelization in deep learning [6  7] uses multiple workers that run
+variants of SGD [8] on different data batches. Therefore  the effective batch size is increased by the
+number of workers. Communication ensures that all models are synchronized and critically relies
+on a scheme where each worker broadcasts its parameter gradients to all the remaining workers.
+
+* 1: Equal contribution. Algorithm development and implementation on deep models.
+* 2: Equal contribution. Theoretical analysis and implementation on matrix completion.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+This is the case for DOWNPOUR [9] (its decentralized extension  with no central parameter server 
+based on the ring topology can be found in [10]) or Horovod [11] methods. These techniques
+require frequent communication (after processing each batch) to avoid instability/divergence  and
+hence are communication expensive. Moreover  training with a large batch size usually hurts
+generalization [12  13  14] and convergence speed [15  16].
+Another approach  called Elastic Averaging (Stochastic) Gradient Decent  EA(S)GD [1]  introduces
+elastic forces linking the parameters of the local workers with central parameters computed as a
+moving average over time and space (i.e. over the parameters computed by local workers). This
+method allows less frequent communication as workers by design do not need to have the same
+parameters but are instead periodically pulled towards each other. The objective function of EASGD 
+however  has stationary points which are not stationary points of the underlying objective function
+(see Proposition 8 in the Supplement)  thus optimizing it may lead to sub-optimal solutions for the
+original problem. Further  EASGD can be viewed as a parallel extension of the averaging SGD
+scheme [17] and as such it inherits the downsides of the averaging policy. On non-convex problems 
+when the iterates are converging to different local minima (that may potentially be globally optimal) 
+the averaging term can drag the iterates in the wrong directions and signiﬁcantly hurt the convergence
+speed of both local workers and the master. In symmetric regions of the optimization landscape 
+the elastic forces related with different workers may cancel each other out causing the master to be
+permanently stuck in between or at the maximum between different minima  and local workers to be
+stuck at the local minima or on the slopes above them. This can result in arbitrarily bad generalization
+error. We refer to this phenomenon as the “curse of symmetry”. Landscape symmetries are common
+in a plethora of non-convex problems [18  19  20  21  22]  including deep learning [23  24  25  26].
+
+This paper revisits the EASGD update
+and modiﬁes it in a simple  yet powerful
+way which overcomes the above mentioned
+shortcomings of the original technique. We
+propose to replace the elastic force rely-
+ing on the average of the parameters of
+local workers by an attractive force link-
+ing the local workers and the current best
+performer among them (leader). Our ap-
+proach reduces the communication over-
+head related with broadcasting parameters
+of all workers to each other  and instead re-
+quires broadcasting only the leader param-
+eters. The proposed approach easily adapts
+to a typical hardware architecture compris-
+ing of multiple compute nodes where each
+node contains a group of workers and local
+communication  within a node  is signiﬁ-
+cantly faster than communication between
+the nodes. We propose a multi-leader extension of our approach that adapts well to this hardware
+architecture and relies on forming groups of workers (one per compute node) which are attracted
+both to their local and global leader. To reduce the communication overhead  the correction force
+related with the global leader is applied less frequently than the one related with the local leader.
+Finally  our L(S)GD approach  similarly to EA(S)GD  tends to explore wide valleys in the optimization
+landscape when the pulling force between workers and leaders is set to be small. This property often
+leads to improved generalization performance of the optimizer [27  28].
+The paper is organized as follows: Section 2 introduces the L(S)GD approach  Section 3 provides
+theoretical analysis  Section 4 contains empirical evaluation  and ﬁnally Section 5 concludes the paper.
+Theoretical proofs and additional theoretical and empirical results are contained in the Supplement.
+
+Figure 1: Low-rank matrix completion problems solved
+with EAGD and LGD. The dimension d = 1000 and
+four ranks r ∈ {1  10  50  100} are used. The reported
+value for each algorithm is the value of the best worker
+(8 workers are used in total) at each step.
+
+2
+
+2 Leader (Stochastic) Gradient Descent “L(S)GD” Algorithm
+
+2.1 Motivating example
+
+(cid:8) 1
+4(cid:107)M − XX T(cid:107)2
+
+F : X ∈ Rd×r(cid:9). This problem is non-convex but is known to have the
+
+Figure 1 illustrates how elastic averaging can impair convergence. To obtain the ﬁgure we applied
+EAGD (Elastic Averaging Gradient Decent) and LGD to the matrix completion problem of the
+form: minX
+property that all local minimizers are global minimizers [18]. For four choices of the rank r  we
+generated 10 random instances of the matrix completion problem  and solved each with EAGD and
+LGD  initialized from the same starting points (we use 8 workers). For each algorithm  we report the
+progress of the best objective value at each iteration  over all workers. Figure 1 shows the results
+across 10 random experiments for each rank.
+
+It is clear that EAGD slows down signiﬁcantly as it approaches a minimizer. Typically  the center (cid:101)X
+
+of EAGD is close to the average of the workers  which is a poor solution for the matrix completion
+problem when the workers are approaching different local minimizers  even though all local minimiz-
+ers are globally optimal. This induces a pull on each node away from the minimizers  which makes it
+extremely difﬁcult for EAGD to attain a solution of high accuracy. In comparison  LGD does not
+have this issue. Further details of this experiment  and other illustrative examples of the difference
+between EAGD and LGD  can be found in the Supplement.
+
+2.2 Symmetry-breaking updates
+
+Next we explain the basic update of the L(S)GD algorithm. Consider ﬁrst the single-leader setting and
+the problem of minimizing loss function L in a parallel computing environment. The optimization
+problem is given as
+
+min
+
+x1 x2 ... xl
+
+L(x1  x2  . . .   xl) := min
+
+x1 x2 ... xl
+
+E[f (xi; ξi)] +
+
+||xi − ˜x||2 
+
+λ
+2
+
+(1)
+
+where l is the number of workers  x1  x2  . . .   xl are the parameters of the workers and ˜x are the
+E[f (xi; ξi)])  and ξis are
+parameters of the leader. The best performing worker  i.e. ˜x = arg min
+x1 x2 ... xl
+data samples drawn from some probability distribution P. λ is the hyperparameter that denotes the
+strength of the force pulling the workers to the leader. In the theoretical section we will refer to
+E[f (xi; ξi)] as simply f (xi). This formulation can be further extended to the multi-leader setting.
+The optimization problem is modiﬁed to the following form
+
+l(cid:88)
+
+i=1
+
+min
+
+x1 1 x1 2 ... xn l
+
+L(x1 1  x1 2  . . .   xn l)
+
+n(cid:88)
+
+l(cid:88)
+
+j=1
+
+i=1
+
+:=
+
+min
+
+x1 1 x1 2 ... xn l
+
+E[f (xj i; ξj i)] +
+
+||xj i − ˜xj||2 +
+
+λ
+2
+
+||xj i − ˜x||2 
+
+λG
+2
+
+(2)
+
+x1 1 x1 2 ... xn l
+
+where n is the number of groups  l is the number of workers in each group  ˜xj is the local leader of
+the jth group (i.e. ˜xj = arg minxj 1 xj 2 ... xj l E[f (xj i; ξj i)])  ˜x is the global leader (the best worker
+E[f (xj i; ξj i)])  xj 1  xj 2  . . .   xj l are the parameters
+among local leaders  i.e. ˜x = arg min
+of the workers in the jth group  and ξj is are the data samples drawn from P. λ and λG are the
+hyperparameters that denote the strength of the forces pulling the workers to their local and global
+leader respectively.
+The updates of the LSGD algorithm are captured below  where t denotes iteration. The ﬁrst update
+shown in Equation 3 is obtained by taking the gradient descent step on the objective in Equation 2
+with respect to variables xj i. The stochastic gradient of E[f (xi; ξi)] with respect to xj i is denoted
+as gj i
+(in case of LGD the gradient is computed over all training examples) and η is the learning rate.
+t
+
+xj i
+t+1 = xj i
+
+t − ηgj i
+
+t (xj i
+
+t ) − λ(xj i
+
+t − ˜xj
+
+t ) − λG(xj i
+
+t − ˜xt)
+
+(3)
+
+t+1 and ˜xt+1 are the local and global leaders deﬁned above.
+
+where ˜xj
+Equation 3 describes the update of any given worker and is comprised of the regular gradient step
+and two corrective forces (in single-leader setting the third term disappears as λG = 0 then). These
+
+3
+
+Algorithm 1 LSGD Algorithm (Asynchronous)
+
+Input: pulling coefﬁcients λ  λG  learning rate η  local/global communication periods τ  τG
+Initialize:
+
+Randomly initialize x1 1  x1 2  ...  xn l
+Set iteration counters tj i = 0
+Set ˜xj
+
+E[f (xj i; ξj i
+
+0 = arg min
+xj 1 ... xj l
+
+0 )]  ˜x0 = arg min
+x1 1 ... xn l
+
+repeat
+
+for all j = 1  2  . . .   n  i = 1  2  . . .   l do
+
+Draw random sample ξj i
+tj i
+xj i ←− xj i − ηgj i
+t (xj i)
+tj i = tj i + 1;
+if nlτ divides (
+
+n(cid:80)
+
+l(cid:80)
+
+tj i) then
+
+E[f (xj i; ξj i
+
+0 )];
+
+(cid:46) Do in parallel for each worker
+
+(cid:46) Determine the local best workers
+(cid:46) Pull to the local best workers
+
+(cid:46) Determine the global best worker
+(cid:46) Pull to the global best worker
+
+j=1
+
+i=1
+
+˜xj = arg minxj 1 ... xj l E[f (xj i; ξj i
+xj i ←− xj i − λ(xj i − ˜xj)
+
+tj i)].
+
+end if
+if nlτG divides (
+
+n(cid:80)
+
+l(cid:80)
+
+j=1
+
+i=1
+
+tj i) then
+
+˜x = arg minx1 1 ... xn l E[f (xj i; ξj i
+xj i ←− xj i − λG(xj i − ˜x)
+
+tj i)].
+
+end if
+
+end for
+
+until termination
+
+forces constitute the communication mechanism among the workers and pull all the workers towards
+the currently best local and global solution to ensure fast convergence. As opposed to EASGD 
+the updates performed by workers in LSGD break the curse of symmetry and avoid convergence
+decelerations that result from workers being pulled towards the average which is inherently inﬂuenced
+by poorly performing workers. In this paper  instead of pulling workers to their averaged parameters 
+we propose the mechanism of pulling the workers towards the leaders. The ﬂavor of the update
+resembles a particle swarm optimization approach [29]  which is not typically used in the context
+of stochastic gradient optimization for deep learning. Our method may therefore be viewed as a
+dedicated particle swarm optimization approach for training deep learning models in the stochastic
+setting and parallel computing environment.
+Next we describe the LSGD algorithm in more detail. We rely on the collective communication
+scheme. In order to reduce the amount of communication between the workers  it is desired to pull
+them towards the leaders less often than every iteration. Also  in practice each worker can have a
+different speed. To prevent waiting for the slower workers and achieve communication efﬁciency 
+we implement the algorithm in the asynchronous operation mode. In this case  the communication
+period is determined based on the total number of iterations computed across all workers and the
+communication is performed every nlτ or nlτG iterations  where τ and τG denote local and global
+communication periods  respectively. In practice  we use τG > τ since communication between
+workers lying in different groups is more expensive than between workers within one group  as
+explained above. When communication occurs  all workers are updated at the same time (i.e. pulled
+towards the leaders) in order to take advantage of the collective communication scheme. Between
+communications  workers run their own local SGD optimizers. The resulting LSGD method is very
+simple  and is depicted in Algorithm 1.
+The next section provides a theoretical description of the single-leader batch (LGD) and stochastic
+(LSGD) variants of our approach.
+
+4
+
+3 Theoretical Analysis
+
+We assume without loss of generality that there is a single leader. The objective function with multiple
+leaders is given by f (x)+ λ1
+
+2 (cid:107)x−zc(cid:107)2  which is equivalent to f (x)+ Λ
+
+for Λ =(cid:80)c
+
+i=1 λi and(cid:101)z = 1
+
+Λ
+
+(cid:80)c
+2 (cid:107)x−z1(cid:107)2 +. . .+ λc
+
+2 (cid:107)x−(cid:101)z(cid:107)2
+
+i=1 λizi. Proofs for this section are deferred to the Supplement.
+
+3.1 Convergence Rates for Stochastic Strongly Convex Optimization
+
+We ﬁrst show that LSGD obtains the same convergence rate as SGD for stochastic strongly convex
+problems [30]. In Section 3.3 we discuss how and when LGD can obtain better search directions
+than gradient descent. We discuss non-convex optimization in Section 3.2. Throughout Section 3.1 
+f will typically satisfy:
+Assumption 1 f is M-Lipschitz-differentiable and m-strongly convex  which is to say  the gradient
+∇f satisﬁes (cid:107)∇f (x) − ∇f (y)(cid:107) ≤ M(cid:107)x − y(cid:107)  and f satisﬁes f (y) ≥ f (x) + ∇f (x)T (y − x) +
+2 (cid:107)y − x(cid:107)2. We write x∗ for the unique minimizer of f  and κ := M
+m for the condition number of f.
+3.1.1 Convergence Rates
+
+m
+
+The key technical result is that LSGD satisﬁes a similar one-step descent in expectation as SGD  with
+an additional term corresponding to the pull of the leader. To provide a uniﬁed analysis of ‘pure’
+LSGD as well as more practical variants where the leader is updated infrequently or with errors  we
+is  z may not be the minimizer of x1  . . .   xp  nor even satisfy f (z) ≤ f (xi). Since the nodes operate
+independently except when updating z  we may analyze LSGD steps for each node individually  and
+we write x = xi for brevity.
+
+consider a general iteration x+ = x − η((cid:101)g(x) + λ(x − z))  where z is an arbitrary guiding point; that
+Theorem 1. Let f satisfy Assumption 1. Let (cid:101)g(x) be an unbiased estimator for ∇f (x) with
+Var((cid:101)g(x)) ≤ σ2 + ν(cid:107)∇f (x)(cid:107)2  and let z be any point. Suppose that η  λ satisfy η ≤ (2M (ν + 1))−1
+
+√
+
+and ηλ ≤ (2κ)−1  η
+
+√
+λ ≤ (κ
+
+2m)−1. Then the LSGD step satisﬁes
+
+Ef (x+) − f (x∗) ≤ (1 − mη)(f (x) − f (x∗)) − ηλ(f (x) − f (z)) +
+
+(4)
+Note the presence of the new term −ηλ(f (x)−f (z)) which speeds up convergence when f (z) ≤ f (x) 
+i.e the leader is better than x. If the leader zk is always chosen so that f (zk) ≤ f (xk) at every
+step k  then lim supk→∞ Ef (xk) − f (x∗) ≤ 1
+k )  then
+Ef (xk) − f (x∗) ≤ O( 1
+k ).
+
+2 ηκσ2. If η decreases at the rate ηk = Θ( 1
+
+σ2.
+
+2
+
+η2M
+
+k ) rate of LSGD matches that of comparable distributed methods. Both Hogwild [31] and
+The O( 1
+EASGD achieve a rate of O( 1
+k ) on strongly convex objective functions. We note that published
+convergence rates are not available for many distributed algorithms (including DOWNPOUR [9]).
+
+3.1.2 Communication Periods
+
+In practice  communication between distributed machines is costly. The LSGD algorithm has a
+communication period τ for which the leader is only updated every τ iterations  so each node can run
+independently during that period. This τ is allowed to differ between nodes  and over time  which
+captures the asynchronous and multi-leader variants of LSGD. We write xk j for the j-th step during
+the k-th period. It may occur that f (z) > f (xk j) for some k  j  that is  the current solution xk j
+is now better than the last selected leader. In this case  the leader term λ(x − z) may no longer be
+beneﬁcial  and instead simply pulls x toward z. There is no general way to determine how many
+steps are taken before this event. However  we can show that if f (z) ≥ f (x)  then
+
+Ef (x+) ≤ f (z) +
+
+1
+2
+
+η2M σ2 
+
+(5)
+
+so the solution will not become worse than a stale leader (up to gradient noise). As τ goes to inﬁnity 
+2(cid:107)x−z(cid:107)2  which is quantiﬁably better than z as
+LSGD converges to the minimizer of ψ(x) = f (x)+ λ
+captured in Theorem 2. Together  these facts show that LSGD is safe to use with long communication
+periods as long as the original leader is good.
+
+5
+
+2(cid:107)x − z(cid:107)2. The minimizer w of ψ satisﬁes f (w) − f (x∗) ≤ λ
+
+Theorem 2. Let f be m-strongly convex  and let x∗ be the minimizer of f. For ﬁxed λ  z  deﬁne
+m+λ (f (z) − f (x∗)).
+ψ(x) = f (x) + λ
+The theoretical results here and in Section 3.1.1 address two fundamental instances of the LSGD
+algorithm: the ‘synchronous’ case where communication occurs each round  and the ‘inﬁnitely
+asynchronous’ case where communication periods are arbitrarily long. For unknown periods τ > 1 
+it is difﬁcult to demonstrate general quantiﬁable improvements beyond (5)  but we note that (4) 
+Theorem 2  and the results on stochastic leader selection (Sections 3.1.3 and 7.6) can be combined to
+analyze speciﬁc instances of the asynchronous LSGD.
+In our experiments  we employ another method to avoid the issue of stale leaders. To ensure that the
+leader is good  we perform an LSGD step only on the ﬁrst step after a leader update  and then take
+standard SGD steps for the remainder of the communication period.
+
+3.1.3 Stochastic Leader Selection
+
+Next  we consider the impact of selecting the leader with errors. In practice  it is often costly to
+evaluate f (x)  as in deep learning. Instead  we estimate the values f (xi)  and then select z as the
+
+variable having the smallest estimate. Formally  suppose that we have an unbiased estimator (cid:101)f (x)
+each estimator (cid:101)f (x1)  . . .  (cid:101)f (xp)  and then z = {xi : yi = min{y1  . . .   yp}}. We refer to this as
+
+of f (x)  with uniformly bounded variance. At each step  a single sample y1  . . .   yp is drawn from
+√
+stochastic leader selection. The stochastic leader satisﬁes Ef (z) ≤ f (ztrue) + 4
+pσf   where ztrue
+√
+is the true leader (see supplementary materials). Thus  the error introduced by the stochastic leader
+contributes an additive error of at most 4ηλ
+pσf . Since this is of order η rather than η2  we cannot
+Theorem 3. Let f satisfy Assumption 1  and let(cid:101)g(x) be as in Theorem 1. Suppose we use stochastic
+k )1 unless λk is also decreasing. We have the following result:
+guarantee convergence with ηk = Θ( 1
+leader selection with (cid:101)f (x) having Var((cid:101)f (x)) ≤ σ2
+f . If η  λ are ﬁxed so that η ≤ (2M (ν + 1))−1
+2m)−1  then lim supk→∞ Ef (xk) − f (x∗) ≤ 1
+pσf .
+2 ηκσ2 + 4
+k )  then Ef (xk) − f (x∗) ≤ O( 1
+k ).
+
+and ηλ ≤ (2κ)−1  η
+If η  λ decrease at the rate ηk = Θ( 1
+
+√
+λ ≤ (κ
+
+k )  λk = Θ( 1
+
+√
+
+√
+
+m λ
+
+The communication period and the accuracy of stochastic leader selection are both methods of
+reducing the cost of updating the leader  and can be substitutes. When the communication period is
+long  it may be effective to estimate f (xi) to higher accuracy  since this can be done independently.
+
+3.2 Non-convex Optimization: Stationary Points
+
+As mentioned above  EASGD has the ﬂaw that the EASGD objective function can have stationary
+
+points such that none of x1  . . .   xp (cid:101)x is a stationary point of the underlying function f. LSGD does
+
+not have this issue.
+Theorem 4. Let Ωi be the points (x1  . . .   xp) where xi is the unique minimizer among (x1  . . .   xp).
+If x∗ = (w1  . . .   wp) ∈ Ωi is a stationary point of the LSGD objective function  then ∇f i(wi) = 0.
+Moreover  it can be shown that for the deterministic algorithm LGD with any choice of communication
+periods  there will always be some variable xi such that lim inf (cid:107)∇f (xi
+Theorem 5. Assume that f is bounded below and M-Lipschitz-differentiable  and that the LGD step
+sizes are selected so that ηi < 2
+M . Then for any choice of communication periods  it holds that for
+every i such that xi is the leader inﬁnitely often  lim inf k (cid:107)∇f (xi
+
+k)(cid:107) = 0.
+
+k)(cid:107) = 0.
+
+3.3 Search Direction Improvement from Leader Selection
+
+In this section  we discuss how LGD can obtain better search directions than gradient descent. In
+general  it is difﬁcult to determine when the LGD step will satisfy f (x − η(∇f (x) + λ(x − z))) ≤
+f (x−η∇f (x))  since this depends on the precise combination of f  x  z  η  λ  and moreover  the maxi-
+mum allowable value of η is different for LGD and gradient descent. Instead  we measure the goodness
+of a search direction by the angle it forms with the Newton direction dN (x) = −(∇2f (x))−1∇f (x).
+The Newton method is locally quadratically convergent around local minimizers with non-singular
+
+1For intuition  note that(cid:80)∞
+
+n=1
+
+1
+
+n is divergent.
+
+6
+
+2 Vol(E)2.
+
+Hessian  and converges in a single step for quadratic functions if η = 1. Hence  we consider it
+desirable to have search directions that are close to dN . Let θ(u  v) denote the angle between u  v. Let
+dz = −(∇f (x)+λ(x−z)) be the LGD direction with leader z  and dG(x) = −∇f (x). The angle im-
+provement set is the set of leaders Iθ(x  λ) = {z : f (z) ≤ f (x)  θ(dz  dN (x)) ≤ θ(dG(x)  dN (x))}.
+The set of candidate leaders is E = {z : f (z) ≤ f (x)}. We aim to show that a large subset of leaders
+in E belong to Iθ(x  λ).
+In this section  we consider the positive deﬁnite quadratic f (x) = 1
+2 xT Ax with condition number κ
+and dG(x) = −Ax  dN (x) = −x. The ﬁrst result shows that as λ becomes sufﬁciently small  at least
+half of E improves the angle. We use the n-dimensional volume Vol(·) to measure the relative size
+of sets: an ellipsoid E given by E = {x : xT Ax ≤ 1} has volume Vol(E) = det(A)−1/2 Vol(Sn) 
+where Sn is the unit ball.
+Theorem 6. Let x be any point such that θx = θ(dG(x)  dN (x)) > 0  and let E = {z : f (z) ≤
+f (x)}. Then limλ→0 Vol(Iθ(x  λ)) ≥ 1
+Next  we consider when λ is large. We show that points with large angle between dG(x)  dN (x)
+exist  which are most suitable for improvement by LGD. For r ≥ 2  deﬁne Sr = {x :
+κ}. It can be shown that Sr is nonempty for all r ≥ 2. We show
+cos(θ(dG(x)  dN (x))) = r√
+that for x ∈ Sr for a certain range of r  Iθ(x  λ) is at least half of E for any choice of λ.
+Theorem 7. Let Rκ = {r :
+Vol(Iθ(x  λ)) ≥ 1
+Note that Theorems 6 and 7 apply only to convex functions  or in the neighborhoods of local
+minimizers where the objective function is locally convex. In nonconvex landscapes  the Newton
+direction may point towards saddle points [32]  which is undesirable; however  since Theorems 6
+and 7 do not apply in this situation  these results do not imply that LSGD has harmful behavior.
+For nonconvex problems  our intuition is that many candidate leaders lie in directions of negative
+curvature  which would actually lead away from saddle points  but this is signiﬁcantly harder to
+analyze since the set of candidates is unbounded a priori.
+4 Experimental Results
+
+If x ∈ Sr for r ∈ Rκ  then for any λ ≥ 0 
+
+r√
+κ + r3/2
+
+κ1/4 ≤ 1}.
+
+2 Vol(E).
+
+4.1 Experimental setup
+
+In this section we compare
+the performance of LSGD
+with state-of-the-art methods
+for parallel
+training of deep
+networks  such as EASGD and
+DOWNPOUR (their pseudo-
+codes can be found in [1])  as
+well as sequential
+technique
+SGD. The codes for LSGD can
+be found at https://github.
+com/yunfei-teng/LSGD. We
+use communication period equal
+to 1 for DOWNPOUR in all
+our experiments as this is the
+typical setting used for
+this
+method ensuring stable conver-
+gence. The experiments were
+performed using the CIFAR-10
+data set [33] on three benchmark
+architectures: 7-layer CNN used
+in the original EASGD paper
+(see Section 5.1. in [1]) that we refer to as CNN7  VGG16 [34]  and ResNet20 [35]; and ImageNet
+(ILSVRC 2012) data set [36] on ResNet50.
+
+Figure 2: CNN7 on CIFAR-10. Test error for the center variable
+versus wall-clock time (original plot on the left and zoomed on
+the right). Test loss is reported in Figure 10 in the Supplement.
+
+2Note that Iθ(x  λ1) ⊇ Iθ(x  λ2) for λ1 ≤ λ2  so the limit is well-deﬁned.
+
+7
+
+Figure 3: VGG16 on CIFAR-10. Test error for the center variable
+versus wall-clock time (original plot on the left and zoomed on
+the right). Test loss is reported in Figure 12 in the Supplement.
+
+During training  we select the
+leader for the LSGD method
+based on the average of the train-
+ing loss computed over the last
+10 (CIFAR-10) and 64 (Ima-
+geNet) data batches. At testing 
+we report the performance of the
+center variable for EASGD and
+LSGD  where for LSGD the cen-
+ter variable is computed as the
+average of the parameters of all
+workers. [Remark: Note that we
+use the leader’s parameter to pull
+to at training and we report the averaged parameters at testing deliberately. It is demonstrated in our
+paper (e.g.: Figure 1) that pulling workers to the averaged parameters at training may slow down
+convergence and we address this problem. Note that after training  the parameters that workers
+obtained after convergence will likely lie in the same valley of the landscape (see [37]) and thus their
+average is expected to have better generalization ability (e.g. [27  38])  which is why we report the
+results for averaged parameters at testing.] Finally  for all methods we use weight decay with decay
+coefﬁcient set to 10−4. In our experiments we use either 4 workers (single-leader LSGD setting) or
+16 workers (multi-leader LSGD setting with 4 groups of workers). For all methods  we report the
+learning rate leading to the smallest achievable test error under similar convergence rates (we rejected
+small learning rates which led to unreasonably slow convergence).
+We use GPU nodes interconnected with Ethernet. Each GPU node has four GTX 1080 GPU processors
+where each local worker corresponds to one GPU processor. We use CUDA Toolkit 10.03 and NCCL
+24. We have developed a software package based on PyTorch for distributed training  which will be
+released (details are elaborated in Section 9.4).
+Data processing and prefetching are discussed in the Supplement. The summary of the hyperparame-
+ters explored for each method are also provided in the Supplement. We use constant learning rate for
+CNN7 and learning rate drop (we divide the learning rate by 10 when we observe saturation of the
+optimizer) for VGG16  ResNet20  and ResNet50.
+
+4.2 Experimental Results
+
+In Figure 2 we report results ob-
+tained with CNN7 on CIFAR-
+10. We run EASGD and LSGD
+with communication period τ =
+64. We used τG = 128 for the
+multi-leader LSGD case. The
+number of workers was set to
+l = {4  16}. Our method con-
+sistently outperforms the com-
+petitors in terms of convergence
+speed (it is roughly 1.5 times
+faster than EASGD for 16 work-
+ers) and for 16 workers it obtains
+smaller error.
+In Figure 3 we demonstrate re-
+sults for VGG16 and CIFAR-10
+with communication period 64
+and number of workers equal to
+4. LSGD converges marginally
+faster than EASGD and recovers
+
+Figure 4: ResNet20 on CIFAR-10. Test error for the center vari-
+able versus wall-clock time (original plot on the left and zoomed
+on the right). Test loss is reported in Figure 11 in the Supplement.
+
+3https://developer.nvidia.com/cuda-zone
+4https://developer.nvidia.com/nccl
+
+8
+
+the same error. At the same time it outperforms signiﬁcantly DOWNPOUR in terms of convergence
+speed and obtains a slightly better solution.
+The experimental
+results ob-
+tained using ResNet20 and
+CIFAR-10 for the same setting
+of communication period and
+number of workers as in case
+of CNN7 are shown in Figure 4.
+On 4 workers we converge
+comparably fast to EASGD but
+recover better test error. For this
+experiment in Figure 5 we show
+the switching pattern between
+the leaders indicating that LSGD
+indeed takes advantage of all
+workers when exploring the
+landscape. On 16 workers we converge roughly 2 times faster than EASGD and obtain signiﬁcantly
+smaller error. In this and CNN7 experiment LSGD (as well as EASGD) are consistently better than
+DONWPOUR and SGD  as expected.
+Remark 1. We believe that these two facts together — (1) the schedule of leader switching recorded
+in the experiments shows frequent switching  and (2) the leader point itself is not pulled away from
+minima — suggest that the ‘pulling away’ in LSGD is beneﬁcial: non-leader workers that were pulled
+away from local minima later became the leader  and thus likely obtained an even better solution
+than they originally would have.
+
+Figure 5: ResNet20 on CIFAR-10. The identity of the worker that
+is recognized as the leader (i.e. rank) versus iterations (on the left)
+and the number of times each worker was the leader (on the right).
+
+Finally  in Figure 6 we report the
+empirical results for ResNet50
+run on ImageNet. The num-
+ber of workers was set to 4 and
+the communication period τ was
+set to 64.
+In this experiment
+our algorithm behaves compa-
+rably to EASGD but converges
+much faster than DOWNPOUR.
+Also note that for ResNet50 on
+ImageNet  SGD is consistently
+worse than all reported methods
+(training on ImageNet with SGD
+on a single GTX1080 GPU until
+convergence usually takes about a week and gives slightly worse ﬁnal performance)  which is why
+the SGD curve was deliberately omitted (other methods converge in around two days).
+
+Figure 6: ResNet50 on ImageNet. Test error for the center variable
+versus wall-clock time (original plot on the left and zoomed on
+the right). Test loss is reported in Figure 13 in the Supplement.
+
+5 Conclusion
+
+In this paper we propose a new algorithm called LSGD for distributed optimization in non-convex
+settings. Our approach relies on pulling workers to the current best performer among them  rather
+than their average  at each iteration. We justify replacing the average by the leader both theoretically
+and through empirical demonstrations. We provide a thorough theoretical analysis  including proof
+of convergence  of our algorithm. Finally  we apply our approach to the matrix completion problem
+and training deep learning models and demonstrate that it is well-suited to these learning settings.
+
+Acknowledgements
+
+WG and DG were supported in part by NSF Grant CCF-1838061. AW acknowledges support from
+the David MacKay Newton research fellowship at Darwin College  The Alan Turing Institute under
+EPSRC grant EP/N510129/1 & TU/B/000074  and the Leverhulme Trust via the CFI.
+
+9
+
+References
+[1] S. Zhang  A. Choromanska  and Y. LeCun. Deep learning with elastic averaging SGD. In NIPS  2015.
+
+[2] A. Krizhevsky  I. Sutskever  and G. E. Hinton. Imagenet classiﬁcation with deep convolutional neural
+
+networks. In NIPS. 2012.
+
+[3] O. Abdel-Hamid  A.-r. Mohamed  H. Jiang  and G. Penn. Applying convolutional neural networks concepts
+
+to hybrid NN-HMM model for speech recognition. In ICASSP  2012.
+
+[4] J. Weston  S. Chopra  and K. Adams. #tagspace: Semantic embeddings from hashtags. In EMNLP  2014.
+
+[5] U. Wickramasinghe and A. Lumsdaine. A survey of methods for collective communication optimization
+
+and tuning. CoRR  abs/1611.06334  2016.
+
+[6] T. Ben-Nun and T. Hoeﬂer. Demystifying parallel and distributed deep learning: An in-depth concurrency
+
+analysis. CoRR  abs/1802.09941  2018.
+
+[7] A. Gholami  A. Azad  P. Jin  K. Keutzer  and A. Buluc. Integrated model  batch  and domain parallelism in
+training neural networks. Proceedings of the 30th Syposium on Parallelism in Algorithms and Architectures 
+pages 77–86  2018.
+
+[8] L. Bottou. Online algorithms and stochastic approximations. In Online Learning and Neural Networks.
+
+Cambridge University Press  1998.
+
+[9] J. Dean  G. Corrado  R. Monga  K. Chen  M. Devin  M. Mao  A. Senior  P. Tucker  K. Yang  Q. V. Le  et al.
+
+Large scale distributed deep networks. In NIPS  2012.
+
+[10] X. Lian  W. Zhang  C. Zhang  and J. Liu. Asynchronous decentralized parallel stochastic gradient descent.
+
+In ICML  2018.
+
+[11] A. Sergeev and M. Del Balso. Horovod: fast and easy distributed deep learning in TensorFlow. CoRR 
+
+abs/1802.05799  2018.
+
+[12] N. S. Keskar  D. Mudigere  J. Nocedal  M. Smelyanskiy  and P. Tak Peter Tang. On large-batch training for
+
+deep learning: Generalization gap and sharp minima. In ICLR  2017.
+
+[13] S. Jastrz˛ebski  Z. Kenton  D. Arpit  N. Ballas  A. Fischer  Y. Bengio  and A. Storkey. Finding ﬂatter minima
+
+with sgd. In ICLR Workshop Track  2018.
+
+[14] S. L. Smith and Q. V. Le. A bayesian perspective on generalization and stochastic gradient descent. In
+
+ICLR  2018.
+
+[15] S. Ma  R. Bassily  and M. Belkin. The power of interpolation: Understanding the effectiveness of sgd in
+
+modern over-parametrized learning. In ICML  2018.
+
+[16] Y. You  I. Gitman  and B. Ginsburg. Scaling SGD batch size to 32k for imagenet training. In ICLR  2018.
+
+[17] B. T. Polyak and A. B. Juditsky. Acceleration of stochastic approximation by averaging. SIAM Journal on
+
+Control and Optimization  30(4):838–855  1992.
+
+[18] X. Li  J. Lu  R. Arora  J. Haupt  H. Liu  Z. Wang  and T. Zhao. Symmetry  saddle points  and global
+optimization landscape of nonconvex matrix factorization. IEEE Transactions on Information Theory 
+PP:1–1  03 2019.
+
+[19] R. Ge  C. Jin  and Y. Zheng. No spurious local minima in nonconvex low rank problems: A uniﬁed
+
+geometric analysis. In ICML  2017.
+
+[20] J. Sun  Q. Qu  and J. Wright. A geometric analysis of phase retrieval. Foundations of Computational
+
+Mathematics  18(5):1131–1198  2018.
+
+[21] J. Sun  Q. Qu  and J. Wright. Complete dictionary recovery over the sphere I: overview and the geometric
+
+picture. IEEE Trans. Information Theory  63(2):853–884  2017.
+
+[22] R. Ge  J. D. Lee  and T. Ma. Matrix completion has no spurious local minimum. In NIPS  2016.
+
+[23] V. Badrinarayanan  B. Mishra  and R. Cipolla. Understanding symmetries in deep networks. CoRR 
+
+abs/1511.01029  2015.
+
+[24] A. Choromanska  M. Henaff  M. Mathieu  G. Ben Arous  and Y. LeCun. The loss surfaces of multilayer
+
+networks. In AISTATS  2015.
+
+10
+
+[25] S. Liang  R. Sun  Y. Li  and R. Srikant. Understanding the loss surface of neural networks for binary
+
+classiﬁcation. In ICML  2018.
+
+[26] K. Kawaguchi. Deep learning without poor local minima. In NIPS  2016.
+
+[27] P. Chaudhari  A. Choromanska  S. Soatto  Y. LeCun  C. Baldassi  C. Borgs  J. T. Chayes  L. Sagun  and
+
+R. Zecchina. Entropy-SGD: Biasing gradient descent into wide valleys. In ICLR  2017.
+
+[28] P. Chaudhari  C. Baldassi  R. Zecchina  S. Soatto  and A. Talwalkar. Parle: parallelizing stochastic gradient
+
+descent. In SysML  2018.
+
+[29] J. Kennedy and R. Eberhart. Particle swarm optimization. In ICNN  1995.
+
+[30] L. Bottou  F. E. Curtis  and J. Nocedal. Optimization methods for large-scale machine learning. SIAM
+
+Review  60(2):223–311  2018.
+
+[31] B. Recht  C. Re  S. Wright  and F. Niu. Hogwild: A lock-free approach to parallelizing stochastic gradient
+
+descent. In NIPS  2011.
+
+[32] Yann Dauphin  Razvan Pascanu  Caglar Gulcehre  Kyunghyun Cho  Surya Ganguli  and Yoshua Bengio.
+Identifying and attacking the saddle point problem in high-dimensional non-convex optimization. In
+Z. Ghahramani  M. Welling  C. Cortes  N. D. Lawrence  and K. Q. Weinberger  editors  Advances in Neural
+Information Processing Systems 27  pages 2933–2941. Curran Associates  Inc.  2014.
+
+[33] A. Krizhevsky  V. Nair  and G. Hinton. Cifar-10 (canadian institute for advanced research).
+
+[34] K. Simonyan and A. Zisserman. Very deep convolutional networks for large-scale image recognition. In
+
+ICLR  2015.
+
+[35] K. He  X. Zhang  S. Ren  and J. Sun. Deep residual learning for image recognition. In CVPR  2016.
+
+[36] J. Deng  W. Dong  R. Socher  L.-J. Li  K. Li  and L. Fei-Fei. ImageNet: A Large-Scale Hierarchical Image
+
+Database. In CVPR  2009.
+
+[37] Baldassi  C. et al. Unreasonable effectiveness of learning neural networks: From accessible states and
+
+robust ensembles to basic algorithmic schemes. In PNAS  2016.
+
+[38] Izmailov  P. et al. Averaging weights leads to wider optima and better generalization. arXiv:1803.05407 
+
+2018.
+
+[39] C. Szegedy  W. Liu  Y. Jia  P. Sermanet  S. Reed  D. Anguelov  D. Erhan  V. Vanhoucke  and A. Rabinovich.
+
+Going deeper with convolutions. In CVPR  2015.
+
+11
+
+,Yunfei Teng
+Wenbo Gao
+François Chalus
+Anna Choromanska
+Donald Goldfarb
+Adrian Weller

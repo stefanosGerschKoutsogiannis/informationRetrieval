@@ -1,0 +1,889 @@
+2015,Automatic Variational Inference in Stan,Variational inference is a scalable technique for approximate Bayesian inference.  Deriving variational inference algorithms requires tedious model-specific calculations; this makes it difficult for non-experts to use.  We propose an automatic variational inference algorithm  automatic differentiation variational inference (ADVI); we implement it in Stan (code available)  a probabilistic programming system.  In ADVI the user provides a Bayesian model and a dataset  nothing else.  We make no conjugacy assumptions and support a broad class of models. The algorithm automatically determines an appropriate variational family and optimizes the variational objective. We compare ADVI to MCMC sampling across hierarchical generalized linear models  nonconjugate matrix factorization  and a mixture model. We train the mixture model on a quarter million images.  With ADVI we can use variational inference on any model we write in Stan.,Automatic Variational Inference in Stan
+
+Alp Kucukelbir
+
+Columbia University
+alp@cs.columbia.edu
+
+Rajesh Ranganath
+Princeton University
+
+rajeshr@cs.princeton.edu
+
+Andrew Gelman
+Columbia University
+
+gelman@stat.columbia.edu
+
+David M. Blei
+
+Columbia University
+
+david.blei@columbia.edu
+
+Abstract
+
+Variational inference is a scalable technique for approximate Bayesian inference.
+Deriving variational inference algorithms requires tedious model-speciﬁc calcula-
+tions; this makes it dicult for non-experts to use. We propose an automatic varia-
+tional inference algorithm  automatic dierentiation variational inference ();
+we implement it in Stan (code available)  a probabilistic programming system. In
+ the user provides a Bayesian model and a dataset  nothing else. We make
+no conjugacy assumptions and support a broad class of models. The algorithm
+automatically determines an appropriate variational family and optimizes the vari-
+ational objective. We compare  to  sampling across hierarchical gen-
+eralized linear models  nonconjugate matrix factorization  and a mixture model.
+We train the mixture model on a quarter million images. With  we can use
+variational inference on any model we write in Stan.
+
+Introduction
+
+1
+Bayesian inference is a powerful framework for analyzing data. We design a model for data using
+latent variables; we then analyze data by calculating the posterior density of the latent variables. For
+machine learning models  calculating the posterior is often dicult; we resort to approximation.
+Variational inference () approximates the posterior with a simpler distribution [1  2]. We search
+over a family of simple distributions and ﬁnd the member closest to the posterior. This turns ap-
+proximate inference into optimization.  has had a tremendous impact on machine learning; it is
+typically faster than Markov chain Monte Carlo () sampling (as we show here too) and has
+recently scaled up to massive data [3].
+Unfortunately   algorithms are dicult to derive. We must ﬁrst deﬁne the family of approximating
+distributions  and then calculate model-speciﬁc quantities relative to that family to solve the varia-
+tional optimization problem. Both steps require expert knowledge. The resulting algorithm is tied to
+both the model and the chosen approximation.
+In this paper we develop a method for automating variational inference  automatic dierentiation
+variational inference (). Given any model from a wide class (speciﬁcally  probability models
+dierentiable with respect to their latent variables)   determines an appropriate variational fam-
+ily and an algorithm for optimizing the corresponding variational objective. We implement  in
+Stan [4]  a ﬂexible probabilistic programming system. Stan describes a high-level language to deﬁne
+probabilistic models (e.g.  Figure 2) as well as a model compiler  a library of transformations  and an
+ecient automatic dierentiation toolbox. With  we can now use variational inference on any
+model we write in Stan.1 (See Appendices F to J.)
+
+1 is available in Stan 2.8. See Appendix C.
+
+1
+
+e
+v
+i
+t
+c
+i
+d
+e
+r
+P
+g
+o
+L
+e
+g
+a
+r
+e
+v
+A
+
+0
+300
+600
+900
+
+e
+v
+i
+t
+c
+i
+d
+e
+r
+P
+g
+o
+L
+e
+g
+a
+r
+e
+v
+A
+
+400
+
+0
+400
+800
+
+ADVI
+
+NUTS [5]
+
+103
+
+102
+Seconds
+
+B=50
+B=100
+B=500
+B=1000
+
+102
+
+103
+
+104
+
+Seconds
+
+(a) Subset of 1000 images
+
+(b) Full dataset of 250 000 images
+
+Figure 1: Held-out predictive accuracy results | Gaussian mixture model () of the image
+image histogram dataset. (a)  outperforms the no-U-turn sampler ()  the default sampling
+method in Stan [5]. (b)  scales to large datasets by subsampling minibatches of size B from the
+dataset at each iteration [3]. We present more details in Section 3.3 and Appendix J.
+
+Figure 1 illustrates the advantages of our method. Consider a nonconjugate Gaussian mixture model
+for analyzing natural images; this is 40 lines in Stan (Figure 10). Figure 1a illustrates Bayesian
+inference on 1000 images. The y-axis is held-out likelihood  a measure of model ﬁtness; the x-
+axis is time on a log scale.  is orders of magnitude faster than   a state-of-the-art 
+algorithm (and Stan’s default inference technique) [5]. We also study nonconjugate factorization
+models and hierarchical generalized linear models in Section 3.
+Figure 1b illustrates Bayesian inference on 250 000 images  the size of data we more commonly ﬁnd in
+machine learning. Here we use  with stochastic variational inference [3]  giving an approximate
+posterior in under two hours. For data like these   techniques cannot complete the analysis.
+Related work.  automates variational inference within the Stan probabilistic programming
+system [4]. This draws on two major themes.
+The ﬁrst is a body of work that aims to generalize . Kingma and Welling [6] and Rezende et al.
+[7] describe a reparameterization of the variational problem that simpliﬁes optimization. Ranganath
+et al. [8] and Salimans and Knowles [9] propose a black-box technique  one that only requires the
+model and the gradient of the approximating family. Titsias and Lázaro-Gredilla [10] leverage the
+gradient of the joint density for a small class of models. Here we build on and extend these ideas to
+automate variational inference; we highlight technical connections as we develop the method.
+The second theme is probabilistic programming. Wingate and Weber [11] study  in general proba-
+bilistic programs  as supported by languages like Church [12]  Venture [13]  and Anglican [14]. An-
+other probabilistic programming system is infer.NET  which implements variational message passing
+[15]  an ecient algorithm for conditionally conjugate graphical models. Stan supports a more com-
+prehensive class of nonconjugate models with dierentiable latent variables; see Section 2.1.
+
+2 Automatic Dierentiation Variational Inference
+Automatic dierentiation variational inference () follows a straightforward recipe. First we
+transform the support of the latent variables to the real coordinate space. For example  the logarithm
+transforms a positive variable  such as a standard deviation  to the real line. Then we posit a Gaussian
+variational distribution to approximate the posterior. This induces a non-Gaussian approximation in
+the original variable space. Last we combine automatic dierentiation with stochastic optimization
+to maximize the variational objective. We begin by deﬁning the class of models we support.
+
+2.1 Dierentiable Probability Models
+Consider a dataset X D x1WN with N observations. Each xn is a discrete or continuous random vec-
+tor. The likelihood p.X j ✓/ relates the observations to a set of latent random variables ✓. Bayesian
+
+2
+
+˛ D 1:5;  D 1
+
+data {
+
+i n t N;
+i n t x [N ] ; // d i s c r e t e - valued o b s e r v a t i o n s
+
+// number o f o b s e r v a t i o n s
+
+}
+parameters {
+
+}
+model {
+
+// l a t e n t v a r i a b l e   must be p o s i t i v e
+r e a l < lower=0> theta ;
+
+✓
+
+xn
+
+// non - conjugate p r i o r
+theta ~ w e i b u l l ( 1 . 5   1) ;
+
+f o r
+
+l a t e n t v a r i a b l e
+
+// l i k e l i h o o d
+f o r
+(n in 1 :N)
+
+x [ n ] ~ poisson ( theta ) ;
+
+N
+
+}
+
+Figure 2: Specifying a simple nonconjugate probability model in Stan.
+
+analysis posits a prior density p.✓/ on the latent variables. Combining the likelihood with the prior
+gives the joint density p.X; ✓/ D p.X j ✓/ p.✓/.
+We focus on approximate inference for dierentiable probability models. These models have contin-
+uous latent variables ✓. They also have a gradient of the log-joint with respect to the latent variables
+r✓ log p.X; ✓/. The gradient is valid within the support of the prior supp.p.✓// D ˚ ✓ j ✓ 2
+RK and p.✓/ > 0 ✓ RK  where K is the dimension of the latent variable space. We assume that
+the support of the posterior equals that of the prior. We make no assumptions about conjugacy  either
+full or conditional.2
+For example  consider a model that contains a Poisson likelihood with unknown rate  p.x j ✓/. The
+observed variable x is discrete; the latent rate ✓ is continuous and positive. Place a Weibull prior
+on ✓  deﬁned over the positive real numbers. The resulting joint density describes a nonconjugate
+dierentiable probability model. (See Figure 2.) Its partial derivative @=@✓ p.x; ✓ / is valid within the
+support of the Weibull distribution  supp.p.✓ // D RC ⇢ R. Because this model is nonconjugate  the
+posterior is not a Weibull distribution. This presents a challenge for classical variational inference.
+In Section 2.3  we will see how  handles this model.
+Many machine learning models are dierentiable. For example: linear and logistic regression  matrix
+factorization with continuous or discrete measurements  linear dynamical systems  and Gaussian pro-
+cesses. Mixture models  hidden Markov models  and topic models have discrete random variables.
+Marginalizing out these discrete variables renders these models dierentiable. (We show an example
+in Section 3.3.) However  marginalization is not tractable for all models  such as the Ising model 
+sigmoid belief networks  and (untruncated) Bayesian nonparametric models.
+
+2.2 Variational Inference
+Bayesian inference requires the posterior density p.✓ j X/  which describes how the latent variables
+vary when conditioned on a set of observations X. Many posterior densities are intractable because
+their normalization constants lack closed forms. Thus  we seek to approximate the posterior.
+Consider an approximating density q.✓ I / parameterized by . We make no assumptions about its
+shape or support. We want to ﬁnd the parameters of q.✓ I / to best match the posterior according to
+some loss function. Variational inference () minimizes the Kullback-Leibler () divergence from
+the approximation to the posterior [2] 
+
+⇤ D arg min
+
+
+
+KL.q.✓ I / k p.✓ j X//:
+
+(1)
+
+Typically the  divergence also lacks a closed form. Instead we maximize the evidence lower bound
+()  a proxy to the  divergence 
+
+L./ D Eq.✓/⇥ log p.X; ✓/⇤  Eq.✓/⇥ log q.✓ I /⇤:
+
+The ﬁrst term is an expectation of the joint density under the approximation  and the second is the
+entropy of the variational density. Maximizing the  minimizes the  divergence [1  16].
+
+2The posterior of a fully conjugate model is in the same family as the prior; a conditionally conjugate model
+
+has this property within the complete conditionals of the model [3].
+
+3
+
+The minimization problem from Eq. (1) becomes
+
+⇤ D arg max
+
+
+
+L./
+
+such that
+
+supp.q.✓ I // ✓ supp.p.✓ j X//:
+
+(2)
+
+We explicitly specify the support-matching constraint implied in the  divergence.3 We highlight
+this constraint  as we do not specify the form of the variational approximation; thus q.✓ I / must
+remain within the support of the posterior  which we assume equal to the support of the prior.
+Why is  dicult to automate? In classical variational inference  we typically design a condition-
+ally conjugate model. Then the optimal approximating family matches the prior. This satisﬁes the
+support constraint by deﬁnition [16]. When we want to approximate models that are not condition-
+ally conjugate  we carefully study the model and design custom approximations. These depend on
+the model and on the choice of the approximating density.
+One way to automate  is to use black-box variational inference [8  9]. If we select a density whose
+support matches the posterior  then we can directly maximize the  using Monte Carlo ()
+integration and stochastic optimization. Another strategy is to restrict the class of models and use a
+ﬁxed variational approximation [10]. For instance  we may use a Gaussian density for inference in
+unrestrained dierentiable probability models  i.e. where supp.p.✓// D RK.
+We adopt a transformation-based approach. First we automatically transform the support of the latent
+variables in our model to the real coordinate space. Then we posit a Gaussian variational density. The
+transformation induces a non-Gaussian approximation in the original variable space and guarantees
+that it stays within the support of the posterior. Here is how it works.
+
+2.3 Automatic Transformation of Constrained Variables
+Begin by transforming the support of the latent variables ✓ such that they live in the real coordinate
+space RK. Deﬁne a one-to-one dierentiable function T W supp.p.✓// ! RK and identify the
+transformed variables as ⇣ D T .✓/. The transformed joint density g.X; ⇣/ is
+
+g.X; ⇣/ D pX; T 1.⇣/ˇˇ det JT 1 .⇣/ˇˇ;
+
+where p is the joint density in the original latent variable space  and JT 1 is the Jacobian of the
+inverse of T . Transformations of continuous probability densities require a Jacobian; it accounts for
+how the transformation warps unit volumes [17]. (See Appendix D.)
+Consider again our running example. The rate ✓ lives in RC. The logarithm ⇣ D T .✓ / D log.✓ /
+transforms RC to the real line R.
+Its Jacobian adjustment is the derivative of the inverse of the
+logarithm  j det JT 1.⇣/j D exp.⇣/. The transformed density is
+
+g.x; ⇣/ D Poisson.x j exp.⇣// Weibull.exp.⇣/ I 1:5; 1/ exp.⇣/:
+
+Figures 3a and 3b depict this transformation.
+As we describe in the introduction  we implement our algorithm in Stan to enable generic inference.
+Stan implements a model compiler that automatically handles transformations. It works by applying
+a library of transformations and their corresponding Jacobians to the joint model density.4 This
+transforms the joint density of any dierentiable probability model to the real coordinate space. Now
+we can choose a variational distribution independent from the model.
+
+Implicit Non-Gaussian Variational Approximation
+
+2.4
+After the transformation  the latent variables ⇣ have support on RK. We posit a diagonal (mean-ﬁeld)
+Gaussian variational approximation
+
+q.⇣ I / D N .⇣ I ;  / D
+
+N .⇣k I k; k/:
+
+3If supp.q/ › supp.p/ then outside the support of p we have KL.q k p/ D EqŒlog qç  EqŒlog pç D 1.
+4Stan provides transformations for upper and lower bounds  simplex and ordered vectors  and structured
+
+matrices such as covariance matrices and Cholesky factors [4].
+
+KYkD1
+
+4
+
+y
+t
+i
+s
+n
+e
+D
+
+1
+
+0
+
+1
+
+(a) Latent variable space
+
+2
+
+3
+
+T
+
+T 1
+
+✓
+
+1
+
+S;!
+
+S1
+
+;!
+
+Prior
+Posterior
+Approximation
+
+1
+
+0
+
+⇣
+1
+(b) Real coordinate space
+
+1
+
+2
+
+⌘
+2 1 0 1 2
+(c) Standardized space
+
+Figure 3: Transformations for . The purple line is the posterior. The green line is the approxi-
+mation. (a) The latent variable space is RC. (a!b) T transforms the latent variable space to R. (b)
+The variational approximation is a Gaussian. (b!c) S;! absorbs the parameters of the Gaussian.
+(c) We maximize the  in the standardized space  with a ﬁxed standard Gaussian approximation.
+
+The vector  D .1; ; K; 1; ; K/ contains the mean and standard deviation of each Gaus-
+sian factor. This deﬁnes our variational approximation in the real coordinate space. (Figure 3b.)
+The transformation T maps the support of the latent variables to the real coordinate space; its inverse
+T 1 maps back to the support of the latent variables. This implicitly deﬁnes the variational approx-
+that the support of this approximation is always bounded by that of the true posterior in the original
+latent variable space (Figure 3a). Thus we can freely optimize the  in the real coordinate space
+(Figure 3b) without worrying about the support matching constraint.
+The  in the real coordinate space is
+
+imation in the original latent variable space as q.T .✓/I /ˇˇ det JT .✓/ˇˇ: The transformation ensures
+
+L.;  / D Eq.⇣/ log pX; T 1.⇣/ C logˇˇ det JT 1 .⇣/ˇˇ C
+
+KXkD1
+
+K
+2
+
+.1 C log.2⇡// C
+
+log k;
+
+where we plug in the analytic form of the Gaussian entropy. (The derivation is in Appendix A.)
+We choose a diagonal Gaussian for eciency. This choice may call to mind the Laplace approxima-
+tion technique  where a second-order Taylor expansion around the maximum-a-posteriori estimate
+gives a Gaussian approximation to the posterior. However  using a Gaussian variational approxima-
+tion is not equivalent to the Laplace approximation [18]. The Laplace approximation relies on max-
+imizing the probability density; it fails with densities that have discontinuities on its boundary. The
+Gaussian approximation considers probability mass; it does not suer this degeneracy. Furthermore 
+our approach is distinct in another way: because of the transformation  the posterior approximation
+in the original latent variable space (Figure 3a) is non-Gaussian.
+
+2.5 Automatic Dierentiation for Stochastic Optimization
+We now maximize the  in real coordinate space 
+
+⇤; ⇤ D arg max
+
+;
+
+L.;  /
+
+such that   0:
+
+(3)
+
+We use gradient ascent to reach a local maximum of the . Unfortunately  we cannot apply auto-
+matic dierentiation to the  in this form. This is because the expectation deﬁnes an intractable
+integral that depends on  and  ; we cannot directly represent it as a computer program. More-
+over  the standard deviations in  must remain positive. Thus  we employ one ﬁnal transformation:
+elliptical standardization5 [19]  shown in Figures 3b and 3c.
+First re-parameterize the Gaussian distribution with the log of the standard deviation  ! D log. / 
+applied element-wise. The support of ! is now the real coordinate space and  is always positive.
+Then deﬁne the standardization ⌘ D S;!.⇣/ D diagexp .!/1.⇣  /. The standardization
+
+5Also known as a “co-ordinate transformation” [7]  an “invertible transformation” [10]  and the “re-
+
+parameterization trick” [6].
+
+5
+
+Algorithm 1: Automatic dierentiation variational inference ()
+Input: Dataset X D x1WN   model p.X; ✓/.
+Set iteration counter i D 0 and choose a stepsize sequence ⇢.i/.
+Initialize .0/ D 0 and !.0/ D 0.
+while change in  is above some threshold do
+
+Draw M samples ⌘m ⇠ N .0; I/ from the standard multivariate Gaussian.
+Invert the standardization ⇣m D diag.exp .!.i///⌘m C .i/.
+Approximate rL and r!L using  integration (Eqs. (4) and (5)).
+Update .iC1/  .i/ C ⇢.i/rL and !.iC1/  !.i/ C ⇢.i/r!L.
+Increment iteration counter.
+
+end
+Return ⇤  .i/ and !⇤  !.i/.
+
+encapsulates the variational parameters and gives the ﬁxed density
+
+q.⌘I 0; I/ D N .⌘I 0; I/ D
+
+KYkD1
+
+N .⌘k I 0; 1/:
+
+The standardization transforms the variational problem from Eq. (3) into
+⇤; !⇤ D arg max
+
+L.; !/
+
+;!
+
+D arg max
+
+;!
+
+EN .⌘I 0;I/ log pX; T 1.S1
+
+;!.⌘// C logˇˇ det JT 1S1
+
+;!.⌘/ˇˇ C
+
+KXkD1
+
+!k;
+
+where we drop constant terms from the calculation. This expectation is with respect to a standard
+Gaussian and the parameters  and ! are both unconstrained (Figure 3c). We push the gradient
+inside the expectations and apply the chain rule to get
+
+rL D EN .⌘/⇥r✓ log p.X; ✓/r⇣T 1.⇣/ C r⇣ logˇˇ det JT 1 .⇣/ˇˇ⇤ ;
+r!k L D EN .⌘k /⇥r✓k log p.X; ✓/r⇣k T 1.⇣/ C r⇣k logˇˇ det JT 1 .⇣/ˇˇ ⌘k exp.!k/⇤ C 1:
+
+(The derivations are in Appendix B.)
+We can now compute the gradients inside the expectation with automatic dierentiation. The only
+thing left is the expectation.  integration provides a simple approximation: draw M samples from
+the standard Gaussian and evaluate the empirical mean of the gradients within the expectation [20].
+This gives unbiased noisy gradients of the  for any dierentiable probability model. We can
+now use these gradients in a stochastic optimization routine to automate variational inference.
+
+(4)
+(5)
+
+2.6 Automatic Variational Inference
+Equipped with unbiased noisy gradients of the    implements stochastic gradient ascent
+(Algorithm 1). We ensure convergence by choosing a decreasing step-size sequence. In practice  we
+use an adaptive sequence [21] with ﬁnite memory. (See Appendix E for details.)
+ has complexity O.NMK/ per iteration  where M is the number of  samples (typically
+between 1 and 10). Coordinate ascent  has complexity O.NK/ per pass over the dataset. We
+scale  to large datasets using stochastic optimization [3  10]. The adjustment to Algorithm 1 is
+simple: sample a minibatch of size B ⌧ N from the dataset and scale the likelihood of the sampled
+minibatch by N=B [3]. The stochastic extension of  has per-iteration complexity O.BMK/.
+
+6
+
+e
+v
+i
+t
+c
+i
+d
+e
+r
+P
+g
+o
+L
+e
+g
+a
+r
+e
+v
+A
+
+3
+5
+7
+9
+
+ADVI (M=1)
+ADVI (M=10)
+
+NUTS
+HMC
+
+101
+
+101
+
+100
+
+Seconds
+
+e
+v
+i
+t
+c
+i
+d
+e
+r
+P
+g
+o
+L
+e
+g
+a
+r
+e
+v
+A
+
+0:7
+0:9
+1:1
+1:3
+1:5
+
+ADVI (M=1)
+ADVI (M=10)
+
+NUTS
+HMC
+
+101
+
+100
+Seconds
+
+101
+
+102
+
+(a) Linear Regression with 
+
+(b) Hierarchical Logistic Regression
+
+Figure 4: Hierarchical generalized linear models. Comparison of  to : held-out predic-
+tive likelihood as a function of wall time.
+
+3 Empirical Study
+We now study  across a variety of models. We compare its speed and accuracy to two Markov
+chain Monte Carlo () sampling algorithms: Hamiltonian Monte Carlo () [22] and the no-
+U-turn sampler ()6 [5]. We assess  convergence by tracking the . To place  and
+ on a common scale  we report predictive likelihood on held-out data as a function of time. We
+approximate the posterior predictive likelihood using a  estimate. For   we plug in posterior
+samples. For   we draw samples from the posterior approximation during the optimization. We
+initialize  with a draw from a standard Gaussian.
+We explore two hierarchical regression models  two matrix factorization models  and a mixture
+model. All of these models have nonconjugate prior structures. We conclude by analyzing a dataset
+of 250 000 images  where we report results across a range of minibatch sizes B.
+
+3.1 A Comparison to Sampling: Hierarchical Regression Models
+We begin with two nonconjugate regression models: linear regression with automatic relevance de-
+termination () [16] and hierarchical logistic regression [23].
+Linear Regression with . This is a sparse linear regression model with a hierarchical prior
+structure. (Details in Appendix F.) We simulate a dataset with 250 regressors such that half of the
+regressors have no predictive power. We use 10 000 training samples and hold out 1000 for testing.
+Logistic Regression with Spatial Hierarchical Prior. This is a hierarchical logistic regression
+model from political science. The prior captures dependencies  such as states and regions  in a
+polling dataset from the United States 1988 presidential election [23]. (Details in Appendix G.)
+We train using 10 000 data points and withhold 1536 for evaluation. The regressors contain age 
+education  state  and region indicators. The dimension of the regression problem is 145.
+Results. Figure 4 plots average log predictive accuracy as a function of time. For these simple
+models  all methods reach the same predictive accuracy. We study  with two settings of M   the
+number of  samples used to estimate gradients. A single sample per iteration is sucient; it is
+also the fastest. (We set M D 1 from here on.)
+3.2 Exploring Nonconjugacy: Matrix Factorization Models
+We continue by exploring two nonconjugate non-negative matrix factorization models: a constrained
+Gamma Poisson model [24] and a Dirichlet Exponential model. Here  we show how easy it is to
+explore new models using . In both models  we use the Frey Face dataset  which contains 1956
+frames (28 ⇥ 20 pixels) of facial expressions extracted from a video sequence.
+Constrained Gamma Poisson. This is a Gamma Poisson factorization model with an ordering
+constraint: each row of the Gamma matrix goes from small to large values. (Details in Appendix H.)
+
+6 is an adaptive extension of . It is the default sampler in Stan.
+
+7
+
+e
+v
+i
+t
+c
+i
+d
+e
+r
+P
+g
+o
+L
+e
+g
+a
+r
+e
+v
+A
+
+5
+7
+9
+11
+
+101
+
+ADVI
+NUTS
+
+102
+
+103
+
+104
+
+Seconds
+
+e
+v
+i
+t
+c
+i
+d
+e
+r
+P
+g
+o
+L
+e
+g
+a
+r
+e
+v
+A
+
+0
+200
+400
+600
+
+101
+
+ADVI
+NUTS
+
+102
+
+103
+
+104
+
+Seconds
+
+(a) Gamma Poisson Predictive Likelihood
+
+(b) Dirichlet Exponential Predictive Likelihood
+
+(c) Gamma Poisson Factors
+
+(d) Dirichlet Exponential Factors
+
+Figure 5: Non-negative matrix factorization of the Frey Faces dataset. Comparison of  to
+: held-out predictive likelihood as a function of wall time.
+Dirichlet Exponential. This is a nonconjugate Dirichlet Exponential factorization model with a
+Poisson likelihood. (Details in Appendix I.)
+Results. Figure 5 shows average log predictive accuracy as well as ten factors recovered from both
+models.  provides an order of magnitude speed improvement over  (Figure 5a). 
+struggles with the Dirichlet Exponential model (Figure 5b). In both cases   does not produce
+any useful samples within a budget of one hour; we omit  from the plots.
+
+3.3 Scaling to Large Datasets: Gaussian Mixture Model
+We conclude with the Gaussian mixture model () example we highlighted earlier. This is a
+nonconjugate  applied to color image histograms. We place a Dirichlet prior on the mixture
+proportions  a Gaussian prior on the component means  and a lognormal prior on the standard devi-
+ations. (Details in Appendix J.) We explore the image dataset  which has 250 000 images [25].
+We withhold 10 000 images for evaluation.
+In Figure 1a we randomly select 1000 images and train a model with 10 mixture components. 
+struggles to ﬁnd an adequate solution and  fails altogether. This is likely due to label switching 
+which can aect -based techniques in mixture models [4].
+Figure 1b shows  results on the full dataset. Here we use  with stochastic subsampling
+of minibatches from the dataset [3]. We increase the number of mixture components to 30. With a
+minibatch size of 500 or larger   reaches high predictive accuracy. Smaller minibatch sizes lead
+to suboptimal solutions  an eect also observed in [3].  converges in about two hours.
+
+4 Conclusion
+We develop automatic dierentiation variational inference () in Stan.  leverages automatic
+transformations  an implicit non-Gaussian variational approximation  and automatic dierentiation.
+This is a valuable tool. We can explore many models and analyze large datasets with ease. We
+emphasize that  is currently available as part of Stan; it is ready for anyone to use.
+
+Acknowledgments
+We thank Dustin Tran  Bruno Jacobs  and the reviewers for their comments. This work is supported
+by NSF IIS-0745520  IIS-1247664  IIS-1009542  SES-1424962  ONR N00014-11-1-0651  DARPA
+FA8750-14-2-0009  N66001-15-C-4032  Sloan G-2015-13987  IES DE R305D140059  NDSEG 
+Facebook  Adobe  Amazon  and the Siebel Scholar and John Templeton Foundations.
+
+8
+
+References
+[1] Michael I Jordan  Zoubin Ghahramani  Tommi S Jaakkola  and Lawrence K Saul. An introduc-
+
+tion to variational methods for graphical models. Machine Learning  37(2):183–233  1999.
+
+[2] Martin J Wainwright and Michael I Jordan. Graphical models  exponential families  and vari-
+
+ational inference. Foundations and Trends in Machine Learning  1(1-2):1–305  2008.
+
+[3] Matthew D Homan  David M Blei  Chong Wang  and John Paisley. Stochastic variational
+
+inference. The Journal of Machine Learning Research  14(1):1303–1347  2013.
+
+[4] Stan Development Team. Stan Modeling Language Users Guide and Reference Manual  2015.
+[5] Matthew D Homan and Andrew Gelman. The No-U-Turn sampler. The Journal of Machine
+
+Learning Research  15(1):1593–1623  2014.
+
+[6] Diederik Kingma and Max Welling. Auto-encoding variational Bayes. arXiv:1312.6114  2013.
+[7] Danilo J Rezende  Shakir Mohamed  and Daan Wierstra. Stochastic backpropagation and ap-
+
+proximate inference in deep generative models. In ICML  pages 1278–1286  2014.
+
+[8] Rajesh Ranganath  Sean Gerrish  and David Blei. Black box variational inference. In AISTATS 
+
+pages 814–822  2014.
+
+[9] Tim Salimans and David Knowles. On using control variates with stochastic approximation for
+
+variational Bayes. arXiv preprint arXiv:1401.1022  2014.
+
+[10] Michalis Titsias and Miguel Lázaro-Gredilla. Doubly stochastic variational Bayes for non-
+
+conjugate inference. In ICML  pages 1971–1979  2014.
+
+[11] David Wingate and Theophane Weber. Automated variational inference in probabilistic pro-
+
+gramming. arXiv preprint arXiv:1301.1299  2013.
+
+[12] Noah D Goodman  Vikash K Mansinghka  Daniel Roy  Keith Bonawitz  and Joshua B Tenen-
+
+baum. Church: A language for generative models. In UAI  pages 220–229  2008.
+
+[13] Vikash Mansinghka  Daniel Selsam  and Yura Perov. Venture: a higher-order probabilistic
+
+programming platform with programmable inference. arXiv:1404.0099  2014.
+
+[14] Frank Wood  Jan Willem van de Meent  and Vikash Mansinghka. A new approach to proba-
+
+bilistic programming inference. In AISTATS  pages 2–46  2014.
+
+[15] John M Winn and Christopher M Bishop. Variational message passing. In Journal of Machine
+
+Learning Research  pages 661–694  2005.
+
+[16] Christopher M Bishop. Pattern Recognition and Machine Learning. Springer New York  2006.
+[17] David J Olive. Statistical Theory and Inference. Springer  2014.
+[18] Manfred Opper and Cédric Archambeau. The variational Gaussian approximation revisited.
+
+Neural computation  21(3):786–792  2009.
+
+[19] Wolfgang Härdle and Léopold Simar. Applied multivariate statistical analysis. Springer  2012.
+[20] Christian P Robert and George Casella. Monte Carlo statistical methods. Springer  1999.
+[21] John Duchi  Elad Hazan  and Yoram Singer. Adaptive subgradient methods for online learning
+and stochastic optimization. The Journal of Machine Learning Research  12:2121–2159  2011.
+[22] Mark Girolami and Ben Calderhead. Riemann manifold langevin and hamiltonian monte carlo
+
+methods. Journal of the Royal Statistical Society: Series B  73(2):123–214  2011.
+
+[23] Andrew Gelman and Jennifer Hill. Data analysis using regression and multilevel/hierarchical
+
+models. Cambridge University Press  2006.
+
+[24] John Canny. GaP: a factor model for discrete data. In ACM SIGIR  pages 122–129. ACM  2004.
+[25] Mauricio Villegas  Roberto Paredes  and Bart Thomee. Overview of the ImageCLEF 2013
+Scalable Concept Image Annotation Subtask. In CLEF Evaluation Labs and Workshop  2013.
+
+9
+
+,Rajesh Ranganath
+Andrew Gelman
+David Blei
+Rémi Flamary
+Cédric Févotte
+Nicolas Courty
+Valentin Emiya
+Simon Du
+Jayanth Koushik
+Aarti Singh
+Barnabas Poczos

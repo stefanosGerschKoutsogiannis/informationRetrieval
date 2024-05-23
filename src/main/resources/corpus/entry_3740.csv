@@ -1,0 +1,1020 @@
+2019,Neural Spline Flows,A normalizing flow models a complex probability density as an invertible transformation of a simple base density. Flows based on either coupling or autoregressive transforms both offer exact density evaluation and sampling  but rely on the parameterization of an easily invertible elementwise transformation  whose choice determines the flexibility of these models. Building upon recent work  we propose a fully-differentiable module based on monotonic rational-quadratic splines  which enhances the flexibility of both coupling and autoregressive transforms while retaining analytic invertibility. We demonstrate that neural spline flows improve density estimation  variational inference  and generative modeling of images.,Neural Spline Flows
+
+Conor Durkan∗ Artur Bekasov∗
+
+Iain Murray George Papamakarios
+
+School of Informatics  University of Edinburgh
+
+{conor.durkan  artur.bekasov  i.murray  g.papamakarios}@ed.ac.uk
+
+Abstract
+
+A normalizing ﬂow models a complex probability density as an invertible transfor-
+mation of a simple base density. Flows based on either coupling or autoregressive
+transforms both offer exact density evaluation and sampling  but rely on the pa-
+rameterization of an easily invertible elementwise transformation  whose choice
+determines the ﬂexibility of these models. Building upon recent work  we pro-
+pose a fully-differentiable module based on monotonic rational-quadratic splines 
+which enhances the ﬂexibility of both coupling and autoregressive transforms while
+retaining analytic invertibility. We demonstrate that neural spline ﬂows improve
+density estimation  variational inference  and generative modeling of images.
+
+1
+
+Introduction
+
+Models that can reason about the joint distribution of high-dimensional random variables are central
+to modern unsupervised machine learning. Explicit density evaluation is required in many statis-
+tical procedures  while synthesis of novel examples can enable agents to imagine and plan in an
+environment prior to choosing a action. In recent years  the variational autoencoder [VAE  29  48]
+and generative adversarial network [GAN  15] have received particular attention in the generative-
+modeling community  and both are capable of sampling with a single forward pass of a neural network.
+However  these models do not offer exact density evaluation  and can be difﬁcult to train. On the
+other hand  autoregressive density estimators [13  50  56  58  59  60] can be trained by maximum
+likelihood  but sampling requires a sequential loop over the output dimensions.
+Flow-based models present an alternative approach to the above methods  and in some cases provide
+both exact density evaluation and sampling in a single neural-network pass. A normalizing ﬂow
+models data x as the output of an invertible  differentiable transformation f of noise u:
+
+The probability density of x under the ﬂow is obtained by a change of variables:
+
+x = f (u) where u ∼ π(u).
+
+p(x) = π(cid:0)f−1(x)(cid:1)(cid:12)(cid:12)(cid:12)(cid:12)det
+
+(cid:18) ∂f−1
+
+∂x
+
+(cid:19)(cid:12)(cid:12)(cid:12)(cid:12).
+
+(1)
+
+(2)
+
+Intuitively  the function f compresses and expands the density of the noise distribution π(u)  and this
+change is quantiﬁed by the determinant of the Jacobian of the transformation. The noise distribution
+π(u) is typically chosen to be simple  such as a standard normal  whereas the transformation f
+and its inverse f−1 are often implemented by composing a series of invertible neural-network
+n=1  the ﬂow is trained by maximizing the total log likelihood
+
+modules. Given a dataset D =(cid:8)x(n)(cid:9)N
+n log p(cid:0)x(n)(cid:1) with respect to the parameters of the transformation f. In recent years  normalizing
+(cid:80)
+
+ﬂows have received widespread attention in the machine-learning literature  seeing successful use in
+density estimation [10  43]  variational inference [30  36  46  57]  image  audio and video generation
+[26  28  32  45]  likelihood-free inference [44]  and learning maximum-entropy distributions [34].
+
+∗Equal contribution
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+Figure 1: Monotonic rational-quadratic transforms are drop-in replacements for additive or afﬁne
+transformations in coupling or autoregressive layers  greatly enhancing their ﬂexibility while retaining
+exact invertibility. Left: A random monotonic rational-quadratic transform with K = 10 bins and
+linear tails is parameterized by a series of K + 1 ‘knot’ points in the plane  and the K − 1 derivatives
+at the internal knots. Right: Derivative of the transform on the left with respect to x. Monotonic
+rational-quadratic splines naturally induce multi-modality when used to transform random variables.
+
+function f−1 quickly. We don’t evaluate f  so the ﬂow is usually deﬁned by specifying f−1.
+
+A ﬂow is deﬁned by specifying the bijective function f or its inverse f−1  usually with a neural
+network. Depending on the ﬂow’s intended use cases  there are practical constraints in addition to
+formal invertibility:
+• To train a density estimator  we need to be able to evaluate the Jacobian determinant and the inverse
+• If we wish to draw samples using eq. (1)  we would like f to be available analytically  rather than
+having to invert f−1 with iterative or approximate methods.
+• Ideally  we would like both f and f−1 to require only a single pass of a neural network to compute 
+so that both density evaluation and sampling can be performed quickly.
+Autoregressive ﬂows such as inverse autoregressive ﬂow [IAF  30] or masked autoregressive ﬂow
+[MAF  43] are D times slower to invert than to evaluate  where D is the dimensionality of x.
+Subsequent work which enhances their ﬂexibility has resulted in models which do not have an
+analytic inverse  and require numerical optimization to invert [22]. Flows based on coupling layers
+[NICE  RealNVP  9  10] have an analytic one-pass inverse  but are often less ﬂexible than their
+autoregressive counterparts.
+In this work  we propose a fully-differentiable module based on monotonic rational-quadratic splines
+which has an analytic inverse. The module acts as a drop-in replacement for the afﬁne or additive
+transformations commonly found in coupling and autoregressive transforms. We demonstrate that
+this module signiﬁcantly enhances the ﬂexibility of both classes of ﬂows  and in some cases brings the
+performance of coupling transforms on par with the best-known autoregressive ﬂows. An illustration
+of our proposed transform is shown in ﬁg. 1.
+
+2 Background
+
+2.1 Coupling transforms
+
+A coupling transform φ [9] maps an input x to an output y in the following way:
+
+1. Split the input x into two parts  x = [x1:d−1  xd:D].
+2. Compute parameters θ = NN(x1:d−1)  where NN is an arbitrary neural network.
+3. Compute yi = gθi(xi) for i = d  . . .   D in parallel  where gθi is an invertible function
+
+parameterized by θi.
+
+4. Set y1:d−1 = x1:d−1  and return y = [y1:d−1  yd:D].
+
+The Jacobian matrix of a coupling transform is lower triangular  since yd:D is given by transforming
+xd:D elementwise as a function of x1:d−1  and y1:d−1 is equal to x1:d−1. Thus  the Jacobian
+determinant of the coupling transform φ is given by det
+  the product of the
+diagonal elements of the Jacobian.
+
+∂gθi
+∂xi
+
+i=d
+
+= (cid:81)D
+
+(cid:16) ∂φ
+
+(cid:17)
+
+∂x
+
+2
+
+−B0Bx−B0Bgθ(x)RQSplineInverseKnots−B0Bx01g0θ(x)Coupling transforms solve two important problems for normalizing ﬂows: they have a tractable
+Jacobian determinant  and they can be inverted exactly in a single pass. The inverse of a coupling
+transform can be easily computed by running steps 1–4 above  this time inputting y  and using g−1
+to
+compute xd:D in step 3. Multiple coupling layers can also be composed in a natural way to construct
+a normalizing ﬂow with increased ﬂexibility. A coupling transform can also be viewed as a special
+case of an autoregressive transform where we perform two splits of the input data instead of D  as
+noted by Papamakarios et al. [43]. In this way  advances in ﬂows based on coupling transforms can
+be applied to autoregressive ﬂows  and vice versa.
+
+θi
+
+Invertible elementwise transformations
+
+2.2
+Afﬁne/additive Typically  the function gθi takes the form of an additive [9] or afﬁne [10] transfor-
+mation for computational ease. The afﬁne transformation is given by:
+
+gθi(xi) = αixi + βi  where θi = {αi  βi} 
+
+(3)
+and αi is usually constrained to be positive. The additive transformation corresponds to the special
+case αi = 1. Both the afﬁne and additive transformations are easy to invert  but they lack ﬂexibility.
+Recalling that the base distribution of a ﬂow is typically simple  ﬂow-based models may struggle
+to model multi-modal or discontinuous densities using just afﬁne or additive transformations  since
+they may ﬁnd it difﬁcult to compress and expand the density in a suitably nonlinear fashion (for an
+illustration  see appendix C.1). We aim to choose a more ﬂexible gθi  that is still differentiable and
+easy to invert.
+
+Polynomial splines Recently  Müller et al. [39] proposed a powerful generalization of the above
+afﬁne transformations  based on monotonic piecewise polynomials. The idea is to restrict the input
+domain of gθi to the interval [0  1]  partition the input domain into K bins  and deﬁne gθi to be a
+simple polynomial segment within each bin. Müller et al. [39] restrict themselves to monotonically-
+increasing linear and quadratic polynomial segments  whose coefﬁcients are parameterized by θi.
+Moreover  the polynomial segments are restricted to match at the bin boundaries so that gθi is
+continuous. Functions of this form  which interpolate between data using piecewise polynomials  are
+known as polynomial splines.
+
+Cubic splines
+In a previous iteration of this work [11]  we explored the cubic-spline ﬂow  a natural
+extension to the framework of Müller et al. [39]. We proposed to implement gθi as a monotonic cubic
+spline [54]  where gθi is deﬁned to be a monotonically-increasing cubic polynomial in each bin. By
+composing coupling layers featuring elementwise monotonic cubic-spline transforms with invertible
+linear transformations  we found ﬂows of this type to be much more ﬂexible than the standard
+coupling-layer models in the style of RealNVP [10]  achieving similar results to autoregressive
+models on a suite of density-estimation tasks.
+Like Müller et al. [39]  our spline transform and its inverse were deﬁned only on the interval [0  1].
+To ensure that the input is always between 0 and 1  we placed a sigmoid transformation before each
+coupling layer  and a logit transformation after each coupling layer. These transformations allow the
+spline transform to be composed with linear layers  which have an unconstrained domain. However 
+the limitations of 32-bit ﬂoating point precision mean that in practice the sigmoid saturates for inputs
+outside the approximate range of [−13  13]  which results in numerical difﬁculties. In addition 
+computing the inverse of the transform requires inverting a cubic polynomial  which is prone to
+numerical instability if not carefully treated [1]. In section 3.1 we propose a modiﬁed method based
+on rational-quadratic splines which overcomes these difﬁculties.
+
+2.3
+
+Invertible linear transformations
+
+To ensure all input variables can interact with each other  it is common to randomly permute
+the dimensions of intermediate layers in a normalizing ﬂow. Permutation is an invertible linear
+transformation  with absolute determinant equal to 1. Oliva et al. [41] generalized permutations
+to a more general class of linear transformations  and Kingma and Dhariwal [28] demonstrated
+improvements on a range of image tasks. In particular  a linear transformation with matrix W is
+parameterized in terms of its LU-decomposition W = PLU  where P is a ﬁxed permutation matrix 
+L is lower triangular with ones on the diagonal  and U is upper triangular. By restricting the diagonal
+elements of U to be positive  W is guaranteed to be invertible.
+
+3
+
+By making use of the LU-decomposition  both the determinant and the inverse of the linear trans-
+formation can be computed efﬁciently. First  the determinant of W can be calculated in O(D) time
+as the product of the diagonal elements of U. Second  inverting the linear transformation can be
+done by solving two triangular systems  one for U and one for L  each of which costs O(D2M ) time
+where M is the batch size. Alternatively  we can pay a one-time cost of O(D3) to explicitly compute
+W−1  which can then be cached for re-use.
+
+3 Method
+
+3.1 Monotonic rational-quadratic transforms
+
+We propose to implement the function gθi using monotonic rational-quadratic splines as a building
+block  where each bin is deﬁned by a monotonically-increasing rational-quadratic function. A
+rational-quadratic function takes the form of a quotient of two quadratic polynomials. Rational-
+quadratic functions are easily differentiable  and since we consider only monotonic segments of
+these functions  they are also analytically invertible. Nevertheless  they are strictly more ﬂexible
+than quadratic functions  and allow direct parameterization of the derivatives and heights at each
+knot. In our implementation  we use the method of Gregory and Delbourgo [17] to parameterize
+a monotonic rational-quadratic spline. The spline itself maps an interval [−B  B] to [−B  B]. We
+deﬁne the transformation outside this range as the identity  resulting in linear ‘tails’  so that the overall
+transformation can take unconstrained inputs.
+The spline uses K different rational-quadratic functions  with boundaries set by K +1 coordi-
+k=0 known as knots. The knots monotonically increase between (x(0)  y(0)) =
+
+nates(cid:8)(x(k)  y(k))(cid:9)K
+(−B −B) and (x(K)  y(K)) = (B  B). We give the spline K−1 arbitrary positive values(cid:8)δ(k)(cid:9)K−1
+
+k=1
+for the derivatives at the internal points  and set the boundary derivatives δ(0) = δ(K) = 1 to match
+the linear tails. If the derivatives are not matched in this way  the transformation is still continuous 
+but its derivative can have jump discontinuities at the boundary points. This in turn makes the log-
+likelihood training objective discontinuous  which in our experience manifested itself in numerical
+issues and failed optimization.
+The method constructs a monotonic  continuously-differentiable 
+rational-quadratic spline
+which passes through the knots  with the given derivatives at the knots. Deﬁning sk =
+
+(cid:0)yk+1 − yk(cid:1)/(cid:0)xk+1 − xk(cid:1) and ξ(x) = (x − xk)/(xk+1 − xk)  the expression for the rational-
+
+Since the rational-quadratic transformation acts elementwise on an input vector and is monotonic  the
+logarithm of the absolute value of the determinant of its Jacobian can be computed as the sum of the
+logarithm of the derivatives of eq. (4) with respect to each of the transformed x values in the input
+vector. It can be shown that
+
+quadratic α(k)(ξ)/β(k)(ξ) in the kth bin can be written
+
+(y(k+1) − y(k))(cid:2)s(k)ξ2 + δ(k)ξ(1 − ξ)(cid:3)
+s(k) +(cid:2)δ(k+1) + δ(k) − 2s(k)(cid:3)ξ(1 − ξ)
+(cid:0)s(k)(cid:1)2(cid:2)δ(k+1)ξ2 + 2s(k)ξ(1 − ξ) + δ(k)(1 − ξ)2(cid:3)
+(cid:2)s(k) +(cid:2)δ(k+1) + δ(k) − 2s(k)(cid:3)ξ(1 − ξ)(cid:3)2
+−b − √b2 − 4ac(cid:1)  where
+is given by ξ(x) = 2c/(cid:0)
+s(k) − δ(k)(cid:105)
+y(k+1) − y(k)(cid:17)(cid:104)
+(cid:16)
+(cid:16)
+(cid:16)
+(cid:16)
+y − y(k)(cid:17)(cid:104)
+y(k+1) − y(k)(cid:17)
+y − y(k)(cid:17)
+c = −s(k)(cid:16)
+
+y − y(k)(cid:17)(cid:104)
+δ(k+1) + δ(k) − 2s(k)(cid:105)
+
+δ(k+1) + δ(k) − 2s(k)(cid:105)
+
+Finally  the inverse of a rational-quadratic function can be computed analytically by inverting eq. (4) 
+which amounts to solving for the roots of a quadratic equation. Because the transformation is
+monotonic  we can always determine which of the two quadratic roots is correct  and that the solution
+
+ 
+
+(6)
+
+(7)
+
+(8)
+
+(cid:20) α(k)(ξ)
+
+(cid:21)
+
+β(k)(ξ)
+
+d
+dx
+
+=
+
+α(k)(ξ)
+β(k)(ξ)
+
+= y(k) +
+
+.
+
+(4)
+
+.
+
+(5)
+
+a =
+
+b =
+
++
+
+δ(k) −
+ 
+
+ 
+
+which can the be used to determine x. An instance of the rational-quadratic transform is illustrated in
+ﬁg. 1  and appendix A.1 gives full details of the above expressions.
+
+4
+
+Implementation The practical implementation of the monotonic rational-quadratic coupling trans-
+form is as follows:
+
+3. Vectors θw
+
+i and θh
+
+(cid:3)  where θw
+
+1. A neural network NN takes x1:d−1 as input and outputs an unconstrained parameter vector
+
+2. Vector θi is partitioned as θi =(cid:2)θw
+yield the K +1 knots(cid:8)(x(k)  y(k))(cid:9)K
+derivatives(cid:8)δ(k)(cid:9)K−1
+
+θi of length 3K − 1 for each i = d  . . .   D.
+i   θd
+i
+length K − 1.
+i are each passed through a softmax and multiplied by 2B; the outputs are
+interpreted as the widths and heights of the K bins  which must be positive and span the
+[−B  B] interval. Cumulative sums of the K bin widths and heights  each starting at −B 
+i is passed through a softplus function and is interpreted as the values of the
+
+i and θh
+
+i have length K  and θd
+
+i has
+
+i   θh
+
+k=0.
+
+4. The vector θd
+
+k=1 at the internal knots.
+
+Evaluating a rational-quadratic spline transform at location x requires ﬁnding the bin in which x lies 
+which can be done efﬁciently with binary search  since the bins are sorted. The Jacobian determinant
+can be computed in closed-form as a product of quotient derivatives  while the inverse requires solving
+a quadratic equation whose coefﬁcients depend on the value to invert; we provide details of these
+procedures in appendix A.2 and appendix A.3. Unlike the additive and afﬁne transformations  which
+have limited ﬂexibility  a differentiable monotonic spline with sufﬁciently many bins can approximate
+any differentiable monotonic function on the speciﬁed interval [−B  B]2  yet has a closed-form 
+tractable Jacobian determinant  and can be inverted analytically. Finally  our parameterization is
+fully-differentiable  which allows for training by gradient methods.
+The above formulation can also easily be adapted for autoregressive transforms; each θi can be
+computed as a function of x1:i−1 using an autoregressive neural network  and then all elements of x
+can be transformed at once. Inspired by this  we also introduce a set of splines for our coupling layers
+which act elementwise on x1:d−1 (the typically non-transformed variables)  and whose parameters
+are optimized directly by stochastic gradient descent. This means that our coupling layer transforms
+all elements of x at once as follows:
+
+θ1:d−1 = Trainable parameters
+
+θd:D = NN(x1:d−1)
+
+yi = gθi(xi)
+
+for i = 1  . . .   D.
+
+(9)
+(10)
+(11)
+
+Figure 2 demonstrates the ﬂexibility of our
+rational-quadratic coupling transform on syn-
+thetic two-dimensional datasets. Using just two
+coupling layers  each with K = 128 bins  the
+monotonic rational-quadratic spline transforms
+have no issue ﬁtting complex  discontinuous
+densities with potentially hundreds of modes.
+In contrast  a coupling layer with afﬁne trans-
+formations has signiﬁcant difﬁculty with these
+tasks (see appendix C.1).
+
+3.2 Neural spline ﬂows
+
+Training data
+
+Flow density Flow samples
+
+Figure 2: Qualitative results for two-dimensional
+synthetic datasets using RQ-NSF with two cou-
+pling layers.
+
+The monotonic rational-quadratic spline transforms described in the previous section act as drop-in
+replacements for afﬁne or additive transformations in both coupling and autoregressive transforms.
+When combined with alternating invertible linear transformations  we refer to the resulting class of
+normalizing ﬂows as rational-quadratic neural spline ﬂows (RQ-NSF)  which may feature coupling
+layers  RQ-NSF (C)  or autoregressive layers  RQ-NSF (AR). RQ-NSF (C) corresponds to Glow [28]
+with afﬁne or additive transformations replaced with monotonic rational-quadratic transforms  where
+Glow itself is exactly RealNVP with permutations replaced by invertible linear transformations.
+
+2By deﬁnition of the derivative  a differentiable monotonic function is locally linear everywhere  and can
+thus be approximated by a piecewise linear function arbitrarily well given sufﬁciently many bins. For a ﬁxed and
+ﬁnite number of bins such universality does not hold  but this limit argument is similar in spirit to the universality
+proof of Huang et al. [22]  and the universal approximation capabilities of neural networks in general.
+
+5
+
+RQ-NSF (AR) corresponds to either IAF or MAF  depending on whether the ﬂow parameterizes
+f or f−1  again with afﬁne transformations replaced by monotonic rational-quadratic transforms 
+and also with permutations replaced with invertible linear layers. Overall  RQ-NSF resembles a
+traditional feed-forward neural network architecture  alternating between linear transformations and
+elementwise non-linearities  while retaining an exact  analytic inverse. In the case of RQ-NSF (C) 
+the inverse is available in a single neural-network pass.
+
+4 Related Work
+
+Invertible linear transformations
+Invertible linear transformations have found signiﬁcant use
+in normalizing ﬂows. Glow [28] replaces the permutation operation of RealNVP with an LU-
+decomposed linear transformation interpreted as a 1×1 convolution  yielding superior performance
+for image modeling. WaveGlow [45] and FloWaveNet [26] have also successfully adapted Glow
+for generative modeling of audio. Expanding on the invertible 1× 1 convolution presented in
+Glow  Hoogeboom et al. [21] propose the emerging convolution  based on composing autoregressive
+convolutions in a manner analogous to an LU-decomposition  and the periodic convolution  which
+uses multiplication in the Fourier domain to perform convolution. Hoogeboom et al. [21] also
+introduce linear transformations based on the QR-decomposition  where the orthogonal matrix is
+parameterized by a sequence of Householder transformations [55].
+
+Invertible elementwise transformations Outside of those discussed in section 2.2  there has
+been much recent work in developing more ﬂexible invertible elementwise transformations for
+normalizing ﬂows. Flow++ [20] uses the CDF of a mixture of logistic distributions as a monotonic
+transformation in coupling layers  but requires bisection search to compute an inverse  since a closed
+form is not available. Non-linear squared ﬂow [61] adds an inverse-quadratic perturbation to an
+afﬁne transformation in an autoregressive ﬂow  which is invertible under certain restrictions of
+the parameterization. Computing this inverse requires solving a cubic polynomial  and the overall
+transform is less ﬂexible than a monotonic rational-quadratic spline. Sum-of-squares polynomial ﬂow
+[SOS  25] parameterizes a monotonic transformation by specifying the coefﬁcients of a polynomial
+of some chosen degree which can be written as a sum of squares. For low-degree polynomials  an
+analytic inverse may be available  but the method would require an iterative solution in general.
+Neural autoregressive ﬂow [NAF  22] replaces the afﬁne transformation in MAF by parameterizing
+a monotonic neural network for each dimension. This greatly enhances the ﬂexibility of the trans-
+formation  but the resulting model is again not analytically invertible. Block neural autoregressive
+ﬂow [Block-NAF  6] directly ﬁts an autoregressive monotonic neural network end-to-end rather than
+parameterizing a sequence for each dimension as in NAF  but is also not analytically invertible.
+
+Continuous-time ﬂows Rather than constructing a normalizing ﬂow as a series of discrete steps 
+it is also possible to use a continuous-time ﬂow  where the transformation from noise u to data
+x is described by an ordinary differential equation. Deep diffeomorphic ﬂow [51] is one such
+instance  where the model is trained by backpropagation through an Euler integrator  and the Jacobian
+is computed approximately using a truncated power series and Hutchinson’s trace estimator [23].
+Neural ordinary differential equations [Neural ODEs  3] deﬁne an additional ODE which describes
+the trajectory of the ﬂow’s gradient  avoiding the need to backpropagate through an ODE solver. A
+third ODE can be used to track the evolution of the log density  and the entire system can be solved
+with a suitable integrator. The resulting continuous-time ﬂow is known as FFJORD [16]. Like ﬂows
+based on coupling layers  FFJORD is also invertible in ‘one pass’  but here this term refers to solving
+a system of ODEs  rather than performing a single neural-network pass.
+
+5 Experiments
+
+In our experiments  the neural network NN which computes the parameters of the elementwise
+transformations is a residual network [18] with pre-activation residual blocks [19]. For autoregressive
+transformations  the layers must be masked so as to preserve autoregressive structure  and so we use
+the ResMADE architecture outlined by Nash and Durkan [40]. Preliminary results indicated only
+minor differences in setting the tail bound B within the range [1  5]  and so we ﬁx a value B = 3
+across experiments  and ﬁnd this to work robustly. We also ﬁx the number of bins K = 8 across
+
+6
+
+Table 1: Test log likelihood (in nats) for UCI datasets and BSDS300  with error bars corresponding to
+two standard deviations. FFJORD†  NAF†  Block-NAF†  and SOS† report error bars across repeated
+runs rather than across the test set. Superscript(cid:63) indicates results are taken from the existing literature.
+For validation results which can be used for comparison during model development  see table 6 in
+appendix B.1.
+
+MODEL
+FFJORD(cid:63)†
+GLOW
+Q-NSF (C)
+RQ-NSF (C)
+MAF
+Q-NSF (AR)
+NAF(cid:63)†
+BLOCK-NAF(cid:63)†
+SOS(cid:63)†
+RQ-NSF (AR)
+
+POWER
+0.46 ± 0.01
+0.42 ± 0.01
+0.64 ± 0.01
+0.64 ± 0.01
+0.45 ± 0.01
+0.66 ± 0.01
+0.62 ± 0.01
+0.61 ± 0.01
+0.60 ± 0.01
+0.66 ± 0.01
+
+GAS
+
+HEPMASS
+
+MINIBOONE
+8.59 ± 0.12 −14.92 ± 0.08 −10.43 ± 0.04
+12.24 ± 0.03 −16.99 ± 0.02 −10.55 ± 0.45
+12.80 ± 0.02 −15.35 ± 0.02
+−9.35 ± 0.44
+13.09 ± 0.02 −14.75 ± 0.03
+−9.67 ± 0.47
+12.35 ± 0.02 −17.03 ± 0.02 −10.92 ± 0.46
+12.91 ± 0.02 −14.67 ± 0.03
+−9.72 ± 0.47
+11.96 ± 0.33 −15.09 ± 0.40
+−8.86 ± 0.15
+12.06 ± 0.09 −14.71 ± 0.38
+−8.95 ± 0.07
+−8.90 ± 0.11
+11.99 ± 0.41 −15.15 ± 0.10
+13.09 ± 0.02 −14.01 ± 0.03
+−9.22 ± 0.48
+
+BSDS300
+157.40 ± 0.19
+156.95 ± 0.28
+157.65 ± 0.28
+157.54 ± 0.28
+156.95 ± 0.28
+157.42 ± 0.28
+157.73 ± 0.04
+157.36 ± 0.03
+157.48 ± 0.41
+157.31 ± 0.28
+
+our experiments  unless otherwise noted. We implement all invertible linear transformations using
+the LU-decomposition  where the permutation matrix P is ﬁxed at the beginning of training  and
+the product LU is initialized to the identity. For all non-image experiments  we deﬁne a ﬂow ‘step’
+as the composition of an invertible linear transformation with either a coupling or autoregressive
+transform  and we use 10 steps per ﬂow in all our experiments  unless otherwise noted. All ﬂows use
+a standard-normal noise distribution. We use the Adam optimizer [27]  and anneal the learning rate
+according to a cosine schedule [35]. In some cases  we ﬁnd applying dropout [53] in the residual
+blocks beneﬁcial for regularization. Full experimental details are provided in appendix B. Code is
+available online at https://github.com/bayesiains/nsf.
+
+5.1 Density estimation of tabular data
+
+We ﬁrst evaluate our proposed ﬂows using a selection of datasets from the UCI machine-learning
+repository [7] and BSDS300 collection of natural images [38]. We follow the experimental setup
+and pre-processing of Papamakarios et al. [43]  who make their data available online [42]. We also
+update their MAF results using our codebase with ResMADE and invertible linear layers instead
+of permutations  providing a stronger baseline. For comparison  we modify the quadratic splines
+of Müller et al. [39] to match the rational-quadratic transforms  by deﬁning them on the range
+[−B  B] instead of [0  1]  and adding linear tails  also matching the boundary derivatives as in the
+rational-quadratic case. We denote this model Q-NSF. Our results are shown in table 1  where the
+mid-rule separates ﬂows with one-pass inverse from autoregressive ﬂows. We also include validation
+results for comparison during model development in table 6 in appendix B.1.
+Both RQ-NSF (C) and RQ-NSF (AR) achieve state-of-the-art results for a normalizing ﬂow on the
+Power  Gas  and Hepmass datasets  tied with Q-NSF (C) and Q-NSF (AR) on the Power dataset.
+Moreover  RQ-NSF (C) signiﬁcantly outperforms both Glow and FFJORD  achieving scores compet-
+itive with the best autoregressive models. These results close the gap between autoregressive ﬂows
+and ﬂows based on coupling layers  and demonstrate that  in some cases  it may not be necessary to
+sacriﬁce one-pass sampling for density-estimation performance.
+
+5.2
+
+Improving the variational autoencoder
+
+Next  we examine our proposed ﬂows in the context of the variational autoencoder [VAE  29  48] 
+where they can act as both ﬂexible prior and approximate posterior distributions. For our experiments 
+we use dynamically binarized versions of the MNIST dataset of handwritten digits [33]  and the
+EMNIST dataset variant featuring handwritten letters [5]. We measure the capacity of our ﬂows
+to improve over the commonly used baseline of a standard-normal prior and diagonal-normal
+approximate posterior  as well as over either coupling or autoregressive distributions with afﬁne
+transformations. Quantitative results are shown in table 2  and image samples in appendix C.
+
+7
+
+Table 2: Variational autoencoder test-set results (in nats) for the evidence lower bound (ELBO) and
+importance-weighted estimate of the log likelihood (computed as by Burda et al. [2] using 1000
+importance samples). Error bars correspond to two standard deviations.
+
+MNIST
+
+EMNIST
+
+POSTERIOR/PRIOR
+BASELINE
+GLOW
+RQ-NSF (C)
+IAF/MAF
+RQ-NSF (AR)
+
+ELBO
+
+log p(x)
+
+ELBO
+
+log p(x)
+
+−85.61 ± 0.51 −81.31 ± 0.43 −125.89 ± 0.41 −120.88 ± 0.38
+−82.25 ± 0.46 −79.72 ± 0.42 −120.04 ± 0.40 −117.54 ± 0.38
+−82.08 ± 0.46 −79.63 ± 0.42 −119.74 ± 0.40 −117.35 ± 0.38
+−82.56 ± 0.48 −79.95 ± 0.43 −119.85 ± 0.40 −117.47 ± 0.38
+−82.14 ± 0.47 −79.71 ± 0.43 −119.49 ± 0.40 −117.28 ± 0.38
+
+All models improve signiﬁcantly over the baseline  but perform very similarly otherwise  with most
+featuring overlapping error bars. Considering the disparity in density-estimation performance in the
+previous section  this is likely due to ﬂows with afﬁne transformations being sufﬁcient to model the
+latent space for these datasets  with little scope for RQ-NSF ﬂows to demonstrate their increased
+ﬂexibility. Nevertheless  it is worthwhile to highlight that RQ-NSF (C) is the ﬁrst class of model which
+can potentially match the ﬂexibility of autoregressive models  and which requires no modiﬁcation for
+use as either a prior or approximate posterior  due to its one-pass invertibility.
+
+5.3 Generative modeling of images
+
+Finally  we evaluate neural spline ﬂows as generative models of images  measuring their capacity
+to improve upon baseline models with afﬁne transforms. In this section  we focus solely on ﬂows
+with a one-pass inverse in the style of RealNVP [10] and Glow [28]. We use the CIFAR-10 [31]
+and downsampled 64 × 64 ImageNet [49  60] datasets  with original 8-bit colour depth and with
+reduced 5-bit colour depth. We use Glow-like architectures with either afﬁne (in the baseline
+model) or rational-quadratic coupling transforms  and provide full experimental detail in appendix B.
+Quantitative results are shown in table 3  and samples are shown in ﬁg. 3 and appendix C.
+RQ-NSF (C) improves upon the afﬁne baseline in three out of four tasks  and the improvement is most
+signiﬁcant on the 8-bit version of ImageNet64. At the same time  RQ-NSF (C) achieves scores that
+are competitive with the original Glow model  while signiﬁcantly reducing the number of parameters
+required  in some cases by almost an order of magnitude. Figure 3 demonstrates that the model is
+capable of producing diverse  globally coherent samples which closely resemble real data. There
+is potential to further improve our results by replacing the uniform dequantization used in Glow
+with variational dequantization  and using more powerful networks with gating and self-attention
+mechanisms to parameterize the coupling transforms  both of which are explored by Ho et al. [20].
+
+6 Discussion
+Long-standing probabilistic models such as copulas [12] and Gaussianization [4] can simply represent
+complex marginal distributions that would require many layers of transformations in ﬂow-based
+models like RealNVP and Glow. Differentiable spline-based coupling layers allow these ﬂows 
+which are powerful ways to represent high-dimensional dependencies  to model distributions with
+complex shapes more quickly. Our results show that when we have enough data  the extra ﬂexibility
+of spline-based layers leads to better generalization.
+For tabular density estimation  both RQ-NSF (C) and RQ-NSF (AR) excel on Power  Gas  and
+Hepmass  the datasets with the highest ratio of data points to dimensionality from the ﬁve considered.
+In image experiments  RQ-NSF (C) achieves the best results on the ImageNet dataset  which has over
+an order of magnitude more data points than CIFAR-10. When the dimension is increased without a
+corresponding increase in dataset size  RQ-NSF still performs competitively with other approaches 
+but does not outperform them.
+Overall  neural spline ﬂows demonstrate that there is signiﬁcant performance to be gained by
+upgrading the commonly-used afﬁne transformations in coupling and autoregressive layers  without
+the need to sacriﬁce analytic invertibility. Monotonic spline transforms enable models based on
+coupling layers to achieve density-estimation performance on par with the best autoregressive ﬂows 
+
+8
+
+Table 3: Test-set bits per dimension (BPD  lower is better) and parameter count for CIFAR-10 and
+ImageNet64 models. Superscript(cid:63) indicates results are taken from the existing literature.
+
+MODEL
+BASELINE
+RQ-NSF (C)
+GLOW(cid:63)
+
+CIFAR-10 5-BIT
+PARAMS
+BPD
+5.2M
+5.3M
+44.0M
+
+1.70
+1.70
+
+1.67
+
+CIFAR-10 8-BIT
+PARAMS
+BPD
+11.1M
+11.8M
+44.0M
+
+3.41
+3.38
+
+3.35
+
+1.81
+1.77
+
+1.76
+
+IMAGENET64 5-BIT
+BPD
+
+IMAGENET64 8-BIT
+BPD
+
+PARAMS
+14.3M
+15.6M
+110.9M
+
+3.91
+3.82
+
+3.81
+
+PARAMS
+14.3M
+15.6M
+110.9M
+
+Figure 3: Samples from image models for 5-bit (top) and 8-bit (bottom) datasets. Left: CIFAR-10.
+Right: ImageNet64.
+
+while retaining exact one-pass sampling. These models strike a novel middle ground between
+ﬂexibility and practicality  providing a useful off-the-shelf tool for the enhancement of architectures
+like the variational autoencoder  while also improving parameter efﬁciency in generative modeling.
+The proposed transforms scale to high-dimensional problems  as demonstrated empirically. The only
+non-constant operation added is the binning of the inputs according to the knot locations  which can
+be efﬁciently performed in O(log2 K) time for K bins with binary search  since the knot locations
+are sorted. Moreover  due to the increased ﬂexibility of the spline transforms  we ﬁnd that we require
+fewer steps to build ﬂexible ﬂows  reducing the computational cost. In our experiments  which employ
+a linear O(K) search  we found rational-quadratic splines added approximately 30-40% to the wall-
+clock time for a single traning update compared to the same model with afﬁne transformations. A
+potential drawback of the proposed method is a more involved implementation; we alleviate this by
+providing an extensive appendix with technical details  and a reference implementation in PyTorch.
+A third-party implementation has also been added to TensorFlow Probability [8].
+Rational-quadratic transforms are also a useful differentiable and invertible module in their own right 
+which could be included in many models that can be trained end-to-end. For instance  monotonic
+warping functions with a tractable Jacobian determinant are useful for supervised learning [52].
+More generally  invertibility can be useful for training very large networks  since activations can be
+recomputed on-the-ﬂy for backpropagation  meaning gradient computation requires memory which
+is constant instead of linear in the depth of the network [14  37]. Monotonic splines are one way of
+constructing invertible elementwise transformations  but there may be others. The beneﬁts of research
+in this direction are clear  and so we look forward to future work in this area.
+
+Acknowledgements
+
+This work was supported in part by the EPSRC Centre for Doctoral Training in Data Science  funded
+by the UK Engineering and Physical Sciences Research Council (grant EP/L016427/1) and the
+University of Edinburgh. George Papamakarios was also supported by Microsoft Research through
+its PhD Scholarship Programme.
+
+9
+
+References
+[1] J. F. Blinn. How to solve a cubic equation  part 5: Back to numerics. IEEE Computer Graphics and
+
+Applications  27(3):78–89  2007.
+
+[2] Y. Burda  R. B. Grosse  and R. Salakhutdinov. Importance weighted autoencoders. International Conference
+
+on Learning Representations  2016.
+
+[3] R. T. Q. Chen  Y. Rubanova  J. Bettencourt  and D. K. Duvenaud. Neural ordinary differential equations.
+
+Advances in Neural Information Processing Systems  2018.
+
+[4] S. S. Chen and R. A. Gopinath. Gaussianization. Advances in Neural Information Processing Systems 
+
+2001.
+
+[5] G. Cohen  S. Afshar  J. Tapson  and A. van Schaik. EMNIST: an extension of MNIST to handwritten
+
+letters. arXiv:1702.05373  2017.
+
+[6] N. De Cao  I. Titov  and W. Aziz. Block neural autoregressive ﬂow. Conference on Uncertainty in Artiﬁcial
+
+Intelligence  2019.
+
+[7] D. Dheeru and E. Karra Taniskidou. UCI machine learning repository  2017. URL http://archive.
+
+ics.uci.edu/ml.
+
+[8] J. V. Dillon  I. Langmore  D. Tran  E. Brevdo  S. Vasudevan  D. Moore  B. Patton  A. Alemi  M. Hoffman 
+
+and R. A. Saurous. TensorFlow Distributions. arXiv preprint arXiv:1711.10604  2017.
+
+[9] L. Dinh  D. Krueger  and Y. Bengio. NICE: Non-linear independent components estimation. International
+
+Conference on Learning Representations  Workshop track  2015.
+
+[10] L. Dinh  J. Sohl-Dickstein  and S. Bengio. Density estimation using Real NVP. International Conference
+
+on Learning Representations  2017.
+
+[11] C. Durkan  A. Bekasov  I. Murray  and G. Papamakarios. Cubic-spline ﬂows. Workshop on Invertible
+
+Neural Networks and Normalizing Flows  International Conference on Machine Learning  2019.
+
+[12] G. Elidan. Copulas in machine learning. Copulae in Mathematical and Quantitative Finance  2013.
+[13] M. Germain  K. Gregor  I. Murray  and H. Larochelle. MADE: Masked autoencoder for distribution
+
+estimation. International Conference on Machine Learning  2015.
+
+[14] A. N. Gomez  M. Ren  R. Urtasun  and R. B. Grosse. The reversible residual network: Backpropagation
+
+without storing activations. Advances in Neural Information Processing Systems  2017.
+
+[15] I. Goodfellow  J. Pouget-Abadie  M. Mirza  B. Xu  D. Warde-Farley  S. Ozair  A. Courville  and Y. Bengio.
+
+Generative adversarial nets. Advances in Neural Information Processing Systems  2014.
+
+[16] W. Grathwohl  R. T. Q. Chen  J. Bettencourt  I. Sutskever  and D. K. Duvenaud. FFJORD: Free-form
+continuous dynamics for scalable reversible generative models. International Conference on Learning
+Representations  2018.
+
+[17] J. Gregory and R. Delbourgo. Piecewise rational quadratic interpolation to monotonic data. IMA Journal
+
+of Numerical Analysis  2(2):123–130  1982.
+
+[18] K. He  X. Zhang  S. Ren  and J. Sun. Deep residual learning for image recognition. IEEE Conference on
+
+Computer Vision and Pattern Recognition  2016.
+
+[19] K. He  X. Zhang  S. Ren  and J. Sun. Identity mappings in deep residual networks. European Conference
+
+on Computer Vision  2016.
+
+[20] J. Ho  X. Chen  A. Srinivas  Y. Duan  and P. Abbeel. Flow++: Improving ﬂow-based generative models
+with variational dequantization and architecture design. International Conference on Machine Learning 
+2019.
+
+[21] E. Hoogeboom  R. van den Berg  and M. Welling. Emerging convolutions for generative normalizing ﬂows.
+
+International Conference on Machine Learning  2019.
+
+[22] C.-W. Huang  D. Krueger  A. Lacoste  and A. Courville. Neural autoregressive ﬂows. International
+
+Conference on Machine Learning  2018.
+
+[23] M. F. Hutchinson. A stochastic estimator of the trace of the inﬂuence matrix for Laplacian smoothing
+
+splines. Communications in Statistics - Simulation and Computation  19(2):433–450  1990.
+
+[24] S. Ioffe and C. Szegedy. Batch normalization: Accelerating deep network training by reducing internal
+
+covariate shift. International Conference on Machine Learning  2015.
+
+[25] P. Jaini  K. A. Selby  and Y. Yu. Sum-of-squares polynomial ﬂow. International Conference on Machine
+
+Learning  2019.
+
+[26] S. Kim  S.-g. Lee  J. Song  and S. Yoon. FloWaveNet: A generative ﬂow for raw audio. arXiv:1811.02155 
+
+2018.
+
+10
+
+[27] D. P. Kingma and J. Ba. Adam: A method for stochastic optimization. International Conference on
+
+Learning Representations  2014.
+
+[28] D. P. Kingma and P. Dhariwal. Glow: Generative ﬂow with invertible 1 × 1 convolutions. Advances in
+
+Neural Information Processing Systems  2018.
+
+[29] D. P. Kingma and M. Welling. Auto-encoding variational Bayes. International Conference on Learning
+
+Representations  2014.
+
+[30] D. P. Kingma  T. Salimans  R. Jozefowicz  X. Chen  I. Sutskever  and M. Welling. Improved variational
+
+inference with inverse autoregressive ﬂow. Advances in Neural Information Processing Systems  2016.
+
+[31] A. Krizhevsky and G. Hinton. Learning multiple layers of features from tiny images. Master’s thesis 
+
+Department of Computer Science  University of Toronto  2009.
+
+[32] M. Kumar  M. Babaeizadeh  D. Erhan  C. Finn  S. Levine  L. Dinh  and D. Kingma. VideoFlow: A
+
+ﬂow-based generative model for video. arXiv:1903.01434  2019.
+
+[33] Y. LeCun  L. Bottou  Y. Bengio  and P. Haffner. Gradient-based learning applied to document recognition.
+
+Proceedings of the IEEE  86(11):2278–2324  1998.
+
+[34] G. Loaiza-Ganem  Y. Gao  and J. P. Cunningham. Maximum entropy ﬂow networks.
+
+Conference on Learning Representations  2017.
+
+[35] I. Loshchilov and F. Hutter. SGDR: Stochastic gradient descent with warm restarts.
+
+Conference on Learning Representations  2017.
+
+International
+
+International
+
+[36] C. Louizos and M. Welling. Multiplicative normalizing ﬂows for variational Bayesian neural networks.
+
+International Conference on Machine Learning  2017.
+
+[37] M. MacKay  P. Vicol  J. Ba  and R. B. Grosse. Reversible recurrent neural networks. Advances in Neural
+
+Information Processing Systems  2018.
+
+[38] D. Martin  C. Fowlkes  D. Tal  and J. Malik. A database of human segmented natural images and its
+International
+
+application to evaluating segmentation algorithms and measuring ecological statistics.
+Conference on Computer Vision  2001.
+
+[39] T. Müller  B. McWilliams  F. Rousselle  M. Gross  and J. Novák. Neural importance sampling.
+
+arXiv:1808.03856  2018.
+
+[40] C. Nash and C. Durkan. Autoregressive energy machines. International Conference on Machine Learning 
+
+2019.
+
+[41] J. B. Oliva  A. Dubey  M. Zaheer  B. Póczos  R. Salakhutdinov  E. P. Xing  and J. Schneider. Transformation
+
+autoregressive networks. International Conference on Machine Learning  2018.
+
+[42] G. Papamakarios. Preprocessed datasets for MAF experiments  2018. URL https://doi.org/10.5281/
+
+zenodo.1161203.
+
+[43] G. Papamakarios  T. Pavlakou  and I. Murray. Masked autoregressive ﬂow for density estimation. Advances
+
+in Neural Information Processing Systems  2017.
+
+[44] G. Papamakarios  D. C. Sterratt  and I. Murray. Sequential neural likelihood: Fast likelihood-free inference
+
+with autoregressive ﬂows. International Conference on Artiﬁcial Intelligence and Statistics  2019.
+
+[45] R. Prenger  R. Valle  and B. Catanzaro. WaveGlow: A ﬂow-based generative network for speech synthesis.
+
+arXiv:1811.00002  2018.
+
+[46] D. J. Rezende and S. Mohamed. Variational inference with normalizing ﬂows. International Conference
+
+on Machine Learning  2015.
+
+[47] D. J. Rezende and F. Viola. Taming VAEs. arXiv:1810.00597  2018.
+[48] D. J. Rezende  S. Mohamed  and D. Wierstra. Stochastic backpropagation and approximate inference in
+
+deep generative models. International Conference on Machine Learning  2014.
+
+[49] O. Russakovsky  J. Deng  H. Su  J. Krause  S. Satheesh  S. Ma  Z. Huang  A. Karpathy  A. Khosla 
+M. Bernstein  A. C. Berg  and L. Fei-Fei. ImageNet large scale visual recognition challenge. International
+Journal of Computer Vision  115(3):211–252  2015.
+
+[50] T. Salimans  A. Karpathy  X. Chen  and D. P. Kingma. PixelCNN++: Improving the PixelCNN with
+discretized logistic mixture likelihood and other modiﬁcations. International Conference on Learning
+Representations  2017.
+
+[51] H. Salman  P. Yadollahpour  T. Fletcher  and K. Batmanghelich. Deep diffeomorphic normalizing ﬂows.
+
+arXiv:1810.03256  2018.
+
+[52] E. Snelson  C. E. Rasmussen  and Z. Ghahramani. Warped Gaussian processes. Advances in Neural
+
+Information Processing Systems  2004.
+
+11
+
+[53] N. Srivastava  G. Hinton  A. Krizhevsky  I. Sutskever  and R. Salakhutdinov. Dropout: A simple way to
+prevent neural networks from overﬁtting. The Journal of Machine Learning Research  15(1):1929–1958 
+2014.
+
+[54] M. Steffen. A simple method for monotonic interpolation in one dimension. Astronomy and Astrophysics 
+
+239:443  1990.
+
+[55] J. M. Tomczak and M. Welling.
+
+arXiv:1611.09630  2016.
+
+Improving variational auto-encoders using Householder ﬂow.
+
+[56] B. Uria  I. Murray  and H. Larochelle. RNADE: The real-valued neural autoregressive density-estimator.
+
+Advances in Neural Information Processing Systems  2013.
+
+[57] R. van den Berg  L. Hasenclever  J. M. Tomczak  and M. Welling. Sylvester normalizing ﬂows for
+
+variational inference. Conference on Uncertainty in Artiﬁcial Intelligence  2018.
+
+[58] A. van den Oord  S. Dieleman  H. Zen  K. Simonyan  O. Vinyals  A. Graves  N. Kalchbrenner  A. Senior 
+and K. Kavukcuoglu. WaveNet: A generative model for raw audio. ISCA Speech Synthesis Workshop 
+2016.
+
+[59] A. van den Oord  N. Kalchbrenner  L. Espeholt  K. Kavukcuoglu  O. Vinyals  and A. Graves. Conditional
+image generation with PixelCNN decoders. Advances in Neural Information Processing Systems  2016.
+[60] A. van den Oord  N. Kalchbrenner  and K. Kavukcuoglu. Pixel recurrent neural networks. International
+
+Conference on Machine Learning  2016.
+
+[61] Z. M. Ziegler and A. M. Rush. Latent normalizing ﬂows for discrete sequences. arXiv:1901.10548  2019.
+
+12
+
+,Conor Durkan
+Artur Bekasov
+Iain Murray
+George Papamakarios

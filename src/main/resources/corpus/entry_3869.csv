@@ -1,0 +1,846 @@
+2017,On Blackbox Backpropagation and Jacobian Sensing,From a small number of calls to a given “blackbox" on random input perturbations  we show how to efficiently recover its unknown Jacobian  or estimate the left action of its Jacobian on a given vector. Our methods are based on a novel combination of compressed sensing and graph coloring techniques  and provably exploit structural prior knowledge about the Jacobian such as sparsity and symmetry while being noise robust. We demonstrate efficient backpropagation through noisy blackbox layers in a deep neural net  improved data-efficiency in the task of linearizing the dynamics of a rigid body system  and the generic ability to handle a rich class of input-output dependency structures in Jacobian estimation problems.,On Blackbox Backpropagation and Jacobian Sensing
+
+Krzysztof Choromanski
+
+Google Brain
+
+New York  NY 10011
+
+kchoro@google.com
+
+Vikas Sindhwani
+
+Google Brain
+
+New York  NY 10011
+
+sindhwani@google.com
+
+Abstract
+
+From a small number of calls to a given “blackbox" on random input perturbations 
+we show how to efﬁciently recover its unknown Jacobian  or estimate the left action
+of its Jacobian on a given vector. Our methods are based on a novel combination of
+compressed sensing and graph coloring techniques  and provably exploit structural
+prior knowledge about the Jacobian such as sparsity and symmetry while being
+noise robust. We demonstrate efﬁcient backpropagation through noisy blackbox
+layers in a deep neural net  improved data-efﬁciency in the task of linearizing the
+dynamics of a rigid body system  and the generic ability to handle a rich class of
+input-output dependency structures in Jacobian estimation problems.
+
+1
+
+Introduction
+
+Automatic Differentiation (AD) [1  17] techniques are at the heart of several “end-to-end" machine
+learning frameworks such as TensorFlow [5] and Torch [2]. Such frameworks are organized around
+a library of primitive operators which are differentiable vector-valued functions of data inputs and
+model parameters. A composition of these primitives deﬁnes a computation graph - a directed acyclic
+graph whose nodes are operators and whose edges represent dataﬂows  typically culminating in the
+evaluation of a scalar-valued loss function. For reverse mode automatic differentiation (backpropaga-
+tion) to work  each operator needs to be paired with a gradient routine which maps gradients of the
+loss function with respect to the outputs of the operator  to gradients with respect to its inputs. In
+this paper  we are concerned with extending the automatic differentiation paradigm to computation
+graphs where some nodes are "blackboxes" [12]  that is  opaque pieces of code implemented outside
+the AD framework providing access to an operator only via expensive and potentially noisy function
+evaluation  with no associated gradient routine available. A useful mental model of this setting is
+shown below where f3 is a blackbox.
+
+x0
+
+f1
+
+f2
+
+x1
+
+x2
+
+f3
+
+x3
+
+f4
+
+x4
+
+Blackboxes  of course  are pervasive - as legacy or proprietary codes or executables  numerical
+optimization routines  physics engines (e.g  Bullet [3] and MujoCo [4])  or even wrappers interfacing
+with a mechanical system as is typically the case in reinforcement learning  robotics and process
+control applications.
+
+The unknown Jacobian of a blackbox is the central object of study in this paper. Recall that the
+Jacobian ∇f (x0) of a differentiable vector-valued map f : Rn (cid:55)→ Rm at an input x0 ∈ Rn is the
+
+31st Conference on Neural Information Processing Systems (NIPS 2017)  Long Beach  CA  USA.
+
+m × n matrix of partial derivatives  deﬁned by 
+
+[∇f (x0)]ij =
+
+∂fi
+∂xj
+
+(x0)
+
+The rows of the Jacobian are gradient vectors of the m component functions f = (f1 . . . fm) and the
+columns are indexed by the n-dimensional inputs x = (x1 . . . xn). Through Taylor approximation 
+the Jacobian characterizes the rate of change in f at a step  (0 <  (cid:28) 1) along any direction d ∈ Rn
+in the neighborhood of x0 as follows 
+
+∇f (x0)d ≈ 1
+
+
+[f (x0 + d) − f (x0)] .
+
+(1)
+Viewed as a linear operator over perturbation directions d ∈ Rn  differences of the form
+ [f (x + d) − f (x)] may be interpreted as noisy measurements (“sensing" [10  11  13]) of the
+1
+Jacobian based on function evaluation. The measurement error grows with the step size  and the
+degree of nonlineary in f in the vicinity of x0. Additional measurement noise may well be introduced
+by unknown error-inducing elements inside the blackbox.
+From as few perturbations and measurements as possible  we are concerned with approximately
+recovering either the full Jacobian  or approximating the action of the transpose of the Jacobian on a
+given vector in the context of enabling backpropagation through blackbox nodes. To elaborate on
+the latter setting  let y = f (x) represent forward evaluation of an operator  and let p = ∂l
+∂y be the
+gradient of a loss function l(·) ﬂowing in from the “top" during the reverse sweep. We are interested
+∂x = [∇f (x)]T p  i.e. the action of the transpose of the Jacobian on p. Note that
+in approximating ∂l
+due to linearity of the derivative  this is the same as estimating the gradient of the scalar-valued
+ (g(x + d) − g(x))  which is
+function g(x) = pT f (x) based on scalar measurements of the form 1
+a special case of the tools developed in this paper.
+The more general problem of full Jacobian estimation arises in many derivative-free optimization
+settings [12  8]. Problems in optimal control and reinforcement learning [18  21  20] are prominent
+examples  where the dynamics of a nonlinear system (e.g.  a robot agent) needs to be linearized along
+a trajectory of states and control inputs reducing the problem to a sequence of time-varying Linear
+Quadratic Regulator (LQR) subproblems [21]. The blackbox in this case is either a physics simulator
+or actual hardware. The choice of perturbation directions and the collection of measurements then
+becomes intimately tied to the agent’s strategy for exploration and experience gathering.
+Finite differencing  where the perturbation directions d are the n standard basis vectors  is a default
+approach for Jacobian estimation. However  it requires n function evaluations which may be
+prohibitively expensive for large n. Another natural approach  when the number of measurements 
+say k  is smaller than n  is to estimate the Jacobian via linear regression 
+
+k(cid:88)
+
+i=1
+
+argmin
+J∈Rm×n
+
+(cid:107)Jdi − 1
+
+
+(cid:2)f (x0 + di) − f (x0)(cid:3)(cid:107)2
+
+2 + λ(cid:107)J(cid:107)2
+F  
+
+where an l2 regularizer is added to handle the underdetermined setting and (cid:107) · (cid:107)F stands for the
+Frobenius norm. This approach assumes that the error distribution is Gaussian and in its basic
+form  does not exploit additional Jacobian structure  e.g.  symmetry and sparsity  to improve data
+efﬁciency. For example  if backpropagation needs to be enabled for a noiseless blackbox with
+identical input-output dimensions whose unknown Jacobian happens to be symmetric  then just
+one function evaluation sufﬁces since ∇f (x0)T p = ∇f (x0)p ≈ 1
+ (f (x0 + p) − f (x0)). Figure
+1 shows the histogram of the Jacobian of the dynamics of a Humanoid walker with respect to its
+18-dimensional state variables and 6 dimensional control inputs. It can be seen that the Jacobian
+is well approximated by a sparse matrix. In a complex dynamical system comprising of many
+subsystems  most state or control variables only have local inﬂuence on the instantaneous evolution
+of the overall state. Figure 1 also shows the example of a manipulator; the Jacobian of a 5 planar
+link system has sparse and symmetric blocks (highlighted by blue and red bounding boxes) as a
+consequence of the form of the equations of motion of a kinematic tree of rigid bodies. Clearly  one
+can hope that incorporating this kind of prior knowledge in the Jacobian estimation process will
+improve data efﬁciency in “model-free" trajectory optimization applications.
+Technical Preview  Contributions and Outline: We highlight the following contributions:
+
+2
+
+Figure 1: Structured Jacobians in Continuous Control Problems
+
+int
+
+int
+
+int
+
+√
+
+)
+
+int
+
+E(n)
+
+(cid:98)J of the true Jacobian J is such that (cid:107)(cid:98)J − J(cid:107)F ≤ E(n)  where the measurement error vector
+
+• In §2: We start by asking how many blackbox calls are required to estimate a sparse Jacobian with
+known sparsity pattern. We recall results from automatic differentiation [14  17  23] literature that
+relates this problem to graph coloring [19  26] where the chromatic number of a certain graph that
+encodes input-output dependencies dictates the sample complexity. We believe that this connection
+is not particularly well known in the deep learning community  though coloring approaches only
+apply to noiseless structure-aware cases.
+• In §3: We present a Jacobian recovery algorithm  rainbow  that uses a novel probabilistic
+graph coloring subroutine to reduce the effective number of variables  leading to a compressed
+convex optimization problem whose solution yields an approximate Jacobian. The approximation
+η ∈ Rm satisﬁes: (cid:107)η(cid:107)∞ = o(E(n)). Our algorithm requires only O(min(A  B)) calls to the
+blackbox  where A = dint log2(
+)  dint is a measure
+of intrinsic dimensionality of a convex set C (cid:51) J encoding prior knowledge about the Jacobian
+) ≤ n is a parameter encoding combinatorial properties possibly
+(elaborated below) and ρ(J  Gweak
+known in advance (encoded by the introduced later the so-called weak-intersection graph Gweak
+)
+of the sparsity pattern in the Jacobian (see: §3.4.1 for an explicit deﬁnition); we will refer to
+ρ(J  Gweak
+• We demonstrate our tools with the following experiments: (1) Training a convolutional neural
+network in the presence of a blackbox node  (2) Estimating structured Jacobians from few calls
+to a blackbox with different kinds of local and global dependency structures between inputs and
+outputs  and (3) Estimating structured Jacobians of the dynamics of a 50-link manipulator  with
+a small number of measurements while exploiting sparsity and partial symmetry via priors in lp
+regression.
+
+) as the chromatic character of J.
+
+mρ(J Gweak
+
+√
+E(n) )  B = mρ(J  Gweak
+
+mn
+
+int
+
+) log2(
+
+The convex set C mentioned above can be deﬁned in many different ways depending on prior
+knowledge about the Jacobian (e.g.  lower and upper bounds on certain entries  sparsity with unknown
+pattern  symmetric block structure  etc).
+As we show in the experimental section  our approach can be applied also for non-smooth problems
+where Jacobian is not well-deﬁned. Note that in this setting one can think about a nonsmooth function
+as a noisy version of its smooth approximation and a Jacobian of a function smoothing (such as
+Gaussian smoothing) is a subject of interest.
+Notation: D = [d1 . . . dk] ∈ Rn×k will denote the matrix of perturbation directions  with the
+corresponding measurement matrix R = [r1 . . . rk] ∈ Rm×k where ri = 1
+ [f (x + di) − f (x)].
+
+2 The Link between Jacobian Estimation and Graph Coloring
+
+Suppose the Jacobian is known to be a diagonal matrix. Then ﬁnite differencing where perturbation
+directions are the n standard basis elements is utterly wasteful; it is easy to see that a single
+perturbation direction d = [1  1 . . . 1]T sufﬁces in identifying all diagonal elements. The goal of this
+section is to explain the connection between Jacobian recovery and graph coloring problems that
+substantially generalizes this observation.
+First we introduce graph theory terminology. The undirected graph is denoted as G(V  E)  where V
+and E stand for the sets of vertices and edges respectively. For v  w ∈ V we say that v is adjacent
+to w if there is an edge between v and w. The degree deg(v) of v ∈ V is the number of vertices
+adjacent to it. The maximum degree in G(V  E) will be denoted as ∆(G). A stable set in G is the
+
+3
+
+d
+
+f
+
+a
+
+b
+
+c
+
+e
+
+h
+
+g
+
+Figure 2: On the left: Sparse Jacobian for a function f (a  b  c  d  e  f  g  h) with n = m = 8  where
+blue entries indicate nonzero values. In the middle: coloring of columns. A ﬁxed color corresponds
+to a stable set in Gint. On the right: corresponding intersection graph Gint.
+
+subset S ⊆ V   where no two vertices are adjacent. The chromatic number χ(G) of G is the minimum
+number of sets in the partitioning of V into stable sets. Equivalently  it is the smallest number of
+colors used in a valid vertex-coloring of the graph  where a valid coloring is one in which adjacent
+vertices are assigned different colors.
+Denote by Jx = [J1  ...  Jn] ∈ Rm×n a Jacobian matrix evaluated at point x ∈ Rn  where Ji ∈ Rm
+denotes the i-th column. Assume that Jis are not known  but the sparsity structure  i.e. the location
+of zero entries in J is given. Let Ai = {k : J i
+k (cid:54)= 0} ⊆ {0  ...  m − 1} be the indices of the
+non-zero elements of Ji. The intersection graph  denoted by Gint  is a graph whose vertex set is
+V = {x1 . . . xn} and xi is adjacent to xj if the sets Ai and Aj intersect. In other words  there
+exists an output of the blackbox that depends both on xi and xj (see Figure 2 for an illustration).
+Now suppose k colors are used in a valid coloring of Gint. The key fact that relates the Jacobian
+recovery problem to graph coloring is the following observation. If one constructs vectors di ∈ Rn
+j = 1 if xj is colored by the ith color and is 0 otherwise  then
+for i = 1  ...  k in such a way that di
+k computations of the ﬁnite difference f (x+di)−f (x)
+for 0 <  (cid:28) 1 and i = 1  ...  k sufﬁce to
+accurately approximate the Jacobian matrix (assuming no blackbox noise). The immediate corollary
+is the following lemma.
+
+
+
+Lemma 2.1 ([14]). The number of calls k to a blackbox vector-valued function f needed to compute
+an approximate Jacobian via ﬁnite difference technique in the noiseless setting satisﬁes k ≤ χ(Gint) 
+where Gint is the corresponding intersection graph.
+Thus  blackboxes whose unknown Jacobian happens to be associated with intersection graphs of
+low chromatic number admit accurate Jacobian estimation with few function calls. Rich classes of
+graphs have low chromatic number. If the maximum degree ∆(Gint) of Gint is small then χ(Gint) is
+also small  because of the well known fact that χ(Gint) ≤ ∆(Gint) + 1. For instance if every input
+xi inﬂuences at most k outputs fj and every output fj depends on at most l variables xi  then one
+can notice that ∆(Gint) ≤ kl and thus χ(Gint) ≤ kl + 1. When the maximum degree is small  an
+efﬁcient coloring can be easily found by the greedy procedure that colors vertices one by one and
+assigns to the newly seen vertex the smallest color that has not been used to color all its already seen
+neighbors ([14]). This procedure cannot be applied if there exist vertices of high degree. That is the
+case for instance if there exist few global variables inﬂuence a large number of outputs fi. In the
+subsequent sections we will present an algorithm that does not need to rely on the small value of
+∆(Gint).
+Graph coloring for Jacobian estimation has two disadvantages even if we assume that good quality
+coloring of the intersection graph can be found efﬁciently (optimal graph coloring is in general NP
+hard). It assumes that the sparsity structure of the Jacobian  i.e. the set of entries that are zero is given 
+and that all the measurements are accurate  i.e. there is no noise. We relax these limitations next.
+
+3 Sensing and Recovery of Structured Jacobians
+
+Our algorithm receives as input two potential sources of prior knowledge about the blackbox:
+• sparsity pattern of the Jacobian in the form of a supergraph of the true intersection graph  which we
+call the weak intersection graph denoted as Gweak
+. The knowledge of the sparsity pattern may be
+imprecise in the sense that we can overestimate the set of outputs an input can inﬂuence. Note that
+any stable set of Gweak
+). A complete
+
+is a stable set in Gint and thus we have: χ(Gint) ≤ χ(Gweak
+
+int
+
+int
+
+int
+
+4
+
+int = Gint reﬂects the setting with exact knowledge.
+
+weak intersection graph corresponds to the setting where no prior knowledge about the sparsity
+pattern is available while Gweak
+• a convex set C encoding additional information about the local and global behavior of the blackbox.
+For example  if output components fi are Lipschitz continuous with the Lipschitz constant Li: the
+magnitude of the Jacobian entries can be bounded row-wise with Li  i = 1 . . . m. The Jacobian
+may additionally have sparse blocks  which may be expressed as a bound on the elementwise l1
+norm over the entries of the block; it may also have symmetric and/or low-rank blocks [6] (the
+latter may be expressed as a bound on the nuclear norm of the block). A measure of the effective
+degrees of freedom due to such constraints directly shows up in our theoretical results on Jacobian
+recovery (§3.4).
+
+Direct domain knowledge  or a few expensive ﬁnite-difference calls may be used in the ﬁrst few
+iterations to collect input-independent structural information about the Jacobian  e.g.  to observe the
+typical degree of sparsity  whether a symmetry or sparsity pattern holds across iterations etc.
+Our algorithm  called rainbow  consists of three steps:
+• Color: Efﬁcient coloring of Gweak
+
+for reducing the dimensionality of the problem  where each
+variable in the compressed problem corresponds to a subset of variables in the original problem.
+This phases explores strictly combinatorial structural properties of J (§3.1).
+• Optimize: Solving a compressed convex optimization problem to minimize (or ﬁnd a feasible)
+lp reconstruction. This phase can utilize additional structural knowledge via the convex set C
+((§3.3)) deﬁned earlier.
+• Reconstruct: Mapping the auxiliary variables from the solution to the above convex problem
+
+int
+
+back to the original variables to reconstruct J.
+
+Next we discuss all these steps.
+
+3.1 Combinatorial Variable Compression via Graph Coloring: GreedyColoring
+
+int
+
+Consider the following coloring algorithm for reducing the effective number of input variables. Order
+randomly. Initialize the list of stable sets I covering {x1  ...  xn}
+the vertices x1  ...  xn of Gweak
+as I = ∅. Process vertices one after another and add a vertex xi to the ﬁrst set from I that does
+not contain vertices adjacent to xi. If no such a set exists  add the singleton set {xi} to I. After
+processing all the vertices  each stable set from I gets assigned a different color. We denote by
+color(i) the color assigned to vertex xi and by l the total number of colors. To boost the probability
+of ﬁnding a good coloring  one can repeat the procedure above for a few random permutations and
+choose the one that corresponds to the smallest l.
+
+3.2 Choice of Perturbation Directions
+Each di ∈ Rn is obtained from the randomly chosen vector di
+core ∈ Rl  that we call the core vector.
+Entries of all core vectors are taken independently from the same distribution φ which is: Gaussian 
+Poissonian or bounded and of nonzero variance (for the sake of readability  technical conditions
+and extensions to this family of distributions is relegated to the Appendix). Directions may even be
+chosen from columns of structured matrices  i.e.  Circulant and Toeplitz [7  24  22  16]. Each di is
+deﬁned as follows: di(j) = di
+
+core(color(j)).
+
+3.3 Recovery via Compressed Convex Optimization
+Linear Programming: Assume that the lp-norm of the noise vector η ∈ Rm is bounded by  =
+E(n)  where E(·) encodes non-decreasing dependence on n. With the matrix of perturbation vectors
+D ∈ Rn×k and a matrix of the corresponding core vectors Dcore ∈ Rl×k in hand  we are looking for
+the solution X ∈ Rm×l to the following problem:
+
+(cid:107)(XDcore − R)i(cid:107)p ≤   i = 1 . . . k
+
+(2)
+where subscript i runs over columns  R ∈ Rm×k is the measurement matrix for the matrix of
+perturbations D. For p ∈ {1 ∞}  this task can be cast as a Linear Programming (LP) problem. Note
+that the smaller the number of colors  l  the smaller the size of the LP. If C is a polytope  it can be
+included as additional linear constraints in the LP. After solving for X  we construct the Jacobian
+
+approximation(cid:98)J as follows:(cid:98)Ju j = Xu color(j)  where color(j) is deﬁned above.
+
+5
+
+We want to emphasize that a Linear Programming approach is just one instantiation of a more general
+method we present here. Below we show another one based on ADMM for structured l2 regression.
+ADMM Solvers for multiple structures: When the Jacobian is known to have multiple structures 
+e.g.  it is sparse and has symmetric blocks  it is natural to solve structured l2 regression problems of
+the form 
+
+k(cid:88)
+
+i=1
+
+argmin
+X∈Rm×l∈S
+
+(cid:107)(XDcore − R)i(cid:107)2
+
+2 + λ(cid:107)X(cid:107)1 
+
+where the convex constraint set S is the set of all matrices conforming to a symmetry pattern on
+selected square blocks; an example is the Jacobian of the dynamics of a 5-link manipulator as shown
+in Figure 1. A consensus ADMM [9] solver can easily be implemented for such problems involving
+multiple structural priors and constraints admitting cheap proximal and projection operators. For the
+speciﬁc case of the above problem  it runs the following iterations:
+
+core + ρI]−1(cid:0)DRT + ρ(XT − UT
+1 )(cid:1)
+
+1 = [DcoreDT
+
+• Solve for X1: XT
+• X2 = symmetrize[X − U2 S]
+• X = soft-threshold[ 1
+• Ui = Ui + Xi − X  i = 1  2
+
+2 (X1 + X2 + U1 + U2)  λρ−1]
+
+where X1  X2 are primal variables with associated dual variables U1  U2  ρ is the ADMM step size
+parameter  and X is the global consensus variable. The symmetrize(X S) routine implements
+exact projection onto symmetry constraints - it takes a square block ˆX of X speciﬁed by the
+constraint set S and symmetrizes it simply as 1
+2 [ ˆX+ ˆXT ] keeping other elements of X intact. The soft-
+thresholding operator is deﬁned by soft-threshold(X  λ) = max(X−λ  0)−max(−X−λ  0).
+core + ρI] can be factorized upfront  even across multiple Jacobian
+Note that for the ﬁrst step [DcoreDT
+estimation problems since it is input-independent. Also  notice that if the perturbation directions
+are structured  e.g.  drawn from a Circulant or Toeplitz matrix  then the cost of this linear solve can
+be further reduced using specialized solvers [15]. As before  after solving for X  we construct the
+
+Jacobian approximation(cid:98)J as follows:(cid:98)Ju j = Xu color(j).
+
+3.4 Theoretical Guarantees
+
+3.4.1 Chromatic property of a graph
+
+The probabilistic graph coloring algorithm GreedyColoring generates a coloring  where the number
+of colors is close to the chromatic property Λ(Gweak
+(see: proof of Lemma 3.1
+in the Appendix). The chromatic property Λ(G) of a graph G is deﬁned recursively as follows.
+• Λ(G∅) = 0  where G∅ is an empty graph (V = ∅) 
+• for G (cid:54)= G∅  we have: Λ(G) = 1 + maxS⊆V Λ(G\S) where max is taken over all subsets
+1+deg(v)(cid:101) and G\S stands for the graph obtained from G be
+
+satisfying: |S| = |V | − (cid:100)(cid:80)
+
+) of the graph Gweak
+
+v∈V
+
+int
+
+int
+
+1
+
+deleting vertices from S.
+
+Note that we are not aware of any closed-form expression for Λ(G). We observe that there exists a
+subtle connection between the chromatic property of the graph Λ(G) and its chromatic number.
+Lemma 3.1. The following is true for every graph G: χ(G) ≤ Λ(G).
+The importance of the chromatic property lies in the fact that in practice for many graphs G (especially
+sparse  but not necessarily of small maximum degree ∆(G)) the chromatic property is close to the
+chromatic number. Thus  in practice  GreedyColoring ﬁnds a good quality coloring for a large class
+of weak-intersection graphs Gweak
+  efﬁciently utilizing partial knowledge about the sparsity structure.
+The chromatic character of the Jacobian is deﬁned as the chromatic property of its weak-intersection
+) and thus does not depend only on the Jacobian J  but also on its “sparsity exposition"
+graph Λ(Gweak
+and will be referred to as ρ(J  Gweak
+given by Gweak
+
+).
+
+int
+
+int
+
+int
+
+int
+
+3.4.2 Accuracy of Jacobian Recovery with rainbow
+We need the following notion of intrinsic dimensionality in Rm×n as a metric space equipped with
+(cid:107) · (cid:107)F norm.
+
+6
+
+Deﬁnition 3.2 (intrinsic dimensionality). For any point X ∈ Rm×n and any r > 0  let B(X  r) =
+{Y : (cid:107)X − Y(cid:107)F ≤ r} denote the closed ball of radius r centered at X. The intrinsic dimensionality
+of S ⊆ Rm×n is the smallest integer d such that for any ball B(X  r) ⊆ Rm×n  the set B(X  r) ∩ S
+can be covered by 2d balls of radius r
+2 .
+We are ready to state our main theoretical result.
+Theorem 3.3. Consider the Jacobian matrix J ∈ Rm×n. Assume that max|Ji j| ≤ C for some
+ﬁxed C > 0 and J ∈ C  where C ⊆ Rm×n is a convex set deﬁning certain structural properties of
+J (for instance C may be the set of matrices with block sparsity and symmetry patterns). Assume
+that the measurement error vector η ∈ Rm satisﬁes: (cid:107)η(cid:107)∞ = o(E(n)) for some function E(n).
+1− 1
+A = dint log2( C
+dimensionality of C and spoly(n) is a superpolynomial function of n.
+The proof is given in the Appendix. The result above is a characterization of the number of blackbox
+calls needed to recover the Jacobian  in terms of its intrinsic degrees of freedom  the dependency
+structure in the inputs and outputs and the noise introduced by higher order nonlinear terms and other
+sources of forward evaluation errors.
+
+Then the approximation(cid:98)J of J satisfying (cid:107)(cid:98)J − J(cid:107)F ≤ E(n) can be found with probability p =
+
+mρ(J Gweak
+
+spoly(n) by applying rainbow algorithm with k = O(min(A  B)) calls to the f function  where
+)  dint stands for the intrinsic
+
+√
+E(n) )  B = mρ(J  Gweak
+
+) log2(
+
+√
+
+)
+
+int
+
+E(n)
+
+mn
+
+int
+
+C
+
+4 Experiments
+
+4.1. Sparse Jacobian Recovery: We start with a controlled setting where we consider the vector-
+valued function  f : Rn → Rm of the following form:
+
+f (x1  ...  xn) = (
+
+sin(xi)  ... 
+
+sin(xi)) 
+
+(3)
+
+(cid:88)
+
+i∈S1
+
+(cid:88)
+
+i∈Sm
+
+where sets Si for i = 1  ....  m are chosen according to one of the following models. In the p-model
+each entry i ∈ {1  ...  n} is added to each Sj independently and with the same probability p. In the
+α-model entry i is added to each Sj independently at random with probability i−α. We consider a
+Jacobian at point x ∈ Rn drawn from the standard multivariate Gaussian distribution with entries
+taken from N (0  1). Both the models enable us to precisely control the sparsity of the corresponding
+Jacobian which has an explicit analytic form. Furthermore  the latter generates Jacobians where the
+degrees of the corresponding intersection graphs have power-law type distribution with few “hubs"
+very well connected to other nodes and many nodes of small degree. That corresponds to the setting 
+where there exist few global variables that impact many output fis  any many local variables that only
+inﬂuence a few outputs. We run the LP variant of rainbow for the above models and summarize
+the results in the table below.
+
+model
+p = 0.1
+p = 0.1
+p = 0.1
+p = 0.3
+p = 0.3
+p = 0.3
+α = 0.5
+α = 0.5
+α = 0.5
+α = 0.7
+α = 0.7
+α = 0.7
+
+m n
+60
+30
+70
+40
+80
+50
+60
+30
+40
+70
+80
+50
+60
+30
+70
+40
+80
+50
+30
+60
+70
+40
+50
+80
+
+sparsity
+0.91277
+0.90142
+0.90425
+0.6866
+0.7096
+0.702
+0.7927
+0.78785
+0.79225
+0.85166
+0.87357
+0.86975
+
+χ/∆
+0.33
+0.35
+0.32
+0.6833
+0.6857
+0.8625
+0.3833
+0.4285
+0.475
+0.2777
+0.2537
+0.275
+
+σ
+0.07
+0.07
+0.07
+0.07
+0.07
+0.07
+0.1
+0.1
+0.1
+0.1
+0.1
+0.1
+
+k
+15
+20
+30
+45
+60
+70
+45
+60
+70
+40
+55
+65
+
+rel.error
+0.0632
+0.0802
+0.0751
+0.0993
+0.0589
+0.1287
+0.0351
+0.0491
+0.0443
+0.0393
+0.0398
+0.0326
+
+Above  we measure recovery error in terms of the relative Frobenius distance between estimated
+Jacobian and true Jacobian  rel.error =
+. The standard deviation of each entry of the
+measurement noise vector is given by σ. We report in particular the fraction of zero entries in
+J (sparsity)  the ratio of the number of colors found by our GreedyColoring algorithm and the
+
+(cid:107)J(cid:107)F
+
+(cid:107)(cid:98)J−J(cid:107)F
+
+7
+
+maximum degree of the graph ( χ
+∆). We see that the coloring algorithm ﬁnds good quality coloring
+even in the "power-law" type setting where maximum degree ∆(G) is large. The quality of the
+coloring in turn leads to the reduction in the number of measurement vectors needed (k) to obtain an
+accurate Jacobian approximation (i.e.  relative error < 0.1).
+4.2. Training Convolutional Neural Networks with Blackbox Nodes: We introduce a blackbox
+layer between the convolutional layers and the fully connected layers of a standard MNIST convnet.
+The blackbox node is a standard ReLU layer that takes as input 32-dimensional vectors  32× 32-sized
+weight matrix and a bias vector of length 32  and outputs a 32 dimensional representation. The
+minibatch size is 16. We inject truncated Gaussian noise in the output of the layer and override its
+default gradient operator in TensorFlow with our LP-based rainbow procedure. We use Gaussian
+perturbation directions and sample measurements by forward evaluation calls to the TensorFlow
+Op inside our custom blackbox gradient operator. In Fig. 3 we study the evolution of training and
+validation error across SGD iterations. We see in Fig. 3 that even though for low noise regime the
+standard linear regression and ﬁnite differencing methods work quite well  when noise magnitude
+increases our blackbox backpropagation procedure rainbow-LP shows superior robustness - retain-
+ing a capacity to learn while the other methods degrade in terms of validation error. The rightmost
+subﬁgure reports validation error for our method with different numbers of Jacobian measurements at
+a high noise level (in this case  the other methods fail to learn and are not plotted).
+
+(a) Standard deviation: 9e-5
+
+(b) Standard deviation: 0.008
+
+(c) Different numbers of measure-
+ment vectors (std : 0.1)
+
+Figure 3: TensorFlow CNN training with a "blackbox" layer with rainbow-LP method. On the
+left: Comparison of rainbow-LP with ﬁnite differencing and linear regression methods for low
+noise regime. In the middle: As before  but for more substantial noise magnitude. On the right:
+rainbow-LP for even larger noise magnitude (std : 0.1) and different number of measurement vectors
+used. In that setting other methods did not learn at all.
+
+4.3. Jacobian of manipulator dynamics: We compute the
+true Jacobian of a planar rigid-body model with 50 links near
+an equilibrium point using MIT’s Drake planning and control
+toolbox [25]. The ﬁrst link is unactuated; the remaining
+are all torque-actuated. The state vector comprises of 50
+joint angles and associated joint velocities  and there are
+49 control inputs to the actuators. The Jacobian has sparse
+and symmetric blocks similar to Figure 1. We compare
+linear regression with l2 regularization against the rainbow
+ADMM solver designed to exploit sparsity and symmetry 
+in the setting where the number of measurements is much
+smaller than the total number of input variables to the forward
+dynamics function (149). Results are shown in the adjacent
+Figure. The recovery is much more accurate in the presence
+of sparsity and symmetry priors. The results are similar if the
+matrix of perturbation directions are chosen from a Circulant
+matrix.
+
+8
+
+References
+[1] http://www.autodiff.org.
+
+[2] http://torch.ch.
+
+[3] http://www.bulletphysics.org.
+
+[4] http://www.mujoco.org.
+
+[5] M. Abadi et al. TensorFlow: Large-scale machine learning on heterogeneous systems  2015. Software
+
+available from tensorflow.org.
+
+[6] H. S. Abdel-Khali  P. Hovland  A. Lyons  T. E. Stover  and J. Utke. A low rank approach to automatic
+
+differentiation. Advances in Automatic Differentiation  2008.
+
+[7] W. U. Bajwa  J. D. Haupt  G. M. Raz  S. J. Wright  and R. D. Nowak. Toeplitz-structured compressed
+
+sensing matrices. IEEE/SP Workshop on Statistical Signal Processing  2007.
+
+[8] A. S. Bandeira  K. Scheinberg  and L. N. Vicente. Computation of sparse low degree interpolating
+polynomials and their application to derivative-free optimization. Mathematical Programming  134  2012.
+
+[9] S. Boyd  N. Parikh  E. Chu  B. Peleato  and J. Eckstein. Distributed optimization and statistical learning
+via the alternating direction method of multipliers. Foundations and Trends in Machine Learning  3  2011.
+
+[10] E. Candes and M. B. Wakin. An introduction to compressive sampling. IEEE Signal Processing Magazine 
+
+25  2008.
+
+[11] E. J. Candès  J. K. Romberg  and T. Tao. Stable signal recovery from incomplete and inaccurate measure-
+
+ments. Communications on Pure and Applied Mathematics  59  2006.
+
+[12] A. R. Conn  K. Scheinberg  and L. N. Vicente. Derivative Free Optimization. MOS-SIAM Series on
+
+Optimization  2009.
+
+[13] D. L. Donoho. Compressed sensing. IEEE Transactions on Information Theory  52  2006.
+
+[14] A. H. Gebremedhin  F. Manne  and A. Pothen. What color is your jacobian? graph coloring for computing
+
+derivatives. SIAM Review  47(4):629–705  2005.
+
+[15] G. Golub and C. F. V. Loan. Matrix Computations. Johns Hopkins University Press (4rth edition)  2012.
+
+[16] R. M. Gray. Toeplitz and circulant matrices: A review. Foundations and Trends in Communications and
+
+Information Theory  2(3)  2006.
+
+[17] A. Griewank and A. Walther. Evaluating Derivatives: Principles and Techniques of Algorithmic Differenti-
+
+ation. SIAM  2008.
+
+[18] D. H. Jacobson and D. Q. Mayne. Differential Dynamic Programming. Elsevier  1970.
+
+[19] T. Jensen and B. Toft. Graph Coloring Problems. Wiley - Interscience  1995.
+
+[20] S. Levine  C. Finn  T. Darrell  and P. Abbeel. End-to-end training of deep visuomotor policies. JMLR 
+
+17(39)  2016.
+
+[21] W. Li and E. Todorov. Iterative linear quadratic regulator design for nonlinear biological movement
+
+systems. International Conference on Informatics in Control  Automation and Robotics  2004.
+
+[22] W. Lin  S. Morgan  J. Yang  and Y. Zhang. Practical compressive sensing with toeplitz and circulant
+
+matrices. Proceedings of SPIE  the International Society for Optical Engineering  2010.
+
+[23] G. N. Newsam and J. D. Ramsdell. Estimation of sparse jacobian matrices. SIAM Journal of Algebraic
+
+Discrete Methods  1983.
+
+[24] H. Rauhutk. Circulant and toeplitz matrices in compressed sensing. SPARS’09 - Signal Processing with
+
+Adaptive Sparse Structured Representations  2010.
+
+[25] R. Tedrake and the Drake Development Team. Drake: A planning  control  and analysis toolbox for
+
+nonlinear dynamical systems  2016.
+
+[26] B. Toft. Coloring  stable sets and perfect graphs. Handbook of Combinatorics  1996.
+
+9
+
+,Krzysztof Choromanski

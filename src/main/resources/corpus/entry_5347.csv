@@ -1,0 +1,808 @@
+2017,Successor Features for Transfer in Reinforcement Learning,Transfer in reinforcement learning refers to the notion that generalization should occur not only within a task but also across tasks. We propose a transfer framework for the scenario where the reward function changes between tasks but the environment's dynamics remain the same. Our approach rests on two key ideas: "successor features"  a value function representation that decouples the dynamics of the environment from the rewards  and "generalized policy improvement"  a generalization of dynamic programming's policy improvement operation that considers a set of policies rather than a single one. Put together  the two ideas lead to an approach that integrates seamlessly within the reinforcement learning framework and allows the free exchange of information across tasks. The proposed method also provides performance guarantees for the transferred policy even before any learning has taken place. We derive two theorems that set our approach in firm theoretical ground and present experiments that show that it successfully promotes transfer in practice  significantly outperforming alternative methods in a sequence of navigation tasks and in the control of a simulated robotic arm.,Successor Features for
+
+Transfer in Reinforcement Learning
+
+André Barreto  Will Dabney  Rémi Munos  Jonathan J. Hunt 
+
+Tom Schaul  Hado van Hasselt  David Silver
+
+{andrebarreto wdabney munos jjhunt schaul hado davidsilver}@google.com
+
+DeepMind
+
+Abstract
+
+Transfer in reinforcement learning refers to the notion that generalization should
+occur not only within a task but also across tasks. We propose a transfer frame-
+work for the scenario where the reward function changes between tasks but the
+environment’s dynamics remain the same. Our approach rests on two key ideas:
+successor features  a value function representation that decouples the dynamics of
+the environment from the rewards  and generalized policy improvement  a general-
+ization of dynamic programming’s policy improvement operation that considers
+a set of policies rather than a single one. Put together  the two ideas lead to an
+approach that integrates seamlessly within the reinforcement learning framework
+and allows the free exchange of information across tasks. The proposed method
+also provides performance guarantees for the transferred policy even before any
+learning has taken place. We derive two theorems that set our approach in ﬁrm
+theoretical ground and present experiments that show that it successfully promotes
+transfer in practice  signiﬁcantly outperforming alternative methods in a sequence
+of navigation tasks and in the control of a simulated robotic arm.
+
+1
+
+Introduction
+
+Reinforcement learning (RL) provides a framework for the development of situated agents that learn
+how to behave while interacting with the environment [21]. The basic RL loop is deﬁned in an abstract
+way so as to capture only the essential aspects of this interaction: an agent receives observations
+and selects actions to maximize a reward signal. This setup is generic enough to describe tasks of
+different levels of complexity that may unroll at distinct time scales. For example  in the task of
+driving a car  an action can be to turn the wheel  make a right turn  or drive to a given location.
+Clearly  from the point of view of the designer  it is desirable to describe a task at the highest level of
+abstraction possible. However  by doing so one may overlook behavioral patterns and inadvertently
+make the task more difﬁcult than it really is. The task of driving to a location clearly encompasses the
+subtask of making a right turn  which in turn encompasses the action of turning the wheel. In learning
+how to drive an agent should be able to identify and exploit such interdependencies. More generally 
+the agent should be able to break a task into smaller subtasks and use knowledge accumulated in any
+subset of those to speed up learning in related tasks. This process of leveraging knowledge acquired
+in one task to improve performance on other tasks is called transfer [25  11].
+In this paper we look at one speciﬁc type of transfer  namely  when subtasks correspond to different
+reward functions deﬁned in the same environment. This setup is ﬂexible enough to allow transfer
+to happen at different levels. In particular  by appropriately deﬁning the rewards one can induce
+different task decompositions. For instance  the type of hierarchical decomposition involved in the
+driving example above can be induced by changing the frequency at which rewards are delivered:
+
+31st Conference on Neural Information Processing Systems (NIPS 2017)  Long Beach  CA  USA.
+
+a positive reinforcement can be given after each maneuver that is well executed or only at the ﬁnal
+destination. Obviously  one can also decompose a task into subtasks that are independent of each
+other or whose dependency is strictly temporal (that is  when tasks must be executed in a certain
+order but no single task is clearly “contained” within another).
+The types of task decomposition discussed above potentially allow the agent to tackle more complex
+problems than would be possible were the tasks modeled as a single monolithic challenge. However 
+in order to apply this divide-and-conquer strategy to its full extent the agent should have an explicit
+mechanism to promote transfer between tasks. Ideally  we want a transfer approach to have two
+important properties. First  the ﬂow of information between tasks should not be dictated by a rigid
+diagram that reﬂects the relationship between the tasks themselves  such as hierarchical or temporal
+dependencies. On the contrary  information should be exchanged across tasks whenever useful.
+Second  rather than being posed as a separate problem  transfer should be integrated into the RL
+framework as much as possible  preferably in a way that is almost transparent to the agent.
+In this paper we propose an approach for transfer that has the two properties above. Our method builds
+on two conceptual pillars that complement each other. The ﬁrst is a generalization of Dayan’s [7]
+successor representation. As the name suggests  in this representation scheme each state is described
+by a prediction about the future occurrence of all states under a ﬁxed policy. We present a generaliza-
+tion of Dayan’s idea which extends the original scheme to continuous spaces and also facilitates the
+use of approximation. We call the resulting scheme successor features. As will be shown  successor
+features lead to a representation of the value function that naturally decouples the dynamics of the
+environment from the rewards  which makes them particularly suitable for transfer.
+The second pillar of our framework is a generalization of Bellman’s [3] classic policy improvement
+theorem that extends the original result from one to multiple decision policies. This novel result
+shows how knowledge about a set of tasks can be transferred to a new task in a way that is completely
+integrated within RL. It also provides performance guarantees on the new task before any learning
+has taken place  which opens up the possibility of constructing a library of “skills” that can be reused
+to solve previously unseen tasks. In addition  we present a theorem that formalizes the notion that an
+agent should be able to perform well on a task if it has seen a similar task before—something clearly
+desirable in the context of transfer. Combined  the two results above not only set our approach in
+ﬁrm ground but also outline the mechanics of how to actually implement transfer. We build on this
+knowledge to propose a concrete method and evaluate it in two environments  one encompassing a
+sequence of navigation tasks and the other involving the control of a simulated two-joint robotic arm.
+
+2 Background and problem formulation
+
+As usual  we assume that the interaction between agent and environment can be modeled as a Markov
+decision process (MDP  Puterman  [19]). An MDP is deﬁned as a tuple M ≡ (S A  p  R  γ). The sets
+S and A are the state and action spaces  respectively; here we assume that S and A are ﬁnite whenever
+such an assumption facilitates the presentation  but most of the ideas readily extend to continuous
+spaces. For each s ∈ S and a ∈ A the function p(·|s  a) gives the next-state distribution upon taking
+action a in state s. We will often refer to p(·|s  a) as the dynamics of the MDP. The reward received at
+transition s a−→ s(cid:48) is given by the random variable R(s  a  s(cid:48)); usually one is interested in the expected
+value of this variable  which we will denote by r(s  a  s(cid:48)) or by r(s  a) = ES(cid:48)∼p(·|s a)[r(s  a  S(cid:48))].
+The discount factor γ ∈ [0  1) gives smaller weights to future rewards.
+The objective of the agent in RL is to ﬁnd a policy π—a mapping from states to actions—that
+i=0 γiRt+i+1 
+where Rt = R(St  At  St+1). One way to address this problem is to use methods derived from
+dynamic programming (DP)  which heavily rely on the concept of a value function [19]. The
+action-value function of a policy π is deﬁned as
+
+maximizes the expected discounted sum of rewards  also called the return Gt =(cid:80)∞
+
+Qπ(s  a) ≡ Eπ [Gt | St = s  At = a]  
+
+(1)
+where Eπ[·] denotes expected value when following policy π. Once the action-value function of a
+particular policy π is known  we can derive a new policy π(cid:48) which is greedy with respect to Qπ(s  a) 
+that is  π(cid:48)(s) ∈ argmaxaQπ(s  a). Policy π(cid:48) is guaranteed to be at least as good as (if not better than)
+policy π. The computation of Qπ(s  a) and π(cid:48)  called policy evaluation and policy improvement 
+deﬁne the basic mechanics of RL algorithms based on DP; under certain conditions their successive
+application leads to an optimal policy π∗ that maximizes the expected return from every s ∈ S [21].
+
+2
+
+In this paper we are interested in the problem of transfer  which we deﬁne as follows. Let T  T (cid:48) be
+two sets of tasks such that T (cid:48) ⊂ T   and let t be any task. Then there is transfer if  after training on
+T   the agent always performs as well or better on task t than if only trained on T (cid:48). Note that T (cid:48) can
+be the empty set. In this paper a task will be deﬁned as a speciﬁc instantiation of the reward function
+R(s  a  s(cid:48)) for a given MDP. In Section 4 we will revisit this deﬁnition and make it more formal.
+
+3 Successor features
+
+In this section we present the concept that will serve as a cornerstone for the rest of the paper. We
+start by presenting a simple reward model and then show how it naturally leads to a generalization of
+Dayan’s [7] successor representation (SR).
+Suppose that the expected one-step reward associated with transition (s  a  s(cid:48)) can be computed as
+(2)
+where φ(s  a  s(cid:48)) ∈ Rd are features of (s  a  s(cid:48)) and w ∈ Rd are weights. Expression (2) is not
+restrictive because we are not making any assumptions about φ(s  a  s(cid:48)): if we have φi(s  a  s(cid:48)) =
+r(s  a  s(cid:48)) for some i  for example  we can clearly recover any reward function exactly. To simplify
+the notation  let φt = φ(st  at  st+1). Then  by simply rewriting the deﬁnition of the action-value
+function in (1) we have
+
+r(s  a  s(cid:48)) = φ(s  a  s(cid:48))(cid:62)w 
+
+Qπ(s  a) = Eπ [rt+1 + γrt+2 + ...| St = s  At = a]
+
+= Eπ(cid:104)
+= Eπ(cid:2)(cid:80)∞
+
+φ
+
+(cid:105)
+t+2w + ...| St = s  At = a
+(cid:62)
+
+(cid:62)
+t+1w + γφ
+
+i=tγi−tφi+1 | St = s  At = a(cid:3)(cid:62)
+
+w = ψπ(s  a)(cid:62)w.
+
+(3)
+The decomposition (3) has appeared before in the literature under different names and interpretations 
+as discussed in Section 6. Since here we propose to look at (3) as an extension of Dayan’s [7] SR  we
+call ψπ(s  a) the successor features (SFs) of (s  a) under policy π.
+The ith component of ψπ(s  a) gives the expected discounted sum of φi when following policy π
+starting from (s  a). In the particular case where S and A are ﬁnite and φ is a tabular representation
+of S × A × S—that is  φ(s  a  s(cid:48)) is a one-hot vector in R|S|2|A|—ψπ(s  a) is the discounted sum
+of occurrences  under π  of each possible transition. This is essentially the concept of SR extended
+from the space S to the set S × A × S [7].
+One of the contributions of this paper is precisely to generalize SR to be used with function approx-
+imation  but the exercise of deriving the concept as above provides insights already in the tabular
+case. To see this  note that in the tabular case the entries of w ∈ R|S|2|A| are the function r(s  a  s(cid:48))
+and suppose that r(s  a  s(cid:48)) (cid:54)= 0 in only a small subset W ⊂ S × A × S. From (2) and (3)  it is
+clear that the cardinality of W  and not of S × A × S  is what effectively deﬁnes the dimension of
+the representation ψπ  since there is no point in having d > |W|. Although this fact is hinted at by
+Dayan [7]  it becomes more apparent when we look at SR as a particular case of SFs.
+SFs extend SR in two other ways. First  the concept readily applies to continuous state and action
+spaces without any modiﬁcation. Second  by explicitly casting (2) and (3) as inner products involving
+feature vectors  SFs make it evident how to incorporate function approximation: as will be shown 
+these vectors can be learned from data.
+The representation in (3) requires two components to be learned  w and ψπ. Since the latter is
+the expected discounted sum of φ under π  we must either be given φ or learn it as well. Note
+that approximating r(s  a  s(cid:48)) ≈ φ(s  a  s(cid:48))(cid:62) ˜w is a supervised learning problem  so we can use
+well-understood techniques from the ﬁeld to learn ˜w (and potentially ˜φ  too) [9]. As for ψπ  we note
+that
+
+ψπ(s  a) = φt+1 + γEπ[ψπ(St+1  π(St+1))| St = s  At = a] 
+
+(4)
+that is  SFs satisfy a Bellman equation in which φi play the role of rewards—something also noted
+by Dayan [7] regarding SR. Therefore  in principle any RL method can be used to compute ψπ [24].
+The SFs ψπ summarize the dynamics induced by π in a given environment. As shown in (3)  this
+allows for a modular representation of Qπ in which the MDP’s dynamics are decoupled from its
+
+3
+
+rewards  which are captured by the weights w. One potential beneﬁt of having such a decoupled
+representation is that only the relevant module must be relearned when either the dynamics or the
+reward changes  which may serve as an argument in favor of adopting SFs as a general approximation
+scheme for RL. However  in this paper we focus on a scenario where the decoupled value-function
+approximation provided by SFs is exploited to its full extent  as we discuss next.
+
+4 Transfer via successor features
+
+We now return to the discussion about transfer in RL. As described  we are interested in the scenario
+where all components of an MDP are ﬁxed  except for the reward function. One way to formalize
+this model is through (2): if we suppose that φ ∈ Rd is ﬁxed  any w ∈ Rd gives rise to a new MDP.
+Based on this observation  we deﬁne
+
+Mφ(S A  p  γ)≡ {M (S A  p  r  γ) | r(s  a  s(cid:48))= φ(s  a  s(cid:48))(cid:62)w} 
+
+(5)
+that is  Mφ is the set of MDPs induced by φ through all possible instantiations of w. Since what
+differentiates the MDPs in Mφ is essentially the agent’s goal  we will refer to Mi ∈ Mφ as a task.
+The assumption is that we are interested in solving (a subset of) the tasks in the environment Mφ.
+Deﬁnition (5) is a natural way of modeling some scenarios of interest. Think  for example  how the
+desirability of water or food changes depending on whether an animal is thirsty or hungry. One way
+to model this type of preference shifting is to suppose that the vector w appearing in (2) reﬂects the
+taste of the agent at any given point in time [17]. Further in the paper we will present experiments
+that reﬂect this scenario. For another illustrative example  imagine that the agent’s goal is to produce
+and sell a combination of goods whose production line is relatively stable but whose prices vary
+considerably over time. In this case updating the price of the products corresponds to picking a new
+w. A slightly different way of motivating (5) is to suppose that the environment itself is changing 
+that is  the element wi indicates not only desirability  but also availability  of feature φi.
+In the examples above it is desirable for the agent to build on previous experience to improve its
+performance on a new setup. More concretely  if the agent knows good policies for the set of tasks
+M ≡ {M1  M2  ...  Mn}  with Mi ∈ Mφ  it should be able to leverage this knowledge to improve
+its behavior on a new task Mn+1—that is  it should perform better than it would had it been exposed
+to only a subset of the original tasks  M(cid:48) ⊂ M. We can assess the performance of an agent on
+task Mn+1 based on the value function of the policy followed after wn+1 has become available but
+before any policy improvement has taken place in Mn+1.1 More precisely  suppose that an agent has
+been exposed to each one of the tasks Mi ∈ M(cid:48). Based on this experience  and on the new wn+1 
+the agent computes a policy π(cid:48) that will deﬁne its initial behavior in Mn+1. Now  if we repeat the
+experience replacing M(cid:48) with M  the resulting policy π should be such that Qπ(s  a) ≥ Qπ(cid:48)
+(s  a)
+for all (s  a) ∈ S × A.
+Now that our setup is clear we can start to describe our solution for the transfer problem discussed
+above. We do so in two stages. First  we present a generalization of DP’s notion of policy improvement
+whose interest may go beyond the current work. We then show how SFs can be used to implement
+this generalized form of policy improvement in an efﬁcient and elegant way.
+
+4.1 Generalized policy improvement
+
+One of the fundamental results in RL is Bellman’s [3] policy improvement theorem. In essence  the
+theorem states that acting greedily with respect to a policy’s value function gives rise to another policy
+whose performance is no worse than the former’s. This is the driving force behind DP  and most RL
+algorithms that compute a value function are exploiting Bellman’s result in one way or another.
+In this section we extend the policy improvement theorem to the scenario where the new policy is
+to be computed based on the value functions of a set of policies. We show that this extension can
+be done in a natural way  by acting greedily with respect to the maximum over the value functions
+available. Our result is summarized in the theorem below.
+
+1Of course wn+1 can  and will be  learned  as discussed in Section 4.2 and illustrated in Section 5. Here we
+
+assume that wn+1 is given to make our performance criterion clear.
+
+4
+
+Deﬁne
+
+Then 
+
+π(s) ∈ argmax
+
+a
+
+˜Qπi (s  a).
+
+max
+
+i
+
+(6)
+
+(7)
+
+(8)
+
+Theorem 1. (Generalized Policy Improvement) Let π1  π2  ...  πn be n decision policies and let
+˜Qπ1  ˜Qπ2  ...  ˜Qπn be approximations of their respective action-value functions such that
+
+|Qπi(s  a) − ˜Qπi(s  a)| ≤  for all s ∈ S  a ∈ A  and i ∈ {1  2  ...  n}.
+
+Qπ(s  a) ≥ max
+
+Qπi(s  a) − 2
+1 − γ
+
+i
+
+
+for any s ∈ S and a ∈ A  where Qπ is the action-value function of π.
+The proofs of our theoretical results are in the supplementary material. As one can see  our theorem
+covers the case where the policies’ value functions are not computed exactly  either because function
+approximation is used or because some exact algorithm has not be run to completion. This error is
+captured by  in (6)  which re-appears as a penalty term in the lower bound (8). Such a penalty is
+inherent to the presence of approximation in RL  and in fact it is identical to the penalty incurred in
+the single-policy case (see e.g. Bertsekas and Tsitsiklis’s Proposition 6.1 [5]).
+In order to contextualize generalized policy improvement (GPI) within the broader scenario of DP 
+suppose for a moment that  = 0. In this case Theorem 1 states that π will perform no worse than
+all of the policies π1  π2  ...  πn. This is interesting because in general maxi Qπi—the function used
+to induce π—is not the value function of any particular policy. It is not difﬁcult to see that π will
+be strictly better than all previous policies if no single policy dominates all other policies  that is 
+if argmaxi maxa ˜Qπi(s  a) ∩ argmaxi maxa ˜Qπi(s(cid:48)  a) = ∅ for some s  s(cid:48) ∈ S. If one policy does
+dominate all others  GPI reduces to the original policy improvement theorem.
+If we consider the usual DP loop  in which policies of increasing performance are computed in
+sequence  our result is not of much use because the most recent policy will always dominate all others.
+Another way of putting it is to say that after Theorem 1 is applied once adding the resulting π to the
+set {π1  π2  ...  πn} will reduce the next improvement step to standard policy improvement  and thus
+the policies π1  π2  ...  πn can be simply discarded. There are however two situations in which our
+result may be of interest. One is when we have many policies πi being evaluated in parallel. In this
+case GPI provides a principled strategy for combining these policies. The other situation in which
+our result may be useful is when the underlying MDP changes  as we discuss next.
+
+4.2 Generalized policy improvement with successor features
+
+i
+
+i
+
+i
+
+We start this section by extending our notation slightly to make it easier to refer to the quantities
+involved in transfer learning. Let Mi be a task in Mφ deﬁned by wi ∈ Rd. We will use π∗
+i to refer
+to an optimal policy of MDP Mi and use Qπ∗
+to refer to its value function. The value function of π∗
+i
+when executed in Mj ∈ Mφ will be denoted by Qπ∗
+j .
+Suppose now that an agent has computed optimal policies for the tasks M1  M2  ...  Mn ∈ Mφ. Sup-
+pose further that when presented with a new task Mn+1 the agent computes {Qπ∗
+n+1} 
+the evaluation of each π∗
+i under the new reward function induced by wn+1. In this case  applying the
+GPI theorem to the newly-computed set of value functions will give rise to a policy that performs at
+least as well as a policy based on any subset of these  including the empty set. Thus  this strategy
+satisﬁes our deﬁnition of successful transfer.
+There is a caveat  though. Why would one waste time computing the value functions of π∗
+2  ... 
+π∗
+n  whose performance in Mn+1 may be mediocre  if the same amount of resources can be allocated
+to compute a sequence of n policies with increasing performance? This is where SFs come into play.
+Suppose that we have learned the functions Qπ∗
+i using the representation scheme shown in (3). Now  if
+the reward changes to rn+1(s  a  s(cid:48)) = φ(s  a  s(cid:48))(cid:62)wn+1  as long as we have wn+1 we can compute
+the new value function of π∗
+i (s  a)(cid:62)wn+1. This reduces the
+computation of all Qπ∗
+Once the functions Qπ∗
+performance on Mn+1 is no worse than the performance of π∗
+
+n+1 have been computed  we can apply GPI to derive a policy π whose
+n on the same task. A
+
+n+1 to the much simpler supervised problem of approximating wn+1.
+
+i by simply making Qπ∗
+
+n+1  Qπ∗
+
+n+1  ...  Qπ∗
+
+1  π∗
+
+2  ...  π∗
+
+n+1(s  a) = ψπ∗
+
+i
+
+1  π∗
+
+1
+
+2
+
+n
+
+i
+
+i
+
+i
+
+5
+
+(cid:12)(cid:12)(cid:12)Q
+
+π∗
+π∗
+i (s  a) − ˜Q
+i (s  a)
+
+j
+
+j
+
+1
+
+i
+
+(cid:12)(cid:12)(cid:12) ≤ 
+
+question that arises in this case is whether we can provide stronger guarantees on the performance
+of π by exploiting the structure shared by the tasks in Mφ. The following theorem answers this
+question in the afﬁrmative.
+π∗
+Theorem 2. Let Mi ∈ Mφ and let Q
+i
+Mj ∈ Mφ when executed in Mi. Given approximations { ˜Qπ∗
+
+be the action-value function of an optimal policy of
+
+  ...  ˜Qπ∗
+
+i } such that
+
+  ˜Qπ∗
+
+n
+
+i
+
+2
+
+j
+
+(9)
+
+π∗
+for all s ∈ S  a ∈ A  and j ∈ {1  2  ...  n}  let π(s) ∈ argmaxa maxj ˜Q
+i (s  a). Finally  let
+φmax = maxs a ||φ(s  a)||  where || · || is the norm induced by the inner product adopted. Then 
+
+j
+
+Qπ∗
+i (s  a) − Qπ
+
+i
+
+i (s  a) ≤ 2
+1 − γ
+
+(φmax minj||wi − wj|| + ) .
+
+(10)
+
+i
+
+i (s  a) − Qπ
+
+Note that we used Mi rather than Mn+1 in the theorem’s statement to remove any suggestion of
+order among the tasks. Theorem 2 is a specialization of Theorem 1 for the case where the set of value
+functions used to compute π are associated with tasks in the form of (5). As such  it provides stronger
+guarantees: instead of comparing the performance of π with that of the previously-computed policies
+πj  Theorem 2 quantiﬁes the loss incurred by following π as opposed to one of Mi’s optimal policies.
+As shown in (10)  the loss Qπ∗
+i (s  a) is upper-bounded by two terms. The term
+2φmaxminj||wi − wj||/(1− γ) is of more interest here because it reﬂects the structure of Mφ. This
+term is a multiple of the distance between wi  the vector describing the task we are currently interested
+in  and the closest wj for which we have computed a policy. This formalizes the intuition that the
+agent should perform well in task wi if it has solved a similar task before. More generally  the term in
+question relates the concept of distance in Rd with difference in performance in Mφ. Note that this
+correspondence depends on the speciﬁc set of features φ used  which raises the interesting question
+of how to deﬁne φ such that tasks that are close in Rd induce policies that are also similar in some
+sense. Regardless of how exactly φ is deﬁned  the bound (10) allows for powerful extrapolations.
+For example  by covering the relevant subspace of Rd with balls of appropriate radii centered at wj
+we can provide performance guarantees for any task w [14]. This corresponds to building a library of
+options (or “skills”) that can be used to solve any task in a (possibly inﬁnite) set [22]. In Section 5
+we illustrate this concept with experiments.
+Although Theorem 2 is inexorably related to the characterization of Mφ in (5)  it does not depend
+on the deﬁnition of SFs in any way. Here SFs are the mechanism used to efﬁciently apply the
+protocol suggested by Theorem 2. When SFs are used the value function approximations are given by
+π∗
+i (s  a) = ˜ψπ∗
+˜Q
+j are computed and stored when the agent is learning
+the tasks Mj; when faced with a new task Mi the agent computes an approximation of wi  which is
+a supervised learning problem  and then uses the GPI policy π deﬁned in Theorem 2 to learn ˜ψπ∗
+i .
+j or wi is computed exactly: the effect of errors in ˜ψπ∗
+Note that we do not assume that either ψπ∗
+and ˜wi are accounted for by the term  appearing in (9). As shown in (10)  if  is small and the agent
+has seen enough tasks the performance of π on Mi should already be good  which suggests it may
+also speed up the process of learning ˜ψπ∗
+i .
+Interestingly  Theorem 2 also provides guidance for some practical algorithmic choices. Since in an
+actual implementation one wants to limit the number of SFs ˜ψπ∗
+j stored in memory  the corresponding
+vectors ˜wj can be used to decide which ones to keep. For example  one can create a new ˜ψπ∗
+i only
+when minj|| ˜wi − ˜wj|| is above a given threshold; alternatively  once the maximum number of SFs
+k   where k = argminj|| ˜wi − ˜wj|| (here wi is the current task).
+has been reached  one can replace ˜ψπ∗
+
+j (s  a)(cid:62) ˜wi. The modules ˜ψπ∗
+
+j
+
+j
+
+5 Experiments
+
+In this section we present our main experimental results. Additional details  along with further results
+and analysis  can be found in Appendix B of the supplementary material.
+The ﬁrst environment we consider involves navigation tasks deﬁned over a two-dimensional continu-
+ous space composed of four rooms (Figure 1). The agent starts in one of the rooms and must reach a
+
+6
+
+πi is stored and a new ˜ψ
+
+goal region located in the farthest room. The environment has objects that can be picked up by the
+agent by passing over them. Each object belongs to one of three classes determining the associated
+reward. The objective of the agent is to pick up the “good” objects and navigate to the goal while
+avoiding “bad” objects. The rewards associated with object classes change at every 20 000 transitions 
+giving rise to very different tasks (Figure 1). The goal is to maximize the sum of rewards accumulated
+over a sequence of 250 tasks  with each task’s rewards sampled uniformly from [−1  1]3.
+We deﬁned a straightforward instantia-
+tion of our approach in which both ˜w
+π are computed incrementally in
+and ˜ψ
+order to minimize losses induced by (2)
+and (4). Every time the task changes the
+πi+1
+current ˜ψ
+is created. We call this method SFQL
+as a reference to the fact that SFs are
+learned through an algorithm analogous
+to Q-learning (QL)—which is used as a
+baseline in our comparisons [27]. As a
+more challenging reference point we re-
+port results for a transfer method called
+probabilistic policy reuse [8]. We adopt
+a version of the algorithm that builds on
+QL and reuses all policies learned. The resulting method  PRQL  is thus directly comparable to
+SFQL. The details of QL  PRQL  and SFQL  including their pseudo-codes  are given in Appendix B.
+We compared two versions of SFQL. In the ﬁrst one  called SFQL-φ  we assume the agent has access
+to features φ that perfectly predict the rewards  as in (2). The second version of our agent had to
+learn an approximation ˜φ ∈ Rh directly from data collected by QL in the ﬁrst 20 tasks. Note that
+h may not coincide with the true dimension of φ  which in this case is 4; we refer to the different
+instances of our algorithm as SFQL-h. The process of learning ˜φ followed the multi-task learning
+protocol proposed by Caruana [6] and Baxter [2]  and described in detail in Appendix B.
+The results of our experiments can be seen in Figure 2. As shown  all versions of SFQL signiﬁcantly
+outperform the other two methods  with an improvement on the average return of more than 100%
+when compared to PRQL  which itself improves on QL by around 100%. Interestingly  SFQL-h
+seems to achieve good overall performance faster than SFQL-φ  even though the latter uses features
+that allow for an exact representation of the rewards. One possible explanation is that  unlike their
+counterparts φi  the features ˜φi are activated over most of the space S × A × S  which results in a
+dense pseudo-reward signal that facilitates learning.
+The second environment we consider is a set of control tasks deﬁned in the MuJoCo physics
+engine [26]. Each task consists in moving a two-joint torque-controlled simulated robotic arm to a
+
+Figure 1: Environment layout and some examples of opti-
+mal trajectories associated with speciﬁc tasks. The shapes
+of the objects represent their classes; ‘S’ is the start state
+and ‘G’ is the goal.
+
+Figure 2: Average and cumulative return per task in the four-room domain. SFQL-h receives no
+reward during the ﬁrst 20 tasks while learning ˜φ. Error-bands show one standard error over 30 runs.
+
+7
+
+Q-LearningPRQLSFQL- / SFQL-4SFQL-8(b) Average performance on test tasks.
+
+(a) Performance on training tasks (faded dotted lines in the
+background are DQN’s results).
+
+(c) Colored and gray circles depict
+training and test targets  respectively.
+
+Figure 3: Normalized return on the reacher domain: ‘1’ corresponds to the average result achieved
+by DQN after learning each task separately and ‘0’ corresponds to the average performance of a
+randomly-initialized agent (see Appendix B for details). SFDQN’s results were obtained using the
+GPI policies πi(s) deﬁned in the text. Shading shows one standard error over 30 runs.
+
+speciﬁc target location; thus  we refer to this environment as “the reacher domain.” We deﬁned 12
+tasks  but only allowed the agents to train in 4 of them (Figure 3c). This means that the agent must be
+able to perform well on tasks that it has never experienced during training.
+In order to solve this problem  we adopted essentially the same algorithm as above  but we replaced
+QL with Mnih et al.’s DQN—both as a baseline and as the basic engine underlying the SF agent [15].
+The resulting method  which we call SFDQN  is an illustration of how our method can be naturally
+combined with complex nonlinear approximators such as neural networks. The features φi used by
+SFDQN are the negation of the distances to the center of the 12 target regions. As usual in experiments
+of this type  we give the agents a description of the current task: for DQN the target coordinates are
+given as inputs  while for SFDQN this is provided as an one-hot vector wt ∈ R12 [12]. Unlike in the
+πi through losses
+previous experiment  in the current setup each transition was used to train all four ˜ψ
+derived from (4). Here πi is the GPI policy on the ith task: πi(s) ∈ argmaxa maxj
+˜ψj(s  a)(cid:62)wi.
+Results are shown in Figures 3a and 3b. Looking at the training curves  we see that whenever a
+task is selected for training SFDQN’s return on that task quickly improves and saturates at near-
+optimal performance. The interesting point to be noted is that  when learning a given task  SFDQN’s
+performance also improves in all other tasks  including the test ones  for which it does not have
+specialized policies. This illustrates how the combination of SFs and GPI can give rise to ﬂexible
+agents able to perform well in any task of a set of tasks with shared dynamics—which in turn can be
+seen as both a form of temporal abstraction and a step towards more general hierarchical RL [22  1].
+
+6 Related work
+
+Mehta et al.’s [14] approach for transfer learning is probably the closest work to ours in the literature.
+There are important differences  though. First  Mehta et al. [14] assume that both φ and w are always
+observable quantities provided by the environment. They also focus on average reward RL  in which
+the quality of a decision policy can be characterized by a single scalar. This reduces the process of
+selecting a policy for a task to one decision made at the outset  which is in clear contrast with GPI.
+
+8
+
+Tasks TrainedNormalized ReturnTask 1Task 2Task 3Task 4SFDQNDQNTasks TrainedNormalized Returnπi from scratch at each new task.
+
+The literature on transfer learning has other methods that relate to ours [25  11]. Among the algorithms
+designed for the scenario considered here  two approaches are particularly relevant because they also
+reuse old policies. One is Fernández et al.’s [8] probabilistic policy reuse  adopted in our experiments
+and described in Appendix B. The other approach  by Bernstein [4]  corresponds to using our method
+but relearning all ˜ψ
+When we look at SFs strictly as a representation scheme  there are clear similarities with Littman
+et al.’s [13] predictive state representation (PSR). Unlike SFs  though  PSR tries to summarize the
+dynamics of the entire environment rather than of a single policy π. A scheme that is perhaps closer
+to SFs is the value function representation sometimes adopted in inverse RL [18].
+SFs are also related to Sutton et al.’s [23] general value functions (GVFs)  which extend the notion of
+value function to also include “pseudo-rewards.” If we see φi as a pseudo-reward  ψπ
+i (s  a) becomes
+a particular case of GVF. Beyond the technical similarities  the connection between SFs and GVFs
+uncovers some principles underlying both lines of work that  when contrasted  may beneﬁt both. On
+one hand  Sutton et al.’s [23] and Modayil et al.’s [16] hypothesis that relevant knowledge about the
+world can be expressed in the form of many predictions naturally translates to SFs: if φ is expressive
+enough  the agent should be able to represent any relevant reward function. Conversely  SFs not only
+provide a concrete way of using this knowledge  they also suggest a possible criterion to select the
+pseudo-rewards φi  since ultimately we are only interested in features that help in the approximation
+φ(s  a  s(cid:48))(cid:62) ˜w ≈ r(s  a  s(cid:48)).
+Another generalization of value functions that is related to SFs is Schaul et al.’s [20] universal value
+function approximators (UVFAs). UVFAs extend the notion of value function to also include as an
+argument an abstract representation of a “goal ” which makes them particularly suitable for transfer.
+j (s  a)(cid:62) ˜w used in our framework can be seen as a function of s  a  and ˜w—the
+The function maxj
+latter a generic way of representing a goal—  and thus in some sense this representation is a UVFA.
+The connection between SFs and UVFAs raises an interesting point: since under this interpretation ˜w
+is simply the description of a task  it can in principle be a direct function of the observations  which
+opens up the possibility of the agent determining ˜w even before seeing any rewards.
+As discussed  our approach is also related to temporal abstraction and hierarchical RL: if we look
+at ψπ as instances of Sutton et al.’s [22] options  acting greedily with respect to the maximum over
+their value functions corresponds in some sense to planning at a higher level of temporal abstraction
+(that is  each ψπ(s  a) is associated with an option that terminates after a single step). This is the
+view adopted by Yao et al. [28]  whose universal option model closely resembles our approach in
+some aspects (the main difference being that they do not do GPI).
+Finally  there have been previous attempts to combine SR and neural networks. Kulkarni et al.
+(s  a)  ˜φ(s  a  s(cid:48)) and ˜w.
+[10] and Zhang et al. [29] propose similar architectures to jointly learn ˜ψ
+Although neither work exploits SFs for GPI  they both discuss other uses of SFs for transfer. In
+principle the proposed (or similar) architectures can also be used within our framework.
+
+˜ψπ∗
+
+π
+
+7 Conclusion
+
+This paper builds on two concepts  both of which are generalizations of previous ideas. The ﬁrst
+one is SFs  a generalization of Dayan’s [7] SR that extends the original deﬁnition from discrete to
+continuous spaces and also facilitates the use of function approximation. The second concept is GPI 
+formalized in Theorem 1. As the name suggests  this result extends Bellman’s [3] classic policy
+improvement theorem from a single to multiple policies.
+Although SFs and GPI are of interest on their own  in this paper we focus on their combination to
+induce transfer. The resulting framework is an elegant extension of DP’s basic setting that provides a
+solid foundation for transfer in RL. As a complement to the proposed transfer approach  we derived
+a theoretical result  Theorem 2  that formalizes the intuition that an agent should perform well on
+a novel task if it has seen a similar task before. We also illustrated with a comprehensive set of
+experiments how the combination of SFs and GPI promotes transfer in practice.
+We believe the proposed ideas lay out a general framework for transfer in RL. By specializing the
+basic components presented one can build on our results to derive agents able to perform well across
+a wide variety of tasks  and thus extend the range of environments that can be successfully tackled.
+
+9
+
+Acknowledgments
+
+The authors would like to thank Joseph Modayil for the invaluable discussions during the development
+of the ideas described in this paper. We also thank Peter Dayan  Matt Botvinick  Marc Bellemare 
+and Guy Lever for the excellent comments  and Dan Horgan and Alexander Pritzel for their help with
+the experiments. Finally  we thank the anonymous reviewers for their comments and suggestions to
+improve the paper.
+
+References
+[1] Andrew G. Barto and Sridhar Mahadevan. Recent advances in hierarchical reinforcement
+
+learning. Discrete Event Dynamic Systems  13(4):341–379  2003.
+
+[2] Jonathan Baxter. A model of inductive bias learning. Journal of Artiﬁcial Intelligence Research 
+
+12:149–198  2000.
+
+[3] Richard E. Bellman. Dynamic Programming. Princeton University Press  1957.
+
+[4] Daniel S. Bernstein. Reusing old policies to accelerate learning on new MDPs. Technical report 
+
+Amherst  MA  USA  1999.
+
+[5] Dimitri P. Bertsekas and John N. Tsitsiklis. Neuro-Dynamic Programming. Athena Scientiﬁc 
+
+1996.
+
+[6] Rich Caruana. Multitask learning. Machine Learning  28(1):41–75  1997.
+
+[7] Peter Dayan. Improving generalization for temporal difference learning: The successor repre-
+
+sentation. Neural Computation  5(4):613–624  1993.
+
+[8] Fernando Fernández  Javier García  and Manuela Veloso. Probabilistic policy reuse for inter-task
+
+transfer learning. Robotics and Autonomous Systems  58(7):866–871  2010.
+
+[9] Trevor Hastie  Robert Tibshirani  and Jerome Friedman. The Elements of Statistical Learning:
+
+Data Mining  Inference  and Prediction. Springer  2002.
+
+[10] Tejas D. Kulkarni  Ardavan Saeedi  Simanta Gautam  and Samuel J Gershman. Deep successor
+
+reinforcement learning. arXiv preprint arXiv:1606.02396  2016.
+
+[11] Alessandro Lazaric. Transfer in Reinforcement Learning: A Framework and a Survey. Rein-
+
+forcement Learning: State-of-the-Art  pages 143–173  2012.
+
+[12] Timothy P. Lillicrap  Jonathan J. Hunt  Alexander Pritzel  Nicolas Heess  Tom Erez  Yuval
+Tassa  David Silver  and Daan Wierstra. Continuous control with deep reinforcement learning.
+arXiv preprint arXiv:1509.02971  2015.
+
+[13] Michael L. Littman  Richard S. Sutton  and Satinder Singh. Predictive representations of state.
+
+In Advances in Neural Information Processing Systems (NIPS)  pages 1555–1561  2001.
+
+[14] Neville Mehta  Sriraam Natarajan  Prasad Tadepalli  and Alan Fern. Transfer in variable-reward
+
+hierarchical reinforcement learning. Machine Learning  73(3)  2008.
+
+[15] Volodymyr Mnih  Koray Kavukcuoglu  David Silver  Andrei A. Rusu  Joel Veness  Marc G.
+Bellemare  Alex Graves  Martin Riedmiller  Andreas K. Fidjeland  Georg Ostrovski  Stig Pe-
+tersen  Charles Beattie  Amir Sadik  Ioannis Antonoglou  Helen King  Dharshan Kumaran  Daan
+Wierstra  Shane Legg  and Demis Hassabis. Human-level control through deep reinforcement
+learning. Nature  518(7540):529–533  2015.
+
+[16] Joseph Modayil  Adam White  and Richard S. Sutton. Multi-timescale nexting in a reinforcement
+
+learning robot. Adaptive Behavior  22(2):146–160  2014.
+
+[17] Sriraam Natarajan and Prasad Tadepalli. Dynamic preferences in multi-criteria reinforcement
+learning. In Proceedings of the International Conference on Machine Learning (ICML)  pages
+601–608  2005.
+
+10
+
+[18] Andrew Ng and Stuart Russell. Algorithms for inverse reinforcement learning. In Proceedings
+
+of the International Conference on Machine Learning (ICML)  pages 663–670  2000.
+
+[19] Martin L. Puterman. Markov Decision Processes—Discrete Stochastic Dynamic Programming.
+
+John Wiley & Sons  Inc.  1994.
+
+[20] Tom Schaul  Daniel Horgan  Karol Gregor  and David Silver. Universal Value Function
+Approximators. In International Conference on Machine Learning (ICML)  pages 1312–1320 
+2015.
+
+[21] Richard S. Sutton and Andrew G. Barto. Reinforcement Learning: An Introduction. MIT Press 
+
+1998.
+
+[22] Richard S. Sutton  Doina Precup  and Satinder Singh. Between MDPs and semi-MDPs: a
+framework for temporal abstraction in reinforcement learning. Artiﬁcial Intelligence  112:
+181–211  1999.
+
+[23] Richard S. Sutton  Joseph Modayil  Michael Delp  Thomas Degris  Patrick M. Pilarski  Adam
+White  and Doina Precup. Horde: A scalable real-time architecture for learning knowledge from
+unsupervised sensorimotor interaction. In International Conference on Autonomous Agents and
+Multiagent Systems  pages 761–768  2011.
+
+[24] Csaba Szepesvári. Algorithms for Reinforcement Learning. Synthesis Lectures on Artiﬁcial
+
+Intelligence and Machine Learning. Morgan & Claypool Publishers  2010.
+
+[25] Matthew E. Taylor and Peter Stone. Transfer learning for reinforcement learning domains: A
+
+survey. Journal of Machine Learning Research  10(1):1633–1685  2009.
+
+[26] Emanuel Todorov  Tom Erez  and Yuval Tassa. MuJoCo: A physics engine for model-based
+control. In IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)  pages
+5026–5033  2012.
+
+[27] Christopher Watkins and Peter Dayan. Q-learning. Machine Learning  8:279–292  1992.
+
+[28] Hengshuai Yao  Csaba Szepesvári  Richard S Sutton  Joseph Modayil  and Shalabh Bhatnagar.
+Universal option models. In Advances in Neural Information Processing Systems (NIPS)  pages
+990–998. 2014.
+
+[29] Jingwei Zhang  Jost Tobias Springenberg  Joschka Boedecker  and Wolfram Burgard. Deep
+reinforcement learning with successor features for navigation across similar environments.
+CoRR  abs/1612.05533  2016.
+
+11
+
+,Andre Barreto
+Will Dabney
+Remi Munos
+Jonathan Hunt
+Tom Schaul
+Hado van Hasselt
+David Silver

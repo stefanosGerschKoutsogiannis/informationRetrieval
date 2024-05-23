@@ -1,0 +1,877 @@
+2014,Asynchronous Anytime Sequential Monte Carlo,We introduce a new sequential Monte Carlo algorithm we call the particle cascade. The particle cascade is an asynchronous  anytime alternative to traditional sequential Monte Carlo algorithms that is amenable to parallel and distributed implementations. It uses no barrier synchronizations which leads to improved particle throughput and memory efficiency. It is an anytime algorithm in the sense that it can be run forever to emit an unbounded number of particles while keeping within a fixed memory budget. We prove that the particle cascade provides an unbiased marginal likelihood estimator which can be straightforwardly plugged into existing pseudo-marginal methods.,Asynchronous Anytime Sequential Monte Carlo
+
+Brooks Paige
+
+Frank Wood
+Department of Engineering Science
+
+University of Oxford
+
+Oxford  UK
+
+{brooks fwood}@robots.ox.ac.uk
+
+{doucet y.w.teh}@stats.ox.ac.uk
+
+Arnaud Doucet
+
+Yee Whye Teh
+
+Department of Statistics
+
+University of Oxford
+
+Oxford  UK
+
+Abstract
+
+We introduce a new sequential Monte Carlo algorithm we call the particle cas-
+cade. The particle cascade is an asynchronous  anytime alternative to traditional
+sequential Monte Carlo algorithms that is amenable to parallel and distributed
+implementations.
+It uses no barrier synchronizations which leads to improved
+particle throughput and memory efﬁciency. It is an anytime algorithm in the sense
+that it can be run forever to emit an unbounded number of particles while keeping
+within a ﬁxed memory budget. We prove that the particle cascade provides an un-
+biased marginal likelihood estimator which can be straightforwardly plugged into
+existing pseudo-marginal methods.
+
+1
+
+Introduction
+
+Sequential Monte Carlo (SMC) inference techniques require blocking barrier synchronizations at
+resampling steps which limit parallel throughput and are costly in terms of memory. We introduce
+a new asynchronous anytime sequential Monte Carlo algorithm that has statistical efﬁciency com-
+petitive with standard SMC algorithms and has sufﬁciently higher particle throughput such that it is
+on balance more efﬁcient per unit computation time. Our approach uses locally-computed decision
+rules for each particle that do not require block synchronization of all particles  instead only sharing
+of summary statistics with particles that follow. In our algorithm each resampling point acts as a
+queue rather than a barrier: each particle chooses the number of its own offspring by comparing its
+own weight to the weights of particles which previously reached the queue  blocking only to update
+summary statistics before proceeding.
+An anytime algorithm is an algorithm that can be run continuously  generating progressively better
+solutions when afforded additional computation time. Traditional particle-based inference algo-
+rithms are not anytime in nature; all particles need to be propagated in lock-step to completion in
+order to compute expectations. Once a particle set runs to termination  inference cannot straight-
+forwardly be continued by simply doing more computation. The na¨ıve strategy of running SMC
+again and merging the resulting sets of particles is suboptimal due to bias (see [13] for explana-
+tion). Particle Markov chain Monte Carlo methods (i.e. particle Metropolis Hastings and iterated
+conditional sequential Monte Carlo (iCSMC) [1]) for correctly merging particle sets produced by
+additional SMC runs are closer to anytime in nature but suffer from burstiness as big sets of particles
+are computed then emitted at once and  fundamentally  the inner-SMC loop of such algorithms still
+suffers the kind of excessive synchronization performance penalty that the particle cascade directly
+avoids. Our asynchronous SMC algorithm  the particle cascade  is anytime in nature. The particle
+cascade can be run indeﬁnitely  without resorting to merging of particle sets.
+
+1.1 Related work
+
+Our algorithm shares a superﬁcial similarity to Bernoulli branching numbers [5] and other search
+and exploration methods used for particle ﬁltering  where each particle samples some number of
+
+1
+
+children to propagate to the next observation. Like the particle cascade  the total number of particles
+which exist at each generation is allowed to gradually increase and decrease. However  computing
+branching correction numbers is generally a synchronous operation  requiring all particle weights
+to be known in order to choose an appropriate number of offspring; nor are these methods anytime.
+Sequentially interacting Markov chain Monte Carlo [2  9] is an anytime algorithm  which although
+conceptually similar to SMC has different synchronization properties.
+Parallelizing the resampling step of sequential Monte Carlo methods has drawn increasing recent
+interest as the effort progresses to scale up algorithms to take advantage of high-performance com-
+puting systems and GPUs. Removing the global collective resampling operation [10] is a particular
+focus for improving performance.
+Running arbitrarily many particles within a ﬁxed memory budget can also be addressed by tracking
+random number seeds used to generate proposals  allowing particular particles to be deterministi-
+cally “replayed” [7]. However  this approach is not asynchronous nor anytime.
+
+2 Background
+
+We begin by brieﬂy reviewing sequential Monte Carlo as generally formulated on state-space mod-
+els. Suppose we have a non-Markovian dynamical system with latent random variables X0  . . .   XN
+and observed random variables Y0  . . .   YN described by the joint density
+
+p(xn|x0:n−1  y0:n−1) = f (xn|x0:n−1)
+p(yn|x0:n  y0:n−1) = g(yn|x0:n) 
+
+(1)
+
+where X0 is drawn from some initial distribution µ(·)  and f and g are conditional densities.
+Given observed values Y0:N = y0:N   the posterior distribution p(x0:n|y0:n) is approximated by a
+weighted set of K particles  with each particle k denoted X k
+0:n for k = 1  . . .   K. Particles are
+propagated forward from proposal densities q(xn|x0:n−1) and re-weighted at each n = 1  . . .   N
+
+n|X k
+X k
+
+0:n−1 ∼ q(xn|X k
+g(yn|X k
+wk
+
+n =
+
+0:n−1)
+0:n)f (X k
+n|X k
+
+n|X k
+0:n−1)
+
+q(X k
+
+0:n−1)
+
+W k
+
+n = W k
+
+n−1wk
+n 
+
+(2)
+
+(3)
+
+(4)
+
+n is the weight associated with observation yn and W k
+
+n is the unnormalized weight of
+where wk
+particle k after observation n. It is assumed that exact evaluation of p(x0:N|y0:N ) is intractable and
+that the likelihoods g(yn|X k
+0:n) can be evaluated pointwise. In many complex dynamical systems 
+0:n−1) may be prohibitively costly or even
+or in black-box simulation models  evaluation of f (X k
+impossible. As long as one is capable of simulating from the system  the proposal distribution can be
+chosen as q(·) ≡ f (·)  in which case the particle weights are simply wk
+0:n)  eliminating
+the need to compute the densities f (·).
+The normalized particle weights ¯ωk
+
+n are used to approximate the posterior
+
+n = g(yn|X k
+
+n|X k
+
+j=1 W j
+
+n = W k
+
+n /(cid:80)K
+ˆp(x0:n|y0:n) ≈ K(cid:88)
+(cid:80)K
+
+k=1
+
+¯ωk
+
+nδX k
+
+0:n
+
+(x0:n).
+
+(5)
+
+In the very simple sequential importance sampling setup described here  the marginal likelihood can
+be estimated by ˆp(y0:n) = 1
+K
+
+n .
+k=1 W k
+
+2.1 Resampling and degeneracy
+
+n  . . .   ¯ωK
+
+The algorithm described above suffers from a degeneracy problem wherein most of the normalized
+weights ¯ω1
+n become very close to zero for even moderately large n. Traditionally this is
+combated by introducing a resampling step: as we progress from n to n + 1  particles with high
+weights are duplicated and particles with low weights are discarded  preventing all the probability
+mass in our approximation to the posterior from accumulating on a single particle. A resampling
+
+2
+
+scheme is an algorithm for selecting the number of offspring particles M k
+n+1 that each particle k
+will produce after stage n. Many different schemes for resampling particles exist; see [6] for an
+overview. Resampling changes the weights of particles: as the system progresses from n to n + 1 
+each of the M k
+n prior
+to resampling. Most resampling schemes generate an unweighted set of particles with V k
+n+1 = 1 for
+all particles. When a resampling step is added at every n  the marginal likelihood can be estimated
+
+n+1 children are assigned a new weight V k
+
+n+1  replacing the previous weight W k
+
+1
+K
+
+i=0
+
+k=1 wk
+
+i ; this estimate of the marginal likelihood is unbiased [8].
+
+by ˆp(y0:n) =(cid:81)n
+
+(cid:80)K
+
+2.2 Synchronization and limitations
+
+Our goal is to scale up to very large numbers of particles  using a parallel computing architecture
+where each particle is simulated as a separate process or thread. In order to resample at each n we
+must compute the normalized weights ¯ωk
+n  requiring us to wait until all individual particles have both
+n before the normalization and
+ﬁnished forward simulation and computed their individual weight W k
+resampling required for any to proceed. While the forward simulation itself is trivially parallelizable 
+the weight normalization and resampling step is a synchronous  collective operation. In practice this
+can lead to signiﬁcant underuse of computing resources in a multiprocessor environment  hindering
+our ability to scale up to large numbers of particles.
+Memory limitations on ﬁnite computing hardware also limit the number of simultaneous particles
+we are capable of running in practice. All particles must move through the system together  simul-
+taneously; if the total memory requirements of particles is greater than the available system RAM 
+then a substantial overhead will be incurred from swapping memory contents to disk.
+
+3 The Particle Cascade
+
+The particle cascade algorithm we introduce addresses both these limitations: it does not require
+synchronization  and keeps only a bounded number of particles alive in the system at any given time.
+Instead of resampling  we will consider particle branching  where each particle may produce 0 or
+more offspring. These branching events happen asynchronously and mutually exclusively  i.e. they
+are processed one at a time.
+
+3.1 Local branching decisions
+
+At each stage n of sequential Monte Carlo  particles process observation yn. Without loss of gener-
+ality  we can deﬁne an ordering on the particles 1  2  . . . in the order they arrive at yn. We keep track
+of the running average weight W k
+n of the ﬁrst k particles to arrive at observation yn in an online
+manner
+
+W k
+
+n = W k
+n
+
+W k
+
+n =
+
+W k−1
+
+n +
+
+1
+k
+
+W k
+n
+
+for k = 1 
+
+for k = 2  3  . . . .
+
+(6)
+
+(7)
+
+k − 1
+k
+
+n of particle k relative to those of
+The number of children of particle k depends on the weight W k
+other particles. Particles with higher relative weight are more likely to be located in a high posterior
+probability part of the space  and should be allowed to spawn more child particles.
+In our online asynchronous particle system we do not have access to the weights of future particles
+n among
+when processing particle k. Instead we will compare W k
+n to the current average weight W k
+n+1  will
+particles processed thus far. Speciﬁcally  the number of children  which we denote by M k
+depend on the ratio
+
+Rk
+
+W k
+n
+W k
+n
+n+1 such that the total weight of all children
+Each child of particle k will be assigned a weight V k
+M k
+There is a great deal of ﬂexibility available in designing a scheme for choosing the number of child
+particles; we need only be careful to set V k
+n+1 to
+
+n+1 appropriately. Informally  we would like M k
+
+n+1 has expectation W k
+n .
+
+n+1V k
+
+n =
+
+(8)
+
+.
+
+3
+
+be large when Rk
+the outgoing weight V k
+guarantees M k
+
+n is large. If M k
+n+1 = W k
+
+n+1 > 0  then we set V k
+
+n+1 = W k
+
+n /M k
+
+n+1.
+
+n+1 is sampled in such a way that E[M k
+n  then we set
+n. Alternatively  if we are using a scheme which deterministically
+
+n+1] = Rk
+
+k=1 M k
+
+n(cid:99) (cid:100)Rk
+
+n  or a discrete distribution over the integers {(cid:98)Rk
+
+A simple approach would be to sample M k
+n+1 independently conditioned on the weights. In such
+n+1 from some simple distribution  e.g. a Poisson distribution with
+schemes we could draw each M k
+n(cid:101)}. However  one issue that arises
+mean Rk
+in such approaches where the number of children for each particle is conditionally independent is
+that the variance of the total number of particles at each generation can grow faster than desirable.
+Suppose we start the system with K0 particles. The number of particles at subsequent stages n is
+n. We would like to avoid situations in which the number of
+
+given recursively as Kn =(cid:80)Kn−1
+
+particles becomes too large  or collapses to 1.
+Instead  we will allow M k
+n to depend on the number of children of previous particles at n  in such
+a way that we can stabilize the total number of particles in each generation. Suppose that we wish
+for the number of particles to be stabilized around K0. After k − 1 particles have been processed 
+we expect the total number of children produced at that point to be approximately k − 1  so that if
+the number is less than k − 1 we should allow particle k to produce more children  and vice versa.
+Similarly  if we already currently have more than K0 children  we should allow particle k to produce
+fewer children.
+We use a simple scheme which satisﬁes these criteria  where the number of particles is chosen at
+random when Rk
+
+n ≥ 1
+
+
+
+n < 1  and set deterministically when Rk
+n < 1;
+n < 1;
+
+(0  0) w.p. 1 − Rk
+n 
+n 
+n) w.p. Rk
+(1  W k
+n(cid:99)  W k
+((cid:98)Rk
+n(cid:99) )
+n(cid:98)Rk
+n(cid:101)  W k
+((cid:100)Rk
+n(cid:101) )
+n(cid:100)Rk
+
+if Rk
+if Rk
+if Rk
+if Rk
+
+n ≥ 1 and(cid:80)k−1
+n ≥ 1 and(cid:80)k−1
+
+(M k
+
+n+1  V k
+
+n+1) =
+
+j=1 M j
+j=1 M j
+
+n+1 > min(K0  k − 1);
+n+1 ≤ min(K0  k − 1).
+
+(9)
+
+n(cid:99) (cid:100)Rk
+
+As the number of particles becomes large  the estimated average weight closely approximates the
+n − (cid:98)Rk
+n(cid:99))
+true average weight. Were we to replace the deterministic rounding with a Bernoulli(Rk
+choice between {(cid:98)Rk
+n(cid:101)}  then this decision rule deﬁnes the same distribution on the number
+of offspring particles M k
+Note the anytime nature of this algorithm — any given particle passing through the system needs
+n+1 in order to make
+only the running average W k
+local branching decisions  not the previous particles themselves. Thus it is possible to run this
+algorithm for some ﬁxed number of initial particles K0  inspect the output of the completed particles
+which have left the system  and decide whether to continue by initializing additional particles.
+
+n and the preceding child particle counts(cid:80)k−1
+
+n+1 as the well-known systematic resampling procedure [3  10].
+
+j=1 M j
+
+3.2 Computing expectations and marginal likelihoods
+
+approximate the posterior expectation by E[ϕ(X0:n)|y0:n] ≈(cid:80)Kn
+
+Samples drawn from the particle cascade can be used to compute expectations in the same man-
+ner as usual; that is  given some function ϕ(·)  we normalize weights ¯ωk
+n and
+nϕ(X k
+
+n = W k
+
+j=1 W j
+
+0:n).
+
+k=1 ¯ωk
+
+We can also use the particle cascade to deﬁne an estimator of the marginal likelihood p(y0:n) 
+
+n /(cid:80)Kn
+
+Kn(cid:88)
+
+k=1
+
+1
+K0
+
+ˆp(y0:n) =
+
+W k
+n .
+
+(10)
+
+The form of this estimate is fairly distinct from the standard SMC estimators in Section 2. One can
+
+think of ˆp(y0:n) as ˆp(y0:n) = ˆp(y0)(cid:81)n
+
+K0(cid:88)
+
+k=1
+
+ˆp(y0) =
+
+1
+K0
+
+W k
+0  
+
+i=1 ˆp(yi|y0:i−1) where
+ˆp(yn|y0:n−1) =
+
+(cid:80)Kn
+(cid:80)Kn−1
+
+k=1 W k
+n
+k=1 W k
+n−1
+
+for n ≥ 1.
+
+(11)
+
+Note that the incrementally updated running averages W k
+likelihood estimate; that is  ˆp(y0:n) = Kn
+K0
+
+n.
+W k
+
+n are very directly tied to the marginal
+
+4
+
+3.3 Theoretical properties  unbiasedness  and consistency
+
+Under weak assumptions we can show that the marginal likelihood estimator ˆp(y0:n) deﬁned in
+Eq. 10 is unbiased  and that both its variance and L2 errors of estimates of reasonable posterior ex-
+pectations decrease in the number of particle initializations as 1/K0. Note that because the cascade
+is an anytime algorithm K0 may be increased simply  without restarting inference. Detailed proofs
+are given in the supplemental material; statements of the results are provided here.
+Denote by B(E) the space of bounded real-valued functions on a space E  and suppose each Xn
+is an X -valued random variable. Assume the Bernoulli(Rk
+n(cid:99)) version of the resampling rule
+in Eq. 9  and further assume that g(yn|·  y0:n−1) : X n+1 → R is in B(X n+1) and strictly positive.
+Finally assume that the ordering in which particles arrive at each n is a random permutation of
+the particle index set  conditions which we state precisely in the supplemental material. Then the
+following propositions hold:
+Proposition 1 (Unbiasedness of marginal likelihood estimate) For any K0 ≥ 1 and n ≥ 0
+
+n − (cid:98)Rk
+
+(12)
+Proposition 2 (Variance of marginal likelihood estimate) For any n ≥ 0  there exists a constant
+an < ∞ such that for any K0 ≥ 1
+
+E [ˆp(y0:n)] = p(y0:n).
+
+Proposition 3 (L2 error bounds) For any n ≥ 0  there exists a constant an < ∞ such that for any
+
+V [ˆp(y0:n)] ≤ an
+K0
+
+.
+
+(13)
+
+K0 ≥ 1 and any ψn ∈ B(cid:0)X n+1(cid:1)
+
+(cid:40)(cid:32) Kn(cid:88)
+
+E
+
+(cid:33)
+
+(cid:90)
+
+(cid:41)2 ≤ an
+
+K0
+
+¯ωk
+nψn(X k
+
+0:n)
+
+−
+
+p(dx0:n|y0:n)ψn(x0:n)
+
+(cid:107)ψn(cid:107)2 .
+
+(14)
+
+k=1
+
+Additional results and proofs can be found in the supplemental material.
+
+4 Active bounding of memory usage
+
+In an idealized computational environment  with inﬁnite available memory  our implementation of
+the particle cascade could begin by launching (a very large number) K0 particles simultaneously
+which then gradually propagate forward through the system. In practice  only some ﬁnite number
+of particles  probably much smaller than K0  can be simultaneously simulated efﬁciently. Further-
+more  the initial particles are not truly launched all at once  but rather in a sequence  introducing a
+dependency in the order in which particles arrive at each observation n.
+Our implementation of the particle cascade addresses these issues by explicitly injecting randomness
+into the execution order of particles  and by imposing a machine-dependent hard cap on the number
+of simultaneous extant processes. This permits us to run our particle ﬁlter system indeﬁnitely  for
+arbitrarily large and  in fact  growing initial particle counts K0  on ﬁxed commodity hardware.
+Each particle in our implementation runs as an independent operating system process [12]. In order
+to efﬁciently run a large number of particles  we impose a hard limit ρ on the total number of
+particles which can simultaneously exist in the particle system; most of these will generally be
+sleeping processes. The ideal choice for this number will vary based on hardware capabilities  but
+in general should be made as large as possible.
+Scheduling across particles is managed via a global ﬁrst-in random-out process queue of length
+ρ; this can equivalently be conceptualized as a random-weight priority queue. Each particle corre-
+sponds to a single live process  augmented by a single additional control process which is responsible
+only for spawning additional initial particles (i.e. incrementing the initial particle count K0). When
+any particle k arrives at any likelihood evaluation n  it computes its target number of child parti-
+cles M k
+n+1 = 0 it immediately terminates; otherwise
+it enters the queue. Once this particle either enters the queue or terminates  some other process
+
+n+1 and outgoing particle weight V k
+
+n+1. If M k
+
+5
+
+Figure 1: All results are reported over multiple independent replications  shown here as independent
+lines. (top) Convergence of estimates to ground truth vs. number of particles  shown as (left) MSE
+of marginal probabilities of being in each state for every observation n in the HMM  and (right)
+MSE of the latent expected position in the linear Gaussian state space model. (bottom) Convergence
+of marginal likelihood estimates to the ground truth value (marked by a red dashed line)  for (left)
+the HMM  and (right) the linear Gaussian model.
+
+continues execution — this process is chosen uniformly at random  and as such may be a sleeping
+particle at any stage n < N  or it may instead be the control process which then launches a new
+particle. At any given time  there are some number of particles Kρ < ρ currently in the queue  and
+so the probability of resuming any particular individual particle  or of launching a new particle  is
+1/(Kρ + 1). If the particle released from the queue has exactly one child to spawn  it advances to
+the next observation and repeats the resampling process. If  however  a particle has more than one
+child particle to spawn  rather than launching all child particles at once it launches a single particle to
+simulate forward  decrements the total number of particles left to launch by one  and itself re-enters
+the queue. The system is initialized by seeding the system with a number of initial particles ρ0 < ρ
+at n = 0  creating ρ0 active initial processes. The ideal choice for the process count constraint ρ
+may vary across operating systems and hardware.
+In the event that the process count is fully saturated (i.e. the process queue is full)  then we forcibly
+prevent particles from duplicating themselves and creating new children. If we release a particle
+from the queue which seeks to launch m > 1 additional particles when the queue is full  we instead
+collapse all the remaining particles into a single particle; this single particle represents a virtual set
+of particles  but does not create a new process and requires no additional CPU or memory resources.
+We keep track of a particle count multiplier C k
+n that we propagate forward along with the particle.
+0 = 1  and then when a particle collapse takes place  update their
+All particles are initialized with C k
+multiplier at n + 1 to mC k
+n. This affects the way in which running weight averages are computed;
+n . We incorporate all these values
+suppose a new particle k arrives with multiplier C k
+into the average weight immediately  and update W k
+
+n taking into account the multiplicity  with
+
+n and weight W k
+
+W k
+
+n =
+
+k − 1
+k + C k
+
+W k−1
+
+C k
+n
+n − 1
+k + C k
+This does not affect the computation of the ratio Rk
+n. We preserve the particle multiplier  until we
+reach the ﬁnal n = N; then  after all forward simulation is complete  we re-incorporate the particle
+multiplicity when reporting the ﬁnal particle weight W k
+
+for k = 2  3  . . ..
+
+n − 1
+
+n +
+
+W k
+n
+
+(15)
+
+N = C k
+
+N V k
+
+N .
+N wk
+
+5 Experiments
+
+We report experiments on performing inference in two simple state space models  each with N = 50
+observations  in order to demonstrate the overall validity and utility of the particle cascade algorithm.
+
+6
+
+10110210310410510-410-310-210-1100MSE101102103104105HMM: # of particles−180−160−140−120log ^p(y0:N)10110210310410510-1100101102SMCParticle CascadeNo resamplingiCSMC101102103104105Linear Gaussian: # of particles−130−120−110−100−90−80True valueSMCParticle CascadeNo resamplingFigure 2: (top) Comparative convergence rates between SMC alternatives including our new algo-
+rithm  and (bottom) estimation of marginal likelihood  by time. Results are shown for (left) the
+hidden Markov model  and (right) the linear Gaussian state space model.
+
+The ﬁrst is a hidden Markov model (HMM) with 10 latent discrete states  each with an associated
+Gaussian emission distribution; the second a one-dimensional linear Gaussian model. Note that
+using these models means that we can compute posterior marginals at each n and the marginal
+likelihood Z = p(y0:N ) exactly.
+These experiments are not designed to stress-
+test the particle cascade; rather  they are de-
+signed to show that performance of the particle
+cascade closely approximates that of fully syn-
+chronous SMC algorithms  even in a small-data
+small-complexity regime where we expect their
+performance to be very good.
+In addition to
+comparing to standard SMC  we also compare
+to a worst-case particle ﬁlter in which we never
+resample  instead propagating particles forward
+deterministically with a single child particle at
+every n. While the statistical (per-sample) efﬁ-
+ciency of this approach is quite poor  it is fully
+parallelizable with no blocking operations in
+the algorithm at all  and thus provides a ceiling
+estimate of the raw sampling speed attainable
+in our overall implementation.
+We also benchmark against what we believe to
+be the most practically competitive similar ap-
+proach  iterated conditional SMC [1]. Iterated
+conditional SMC corresponds to the particle Gibbs algorithm in the case where parameter values
+are known; by using a particle ﬁlter sweep as a step within a larger MCMC algorithm  iCSMC pro-
+vides a statistically valid approach to sampling from a posterior distribution by repeatedly running
+sequential Monte Carlo sweeps each with a ﬁxed number of particles. One downside to iCSMC
+is that it does not provide an estimate of the marginal likelihood. In all benchmarks  we propose
+from the prior distribution  with q(xn|·) ≡ f (xn|x0:n−1); the SMC and iCSMC benchmarks use a
+multinomial resampling scheme.
+On both these models we see the statistical efﬁciency of the particle cascade is approximately in line
+with synchronous SMC  slightly outperforming the iCSMC algorithm and signiﬁcantly outperform-
+
+Figure 3: Average time to draw a single com-
+plete particle on a variety of machine architec-
+tures. Queueing rather than blocking at each ob-
+servation improves performance  and appears to
+improve relative performance even more as the
+available compute resources increase. Note that
+this plot shows only average time per sample  not
+a measure of statistical efﬁciency. The high speed
+of the non-resampling algorithm is not sufﬁcient
+to make it competitive with the other approaches.
+
+7
+
+10010110210310-410-310-210-1100MSE100101102103HMM: Time (seconds)−180−160−140−120log ^p(y0:N)10010110210310-1100101102SMCParticle CascadeNo resamplingiCSMC100101102103Linear Gaussian: Time (seconds)−130−120−110−100−90−80True valueSMCParticle CascadeNo resampling2481632# of cores0510152025303540Time per sample (ms)Particle CascadeNo ResamplingIterated CSMCSMCing the fully parallelized non-resampling approach. This suggests that the approximations made by
+computing weights at each n based on only the previously observed particles  and the total particle
+count limit imposed by ρ  do not have an adverse effect on overall performance. In Fig. 1 we plot
+convergence per particle to the true posterior distribution  as well as convergence in our estimate of
+the normalizing constant.
+
+5.1 Performance and scalability
+
+Although values will be implementation-dependent  we are ultimately interested not in per-sample
+efﬁciency but rather in our rate of convergence over time. We record wall clock time for each algo-
+rithm for both of these models; the results for convergence of our estimates of values and marginal
+likelihood are shown in Fig. 2. These particular experiments were all run on Amazon EC2  in an
+8-core environment with Intel Xeon E5-2680 v2 processors. The particle cascade provides a much
+faster and more accurate estimate of the marginal likelihood than the competing methods  in both
+models. Convergence in estimates of values is quick as well  faster than the iCSMC approach. We
+note that for very small numbers of particles  running a simple particle ﬁlter is faster than the parti-
+cle cascade  despite the blocking nature of the resampling step. This is due to the overhead incurred
+by the particle cascade in sending an initial ﬂurry of ρ0 particles into the system before we see
+any particles progress to the end; this initial speed advantage diminishes as the number of samples
+increases. Furthermore  in stark contrast to the simple SMC method  there are no barriers to draw-
+ing more samples from the particle cascade indeﬁnitely. On this ﬁxed hardware environment  our
+implementation of SMC  which aggressively parallelizes all forward particle simulations  exhibits
+a dramatic loss of performance as the number of particles increases from 104 to 105  to the point
+where simultaneously running 105 particles is simply not possible in a feasible amount of time.
+We are also interested in how the particle cascade scales up to larger hardware  or down to smaller
+hardware. A comparison across ﬁve hardware conﬁgurations is shown in Fig. 3.
+
+6 Discussion
+
+The particle cascade has broad applicability to all SMC and particle ﬁltering inference applications.
+For example  constructing an appropriate sequence of densities for SMC is possible in arbitrary prob-
+abilistic graphical models  including undirected graphical models; see e.g. the sequential decompo-
+sition approach of [11]. We are particularly motivated by the SMC-based probabilistic programming
+systems that have recently appeared in the literature [14  12]. Both suggested that the primary per-
+formance bottleneck in their inference algorithms was barrier synchronization  something we have
+done away with entirely. What is more  while particle MCMC methods are particularly appropri-
+ate when there is a clear boundary that can be exploited between between parameters of interest
+and nuisance state variables  in probabilistic programming in particular  parameter values must be
+generated as part of the state trajectory itself  leaving no explicitly denominated latent parameter
+variables per se. The particle cascade is particularly relevant in such situations.
+Finally  as the particle cascade yields an unbiased estimate of the marginal likelihood it can be
+plugged directly into PIMH  SMC2 [4]  and other existing pseudo-marginal methods.
+
+Acknowledgments
+
+Yee Whye Teh’s research leading to these results has received funding from EPSRC (grant
+EP/K009362/1) and the ERC under the EU’s FP7 Programme (grant agreement no. 617411).
+Arnaud Doucet’s research is partially funded by EPSRC (grants EP/K009850/1 and EP/K000276/1).
+Frank Wood is supported under DARPA PPAML through the U.S. AFRL under Cooperative Agree-
+ment number FA8750-14-2-0004. The U.S. Government is authorized to reproduce and distribute
+reprints for Governmental purposes notwithstanding any copyright notation heron. The views and
+conclusions contained herein are those of the authors and should be not interpreted as necessarily
+representing the ofﬁcial policies or endorsements  either expressed or implied  of DARPA  the U.S.
+Air Force Research Laboratory or the U.S. Government.
+
+8
+
+References
+[1] Christophe Andrieu  Arnaud Doucet  and Roman Holenstein. Particle Markov chain Monte
+Carlo methods. Journal of the Royal Statistical Society: Series B (Statistical Methodology) 
+72(3):269–342  2010.
+
+[2] Anthony Brockwell  Pierre Del Moral  and Arnaud Doucet. Sequentially interacting Markov
+
+chain Monte Carlo methods. Annals of Statistics  38(6):3387–3411  2010.
+
+[3] James Carpenter  Peter Clifford  and Paul Fearnhead. An improved particle ﬁlter for non-linear
+
+problems. IEE Proceedings - Radar  Sonar and Navigation  146(1):2–7  Feb 1999.
+
+[4] Nicolas Chopin  Pierre E Jacob  and Omiros Papaspiliopoulos. SMC2: an efﬁcient algorithm
+for sequential analysis of state space models. Journal of the Royal Statistical Society: Series
+B (Statistical Methodology)  75(3):397–426  2013.
+
+[5] D. Crisan  P. Del Moral  and T. Lyons. Discrete ﬁltering using branching and interacting
+
+particle systems. Markov Process. Related Fields  5(3):293–318  1999.
+
+[6] Randal Douc  Olivier Capp´e  and Eric Moulines. Comparison of resampling schemes for
+In In 4th International Symposium on Image and Signal Processing and
+
+particle ﬁltering.
+Analysis (ISPA)  pages 64–69  2005.
+
+[7] Seong-Hwan Jun and Alexandre Bouchard-Cˆot´e. Memory (and time) efﬁcient sequential
+monte carlo. In Proceedings of the 31st International Conference on Machine Learning  2014.
+[8] Pierre Del Moral. Feynman-Kac Formulae – Genealogical and Interacting Particle Systems
+
+with Applications. Probability and its Applications. Springer  2004.
+
+[9] Pierre Del Moral and Arnaud Doucet.
+
+Interacting Markov chain Monte Carlo methods for
+solving nonlinear measured-valued equations. Annals of Applied Probability  20(2):593–639 
+2010.
+
+[10] Lawrence M. Murray  Anthony Lee  and Pierre E. Jacob. Parallel resampling in the particle
+
+ﬁlter. arXiv preprint arXiv:1301.4019  2014.
+
+[11] Christian A. Naesseth  Fredrik Lindsten  and Thomas B. Sch¨on. Sequential Monte Carlo for
+
+Graphical Models. In Advances in Neural Information Processing Systems 27. 2014.
+
+[12] Brooks Paige and Frank Wood. A compilation target for probabilistic programming languages.
+
+In Proceedings of the 31st International Conference on Machine learning  2014.
+
+[13] Nick Whiteley  Anthony Lee  and Kari Heine. On the role of interaction in sequential Monte
+
+Carlo algorithms. arXiv preprint arXiv:1309.2918  2013.
+
+[14] Frank Wood  Jan Willem van de Meent  and Vikash Mansinghka. A new approach to prob-
+In Proceedings of the 17th International conference on
+
+abilistic programming inference.
+Artiﬁcial Intelligence and Statistics  2014.
+
+9
+
+,Brooks Paige
+Frank Wood
+Arnaud Doucet
+Yee Whye Teh
+Yining Wang
+Anima Anandkumar

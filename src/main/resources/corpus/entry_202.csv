@@ -1,0 +1,860 @@
+2019,A Simple Baseline for Bayesian Uncertainty in Deep Learning,We propose SWA-Gaussian (SWAG)  a simple   scalable   and general purpose approach for uncertainty representation and calibration in deep learning. Stochastic Weight Averaging (SWA)  which computes the first moment of stochastic gradient descent (SGD) iterates with a modified learning rate schedule  has recently been shown to improve generalization in deep learning. With SWAG  we fit a Gaussian using the SWA solution as the first moment and a low rank plus diagonal covariance also derived from the SGD iterates  forming an approximate posterior distribution over neural network weights; we then sample from this Gaussian distribution to perform Bayesian model averaging. We empirically find that SWAG approximates the shape of the true posterior  in accordance with results describing the stationary distribution of SGD iterates. Moreover  we demonstrate that SWAG performs well on a wide variety of tasks  including out of sample detection  calibration   and transfer learning   in comparison to many popular alternatives including variational inference  MC dropout  KFAC Laplace  and temperature scaling.,A Simple Baseline for Bayesian Uncertainty
+
+in Deep Learning
+
+Wesley J. Maddox∗1 Timur Garipov∗2
+
+Pavel Izmailov∗1
+
+Dmitry Vetrov2 3 Andrew Gordon Wilson1
+
+3 Samsung-HSE Laboratory  National Research University Higher School of Economics
+
+1 New York University
+
+2 Samsung AI Center Moscow
+
+Abstract
+
+We propose SWA-Gaussian (SWAG)  a simple  scalable  and general purpose
+approach for uncertainty representation and calibration in deep learning. Stochastic
+Weight Averaging (SWA)  which computes the ﬁrst moment of stochastic gradient
+descent (SGD) iterates with a modiﬁed learning rate schedule  has recently been
+shown to improve generalization in deep learning. With SWAG  we ﬁt a Gaussian
+using the SWA solution as the ﬁrst moment and a low rank plus diagonal covariance
+also derived from the SGD iterates  forming an approximate posterior distribution
+over neural network weights; we then sample from this Gaussian distribution to
+perform Bayesian model averaging. We empirically ﬁnd that SWAG approximates
+the shape of the true posterior  in accordance with results describing the stationary
+distribution of SGD iterates. Moreover  we demonstrate that SWAG performs
+well on a wide variety of tasks  including out of sample detection  calibration 
+and transfer learning  in comparison to many popular alternatives including MC
+dropout  KFAC Laplace  SGLD  and temperature scaling.
+
+1
+
+Introduction
+
+Ultimately  machine learning models are used to make decisions. Representing uncertainty is crucial
+for decision making. For example  in medical diagnoses and autonomous vehicles we want to protect
+against rare but costly mistakes. Deep learning models typically lack a representation of uncertainty 
+and provide overconﬁdent and miscalibrated predictions [e.g.  21  12].
+Bayesian methods provide a natural probabilistic representation of uncertainty in deep learning [e.g. 
+3  24  5]  and previously had been a gold standard for inference with neural networks [38]. However 
+existing approaches are often highly sensitive to hyperparameter choices  and hard to scale to modern
+datasets and architectures  which limits their general applicability in modern deep learning.
+In this paper we propose a different approach to Bayesian deep learning: we use the information
+contained in the SGD trajectory to efﬁciently approximate the posterior distribution over the weights
+of the neural network. We ﬁnd that the Gaussian distribution ﬁtted to the ﬁrst two moments of
+SGD iterates  with a modiﬁed learning rate schedule  captures the local geometry of the posterior
+surprisingly well. Using this Gaussian distribution we are able to obtain convenient  efﬁcient 
+accurate and well-calibrated predictions in a broad range of tasks in computer vision. In particular 
+our contributions are the following:
+
+• In this work we propose SWAG (SWA-Gaussian)  a scalable approximate Bayesian inference
+technique for deep learning. SWAG builds on Stochastic Weight Averaging [20]  which
+
+∗Equal contribution. Correspondence to wjm363 AT nyu.edu
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+computes an average of SGD iterates with a high constant learning rate schedule  to provide
+improved generalization in deep learning and the interpretation of SGD as approximate
+Bayesian inference [34]. SWAG additionally computes a low-rank plus diagonal approxima-
+tion to the covariance of the iterates  which is used together with the SWA mean  to deﬁne a
+Gaussian posterior approximation over neural network weights.
+
+• SWAG is motivated by the theoretical analysis of the stationary distribution of SGD iterates
+[e.g.  34  6]  which suggests that the SGD trajectory contains useful information about the
+geometry of the posterior. In Appendix 2 we show that the assumptions of Mandt et al. [34]
+do not hold for deep neural networks  due to non-convexity and over-parameterization (with
+further analysis in the supplementary material). However  we ﬁnd in Section 4 that in the
+low-dimensional subspace spanned by SGD iterates the shape of the posterior distribution is
+approximately Gaussian within a basin of attraction. Further  SWAG is able to capture the
+geometry of this posterior remarkably well.
+
+• In an exhaustive empirical evaluation we show that SWAG can provide well-calibrated
+uncertainty estimates for neural networks across many settings in computer vision. In partic-
+ular SWAG achieves higher test likelihood compared to many state-of-the-art approaches 
+including MC-Dropout [9]  temperature scaling [12]  SGLD [46]  KFAC-Laplace [43] and
+SWA [20] on CIFAR-10  CIFAR-100 and ImageNet  on a range of architectures. We also
+demonstrate the effectiveness of SWAG for out-of-domain detection  and transfer learning.
+While we primarily focus on image classiﬁcation  we show that SWAG can signiﬁcantly im-
+prove test perplexities of LSTM networks on language modeling problems  and in Appendix
+7 we also compare SWAG with Probabilistic Back-propagation (PBP) [16]  Deterministic
+Variational Inference (DVI) [47]  and Deep Gaussian Processes [4] on regression problems.
+• We release PyTorch code at https://github.com/wjmaddox/swa_gaussian.
+
+2 Related Work
+
+2.1 Bayesian Methods
+
+Bayesian approaches represent uncertainty by placing a distribution over model parameters  and then
+marginalizing these parameters to form a whole predictive distribution  in a procedure known as
+Bayesian model averaging. In the late 1990s  Bayesian methods were the state-of-the-art approach to
+learning with neural networks  through the seminal works of Neal [38] and MacKay [32]. However 
+modern neural networks often contain millions of parameters  the posterior over these parameters
+(and thus the loss surface) is highly non-convex  and mini-batch approaches are often needed to
+move to a space of good solutions [22]. For these reasons  Bayesian approaches have largely been
+intractable for modern neural networks. Here  we review several modern approaches to Bayesian
+deep learning.
+
+Markov chain Monte Carlo (MCMC) was at one time a gold standard for inference with neural
+networks  through the Hamiltonian Monte Carlo (HMC) work of Neal [38]. However  HMC requires
+full gradients  which is computationally intractable for modern neural networks. To extend the HMC
+framework  stochastic gradient HMC (SGHMC) was introduced by Chen et al. [5] and allows for
+stochastic gradients to be used in Bayesian inference  crucial for both scalability and exploring a space
+of solutions that provide good generalization. Alternatively  stochastic gradient Langevin dynamics
+(SGLD) [46] uses ﬁrst order Langevin dynamics in the stochastic gradient setting. Theoretically 
+both SGHMC and SGLD asymptotically sample from the posterior in the limit of inﬁnitely small
+step sizes. In practice  using ﬁnite learning rates introduces approximation errors (see e.g. [34])  and
+tuning stochastic gradient MCMC methods can be quite difﬁcult.
+
+Variational Inference: Graves [11] suggested ﬁtting a Gaussian variational posterior approxima-
+tion over the weights of neural networks. This technique was generalized by Kingma and Welling
+[26] which proposed the reparameterization trick for training deep latent variable models; multiple
+variational inference methods based on the reparameterization trick were proposed for DNNs [e.g. 
+25  3  36  31]. While variational methods achieve strong performance for moderately sized networks 
+they are empirically noted to be difﬁcult to train on larger architectures such as deep residual networks
+[15]; Blier and Ollivier [2] argue that the difﬁculty of training is explained by variational methods
+
+2
+
+providing inusfﬁcient data compression for DNNs despite being designed for data compression (mini-
+mum description length). Recent key advances [31  47] in variational inference for deep learning
+typically focus on smaller-scale datasets and architectures. An alternative line of work re-interprets
+noisy versions of optimization algorithms: for example  noisy Adam [23] and noisy KFAC [50]  as
+approximate variational inference.
+
+Dropout Variational Inference: Gal and Ghahramani [9] used a spike and slab variational distri-
+bution to view dropout at test time as approximate variational Bayesian inference. Concrete dropout
+[10] extends this idea to optimize the dropout probabilities as well. From a practical perspective 
+these approaches are quite appealing as they only require ensembling dropout predictions at test time 
+and they were succesfully applied to several downstream tasks [21  37].
+
+assume a Gaussian posterior  N (θ∗ I(θ∗)−1)  where θ∗ is a MAP
+Laplace Approximations
+estimate and I(θ∗)−1 is the inverse of the Fisher information matrix (expected value of the Hessian
+evaluated at θ∗). It was notably used for Bayesian neural networks in MacKay [33]  where a diagonal
+approximation to the inverse of the Hessian was utilized for computational reasons. More recently 
+Kirkpatrick et al. [27] proposed using diagonal Laplace approximations to overcome catastrophic
+forgetting in deep learning. Ritter et al. [43] proposed the use of either a diagonal or block Kronecker
+factored (KFAC) approximation to the Hessian matrix for Laplace approximations  and Ritter et al.
+[42] successfully applied the KFAC approach to online learning scenarios.
+
+2.2 SGD Based Approximations
+
+Mandt et al. [34] proposed to use the iterates of averaged SGD as an MCMC sampler  after analyzing
+the dynamics of SGD using tools from stochastic calculus. From a frequentist perspective  Chen et al.
+[6] showed that under certain conditions a batch means estimator of the sample covariance matrix of
+the SGD iterates converges to A = H(θ)−1C(θ)H(θ)−1  where H(θ)−1 is the inverse of the Hessian
+of the log likelihood and C(θ) = E(∇ log p(θ)∇ log p(θ)T ) is the covariance of the gradients of the
+log likelihood. Chen et al. [6] then show that using A and the sample average of the iterates for a
+Gaussian approximation produces well calibrated conﬁdence intervals of the parameters and that the
+variance of these estimators achieves the Cramer Rao lower bound (the minimum possible variance).
+A description of the asymptotic covariance of the SGD iterates dates back to Ruppert [44] and Polyak
+and Juditsky [41]  who show asymptotic convergence of Polyak-Ruppert averaging.
+
+2.3 Methods for Calibration of DNNs
+
+Lakshminarayanan et al. [29] proposed using ensembles of several networks for enhanced calibration 
+and incorporated an adversarial loss function to be used when possible as well. Outside of probabilistic
+neural networks  Guo et al. [12] proposed temperature scaling  a procedure which uses a validation set
+and a single hyperparameter to rescale the logits of DNN outputs for enhanced calibration. Kuleshov
+et al. [28] propose calibrated regression using a similar rescaling technique.
+
+3 SWA-Gaussian for Bayesian Deep Learning
+
+In this section we propose SWA-Gaussian (SWAG) for Bayesian model averaging and uncertainty
+estimation. In Section 3.2  we review stochastic weight averaging (SWA) [20]  which we view as
+estimating the mean of the stationary distribution of SGD iterates. We then propose SWA-Gaussian
+in Sections 3.3 and 3.4 to estimate the covariance of the stationary distribution  forming a Gaussian
+approximation to the posterior over weight parameters. With SWAG  uncertainty in weight space
+is captured with minimal modiﬁcations to the SWA training procedure. We then present further
+theoretical and empirical analysis for SWAG in Section 4.
+
+3.1 Stochastic Gradient Descent (SGD)
+
+Standard training of deep neural networks (DNNs) proceeds by applying stochastic gradient descent
+on the model weights θ with the following update rule:
+
+(cid:32)
+
+∆θt = −ηt
+
+B(cid:88)
+
+i=1
+
+1
+B
+
+(cid:33)
+
+ 
+
+∇θ log p(yi|fθ(xi)) − ∇θ log p(θ)
+
+N
+
+3
+
+(cid:80)
+where the learning rate is η  the ith input (e.g. image) and label are {xi  yi}  the size of the whole
+training set is N  the size of the batch is B  and the DNN  f  has weight parameters θ.2 The loss
+i log p(yi|fθ(xi))  combined with a regularizer log p(θ).
+function is a negative log likelihood −
+This type of maximum likelihood training does not represent uncertainty in the predictions or
+parameters θ.
+
+3.2 Stochastic Weight Averaging (SWA)
+
+(cid:80)T
+
+The main idea of SWA [20] is to run SGD with a constant learning rate schedule starting from a
+pre-trained solution  and to average the weights of the models it traverses. Denoting the weights of
+the network obtained after epoch i of SWA training θi  the SWA solution after T epochs is given
+by θSWA = 1
+i=1 θi . A high constant learning rate schedule ensures that SGD explores the set of
+T
+possible solutions instead of simply converging to a single point in the weight space. Izmailov et al.
+[20] argue that conventional SGD training converges to the boundary of the set of high-performing
+solutions; SWA on the other hand is able to ﬁnd a more centered solution that is robust to the shift
+between train and test distributions  leading to improved generalization performance. SWA and
+related ideas have been successfully applied to a wide range of applications [see e.g. 1  48  49  40]. A
+related but different procedure is Polyak-Ruppert averaging [41  44] in stochastic convex optimization 
+which uses a learning rate decaying to zero. Mandt et al. [34] interpret Polyak-Ruppert averaging as a
+sampling procedure  with convergence occurring to the true posterior under certain strong conditions.
+Additionally  they explore the theoretical feasibility of SGD (and averaged SGD) as an approximate
+Bayesian inference scheme; we test their assumptions in Appendix 1.
+
+3.3 SWAG-Diagonal
+
+i=1 θ2
+
+SWA); here the squares in θ2
+
+SWA and θ2
+
+(cid:80)T
+
+i   Σdiag = diag(θ2 − θ2
+
+We ﬁrst consider a simple diagonal format for the covariance matrix. In order to ﬁt a diagonal
+covariance approximation  we maintain a running average of the second uncentered moment for each
+weight  and then compute the covariance using the following standard identity at the end of training:
+i are applied elementwise.
+θ2 = 1
+T
+The resulting approximate posterior distribution is then N (θSWA  ΣDiag). In our experiments  we term
+this method SWAG-Diagonal.
+Constructing the SWAG-Diagonal posterior approximation requires storing two additional copies
+of DNN weights: θSWA and θ2. Note that these models do not have to be stored on the GPU. The
+additional computational complexity of constructing SWAG-Diagonal compared to standard training
+is negligible  as it only requires updating the running averages of weights once per epoch.
+
+3.4 SWAG: Low Rank plus Diagonal Covariance Structure
+
+We now describe the full SWAG algorithm. While the diagonal covariance approximation is standard
+in Bayesian deep learning [3  27]  it can be too restrictive. We extend the idea of diagonal covariance
+approximations to utilize a more ﬂexible low-rank plus diagonal posterior approximation. SWAG
+approximates the sample covariance Σ of the SGD iterates along with the mean θSWA.3
+(cid:80)T
+(cid:80)T
+Note that the sample covariance matrix of the SGD iterates can be written as the sum of outer products 
+i=1(θi − θSWA)(θi − θSWA)(cid:62)  and is of rank T . As we do not have access to the value
+Σ = 1
+T−1
+i=1(θi − ¯θi)(θi −
+of θSWA during training  we approximate the sample covariance with Σ ≈ 1
+T−1
+¯θi)(cid:62) = 1
+T−1 DD(cid:62)  where D is the deviation matrix comprised of columns Di = (θi − ¯θi)  and ¯θi is
+the running estimate of the parameters’ mean obtained from the ﬁrst i samples. To limit the rank of
+the estimated covariance matrix we only use the last K of Di vectors corresponding to the last K
+
+2We ignore momentum for simplicity in this update; however we utilized momentum in the resulting
+
+experiments and it is covered theoretically [34].
+
+3 We note that stochastic gradient Monte Carlo methods [5  46] also use the SGD trajectory to construct
+samples from the approximate posterior. However  these methods are principally different from SWAG in that
+they (1) require adding Gaussian noise to the gradients  (2) decay learning rate to zero and (3) do not construct a
+closed-form approximation to the posterior distribution  which for instance enables SWAG to draw new samples
+with minimal overhead. We include comparisons to SGLD [46] in the Appendix.
+
+4
+
+K−1 · (cid:98)D(cid:98)D(cid:62) with the diagonal ap-
+
+epochs of training. Here K is the rank of the resulting approximation and is a hyperparameter of the
+
+method. We deﬁne (cid:98)D to be the matrix with columns equal to Di for i = T − K + 1  . . .   T .
+
+diagz1 +
+
+1
+√2 · Σ
+
+1(cid:112)2(K − 1)
+
+We then combine the resulting low-rank approximation Σlow-rank = 1
+proximation Σdiag of Section 3.3. The resulting approximate posterior distribution is a Gaussian with
+2 · (Σdiag + Σlow-rank)).4 In our experiments 
+the SWA mean θSWA and summed covariance: N (θSWA  1
+we term this method SWAG. Computing this approximate posterior distribution requires storing K
+vectors Di of the same size as the model as well as the vectors θSWA and θ2. These models do not
+have to be stored on a GPU.
+To sample from SWAG we use the following identity
+
+(cid:101)θ = θSWA +
+(cid:98)Dz2  where z1 ∼ N (0  Id)  z2 ∼ N (0  IK).
+diagz1 can be computed in O(d) time. The product (cid:98)Dz2 can be computed in O(Kd) time.
+
+Here d is the number of parameters in the network. Note that Σdiag is diagonal  and the product
+Σ
+Related methods for estimating the covariance of SGD iterates were considered in Mandt et al. [34]
+and Chen et al. [6]  but store full-rank covariance Σ and thus scale quadratically in the number of
+parameters  which is prohibitively expensive for deep learning applications. We additionally note that
+using the deviation matrix for online covariance matrix estimation comes from viewing the online
+updates used in Dasgupta and Hsu [8] in matrix fashion.
+The full Bayesian model averaging procedure is given in Algorithm 1. As in Izmailov et al. [20]
+(SWA) we update the batch normalization statistics after sampling weights for models that use batch
+normalization [18]; we investigate the necessity of this update in Appendix 4.4.
+Algorithm 1 Bayesian Model Averaging with SWAG
+
+(1)
+
+1
+2
+
+1
+2
+
+θ0: pretrained weights; η: learning rate; T : number of steps; c: moment update frequency; K: maximum
+number of columns in deviation matrix; S: number of samples in Bayesian model averaging
+Train SWAG
+
+Test Bayesian Model Averaging
+
+for i ← 1  2  ...  S do
+
+Draw(cid:101)θi ∼ N(cid:16)
+
+θSWA  1
+
+2 Σdiag + (cid:98)D(cid:98)D(cid:62)
+S p(y∗|(cid:101)θi)
+
+2(K−1)
+
+Update batch norm statistics with new sample.
+p(y∗|Data) + = 1
+
+(cid:17)
+
+(1)
+
+{Number of models}
+
+return p(y∗|Data)
+
+0
+
+θ ← θ0  θ2 ← θ2
+{Initialize moments}
+for i ← 1  2  ...  T do
+θi ← θi−1−η∇θL(θi−1){Perform SGD update}
+if MOD(i  c) = 0 then
+
+n ← i/c
+θ ← nθ + θi
+n + 1
+
+i
+
+  θ2 ← nθ2 + θ2
+n + 1
+
+if NUM_COLS((cid:98)D) = K then
+REMOVE_COL((cid:98)D[:  1])
+APPEND_COL((cid:98)D  θi − θ) {Store deviation}
+
+{Moments}
+
+return θSWA = θ  Σdiag = θ2 − θ
+
+2
+
+  (cid:98)D
+
+3.5 Bayesian Model Averaging with SWAG
+Maximum a-posteriori (MAP) optimization is a procedure whereby one maximizes the (log) posterior
+with respect to parameters θ: log p(θ|D) = log p(D|θ) + log p(θ). Here  the prior p(θ) is viewed as a
+regularizer in optimization. However  MAP is not Bayesian inference  since one only considers a sin-
+gle setting of the parameters ˆθMAP = argmaxθp(θ|D) in making predictions  forming p(y∗|ˆθMAP  x∗) 
+where x∗ and y∗ are test inputs and outputs.
+A Bayesian procedure instead marginalizes the posterior distribution over θ  in a Bayesian model
+
+average  for the unconditional predictive distribution: p(y∗|D  x∗) = (cid:82) p(y∗|θ  x∗)p(θ|D)dθ. In
+
+practice  this integral is computed through a Monte Carlo sampling procedure:
+p(y∗|D  x∗) ≈ 1
+We emphasize that in this paper we are approximating fully Bayesian inference  rather than MAP
+optimization. We develop a Gaussian approximation to the posterior from SGD iterates  p(θ|D) ≈
+4We use one half as the scale here because both the diagonal and low rank terms include the variance of the
+
+(cid:80)T
+t=1 p(y∗|θt  x∗)  
+
+θt ∼ p(θ|D).
+
+T
+
+weights. We tested several other scales in Appendix 4.
+
+5
+
+Figure 1: Left: Posterior joint density cross-sections along the rays corresponding to different
+eigenvectors of SWAG covariance matrix. Middle: Posterior joint density surface in the plane
+spanned by eigenvectors of SWAG covariance matrix corresponding to the ﬁrst and second largest
+eigenvalues and (Right:) the third and fourth largest eigenvalues. All plots are produced using
+PreResNet-164 on CIFAR-100. The SWAG distribution projected onto these directions ﬁts the
+geometry of the posterior density remarkably well.
+
+N (θ; µ  Σ)  and then sample from this posterior distribution to perform a Bayesian model average.
+In our procedure  optimization with different regularizers  to characterize the Gaussian posterior
+approximation  corresponds to approximate Bayesian inference with different priors p(θ).
+
+Prior Choice Typically  weight decay is used to regularize DNNs  corresponding to explicit L2
+regularization when SGD without momentum is used to train the model. When SGD is used with
+momentum  as is typically the case  implicit regularization still occurs  producing a vague prior on
+the weights of the DNN in our procedure. This regularizer can be given an explicit Gaussian-like
+form (see Proposition 3 of Loshchilov and Hutter [30])  corresponding to a prior distribution on the
+weights.
+Thus  SWAG is an approximate Bayesian inference algorithm in our experiments (see Section 5) and
+can be applied to most DNNs without any modiﬁcations of the training procedure (as long as SGD is
+used with weight decay or explicit L2 regularization). Alternative regularization techniques could
+also be used  producing different priors on the weights. It may also be possible to similarly utilize
+Adam and other stochastic ﬁrst-order methods  which view as a promising direction for future work.
+
+4 Does the SGD Trajectory Capture Loss Geometry?
+
+To analyze the quality of the SWAG approximation  we study the posterior density along the directions
+corresponding to the eigenvectors of the SWAG covariance matrix for PreResNet-164 on CIFAR-100.
+In order to ﬁnd these eigenvectors we use randomized SVD [14].5 In the left panel of Figure 1 we
+visualize the (cid:96)2-regularized cross-entropy loss L(·) (equivalent to the joint density of the weights and
+the loss with a Gaussian prior) as a function of distance t from the SWA solution θSWA along the i-th
+eigenvector vi of the SWAG covariance: φ(t) = L(θSWA + t · vi(cid:107)vi(cid:107) ). Figure 1 (left) shows a clear
+correlation between the variance of the SWAG approximation and the width of the posterior along
+the directions vi. The SGD iterates indeed contain useful information about the shape of the posterior
+distribution  and SWAG is able to capture this information. We repeated the same experiment for
+SWAG-Diagonal  ﬁnding that there was almost no variance in these eigen-directions. Next  in Figure 1
+(middle) we plot the posterior density surface in the 2-dimensional plane in the weight space spanning
+the two top eigenvectors v1 and v2 of the SWAG covariance: ψ(t1  t2) = L(θSWA+t1· v1(cid:107)v1(cid:107) +t2· v2(cid:107)v2(cid:107) ).
+Again  SWAG is able to capture the geometry of the posterior. The contours of constant posterior
+density appear remarkably well aligned with the eigenvalues of the SWAG covariance. We also
+present the analogous plot for the third and fourth top eigenvectors in Figure 1 (right). In Appendix 3 
+we additionally present similar results for PreResNet-164 on CIFAR-10 and VGG-16 on CIFAR-100.
+As we can see  SWAG is able to capture the geometry of the posterior in the subspace spanned by SGD
+iterates. However  the dimensionality of this subspace is very low compared to the dimensionality of
+
+5From sklearn.decomposition.TruncatedSVD.
+
+6
+
+−80−60−40−20020406080Distance0.00.20.40.60.81.01.21.41.6TrainlossTrainlossPreResNet-164CIFAR-100v1v2v5v10v20SWAG3σregion−80−60−40−20020406080v1−80−60−40−20020406080v2TrainlossPreResNet-164CIFAR-100SWATrajectory(proj)SWAG3σregion0.0840.0910.110.150.270.651.75>5−40−2002040v3−40−2002040v4TrainlossPreResNet-164CIFAR-100SWATrajectory(proj)SWAG3σregion0.10.120.140.190.340.751.95>5Figure 2: Negative log likelihoods for SWAG and baselines. Mean and standard deviation (shown
+with error-bars) over 3 runs are reported for each experiment on CIFAR datasets. SWAG (blue
+star) consistently outperforms alternatives  with lower negative log likelihood  with the largest
+improvements on transfer learning. Temperature scaling applied on top of SWA (SWA-Temp) often
+performs close to as well on the non-transfer learning tasks  but requires a validation set.
+
+the weight space  and we can not guarantee that SWAG variance estimates are adequate along all
+directions in weight space. In particular  we would expect SWAG to under-estimate the variances
+along random directions  as the SGD trajectory is in a low-dimensional subspace of the weight
+space  and a random vector has a close-to-zero projection on this subspace with high probability. In
+Appendix 1 we visualize the trajectory of SGD applied to a quadratic function  and further discuss
+the relation between the geometry of objective and SGD trajectory. In Appendices 1 and 2  we also
+empirically test the assumptions behind theory relating the SGD stationary distribution to the true
+posterior for neural networks.
+
+5 Experiments
+
+We conduct a thorough empirical evaluation of SWAG  comparing to a range of high performing
+baselines  including MC dropout [9]  temperature scaling [12]  SGLD [46]  Laplace approximations
+[43]  deep ensembles [29]  and ensembles of SGD iterates that were used to construct the SWAG
+approximation. In Section 5.1 we evaluate SWAG predictions and uncertainty estimates on image
+classiﬁcation tasks. We also evaluate SWAG for transfer learning and out-of-domain data detection.
+We investigate the effect of hyperparameter choices and practical limitations in SWAG  such as the
+effect of learning rate on the scale of uncertainty  in Appendix 4.
+
+5.1 Calibration and Uncertainty Estimation on Image Classiﬁcation Tasks
+
+In this section we evaluate the quality of uncertainty estimates as well as predictive accuracy for
+SWAG and SWAG-Diagonal on CIFAR-10  CIFAR-100 and ImageNet ILSVRC-2012 [45].
+For all methods we analyze test negative log-likelihood  which reﬂects both the accuracy and the
+quality of predictive uncertainty. Following Guo et al. [12] we also consider a variant of reliability
+diagrams to evaluate the calibration of uncertainty estimates (see Figure 3) and to show the difference
+between a method’s conﬁdence in its predictions and its accuracy. To produce this plot for a given
+method we split the test data into 20 bins uniformly based on the conﬁdence of a method (maximum
+predicted probability). We then evaluate the accuracy and mean conﬁdence of the method on the
+images from each bin  and plot the difference between conﬁdence and accuracy. For a well-calibrated
+model  this difference should be close to zero for each bin. We found that this procedure gives a more
+effective visualization of the actual conﬁdence distribution of DNN predictions than the standard
+reliability diagrams used in Guo et al. [12] and Niculescu-Mizil and Caruana [39].
+We provide tables containing the test accuracy  negative log likelihood and expected calibration error
+for all methods and datasets in Appendix 5.3.
+CIFAR datasets On CIFAR datasets we run experiments with VGG-16  PreResNet-164 and
+WideResNet-28x10 networks. In order to compare SWAG with existing alternatives we report the
+results for standard SGD and SWA [20] solutions (single models)  MC-Dropout [9]  temperature
+scaling [12] applied to SWA and SGD solutions  SGLD [46]  and K-FAC Laplace [43] methods. For
+all the methods we use our implementations in PyTorch (see Appendix 8). We train all networks
+for 300 epochs  starting to collect models for SWA and SWAG approximations once per epoch after
+epoch 160. For SWAG  K-FAC Laplace  and Dropout we use 30 samples at test time.
+
+7
+
+0.600.650.700.750.80NLLWideResNet28x10CIFAR-1000.650.700.750.800.850.900.95PreResNet-164CIFAR-1001.01.21.41.6VGG-16CIFAR-1000.110.120.130.14WideResNet28x10CIFAR-100.120.130.140.150.160.170.18PreResNet-164CIFAR-100.2000.2250.2500.2750.3000.325VGG-16CIFAR-100.900.951.001.051.10WideResNet28x10CIFAR-10→STL-101.01.11.21.31.41.5PreResNet-164CIFAR-10→STL-101.11.21.31.41.51.61.7VGG-16CIFAR-10→STL-100.840.860.880.90DenseNet-161ImageNet0.820.830.840.850.860.87ResNet-152ImageNetSWAGSWAG-DiagSGDSWASGD-TempSWA-TempKFAC-LaplaceSGD-DropSWA-DropSGLDFigure 3: Reliability diagrams for WideResNet28x10 on CIFAR-100 and transfer task; ResNet-152
+and DenseNet-161 on ImageNet. Conﬁdence is the value of the max softmax output. A perfectly
+calibrated network has no difference between conﬁdence and accuracy  represented by a dashed black
+line. Points below this line correspond to under-conﬁdent predictions  whereas points above the
+line are overconﬁdent predictions. SWAG is able to substantially improve calibration over standard
+training (SGD)  as well as SWA. Additionally  SWAG signiﬁcantly outperforms temperature scaling
+for transfer learning (CIFAR-10 to STL)  where the target data are not from the same distribution as
+the training data.
+
+ImageNet On ImageNet we report our results for SWAG  SWAG-Diagonal  SWA and SGD. We
+run experiments with DenseNet-161 [17] and Resnet-152 [15]. For each model we start from a
+pre-trained model available in the torchvision package  and run SGD with a constant learning rate
+for 10 epochs. We collect models for the SWAG versions and SWA 4 times per epoch. For SWAG
+we use 30 samples from the posterior over network weights at test-time  and use randomly sampled
+10% of the training data to update batch-normalization statistics for each of the samples. For SGD
+with temperature scaling  we use the results reported in Guo et al. [12].
+
+Transfer from CIFAR-10 to STL-10 We use the models trained on CIFAR-10 and evaluate them
+on STL-10 [7]. STL-10 has a similar set of classes as CIFAR-10  but the image distribution is
+different  so adapting the model from CIFAR-10 to STL-10 is a commonly used transfer learning
+benchmark. We provide further details on the architectures and hyperparameters in Appendix 8.
+Results We visualize the negative log-likelihood for all methods and datasets in Figure 2. On all
+considered tasks SWAG and SWAG diagonal perform comparably or better than all the considered
+alternatives  SWAG being best overall. We note that the combination of SWA and temperature scaling
+presents a competitive baseline. However  unlike SWAG it requires using a validation set to tune the
+temperature; further  temperature scaling is not effective when the test data distribution differs from
+train  as we observe in experiments on transfer learning from CIFAR-10 to STL-10.
+Next  we analyze the calibration of uncertainty estimates provided by different methods. In Figure
+3 we present reliability plots for WideResNet on CIFAR-100  DenseNet-161 and ResNet-152 on
+ImageNet. The reliability diagrams for all other datasets and architectures are presented in the
+Appendix 5.1. As we can see  SWAG and SWAG-Diagonal both achieve good calibration across
+the board. The low-rank plus diagonal version of SWAG is generally better calibrated than SWAG-
+Diagonal. We also present the expected calibration error for each of the methods  architectures and
+datasets in Tables A.2 3. Finally  in Tables A.8 9 we present the predictive accuracy for all of the
+methods  where SWAG is comparable with SWA and generally outperforms the other approaches.
+
+5.2 Comparison to ensembling SGD solutions
+
+We evaluated ensembles of independently trained SGD solutions (Deep Ensembles  [29]) on
+PreResNet-164 on CIFAR-100. We found that an ensemble of 3 SGD solutions has high accu-
+racy (82.1%)  but only achieves NLL 0.6922  which is worse than a single SWAG solution (0.6595
+NLL). While the accuracy of this ensemble is high  SWAG solutions are much better calibrated. An
+ensemble of 5 SGD solutions achieves NLL 0.6478  which is competitive with a single SWAG solution 
+that requires 5× less computation to train. Moreover  we can similarly ensemble independently
+trained SWAG models; an ensemble of 3 SWAG models achieves NLL of 0.6178.
+We also evaluated ensembles of SGD iterates that were used to construct the SWAG approximation
+(SGD-Ens) for all of our CIFAR models. SWAG has higher NLL than SGD-Ens on VGG-16  but
+
+8
+
+0.2000.7590.9270.9780.9930.998Conﬁdence(maxprob)-0.10-0.050.000.050.100.15Conﬁdence-AccuracyWideResNet28x10CIFAR-1000.2000.7590.9270.9780.9930.998Conﬁdence(maxprob)0.000.050.100.150.200.250.300.350.40Conﬁdence-AccuracyWideResNet28x10CIFAR-10→STL-100.2000.7590.9270.9780.9930.998Conﬁdence(maxprob)-0.05-0.030.000.020.050.080.10Conﬁdence-AccuracyDenseNet-161ImageNet0.2000.7590.9270.9780.9930.998Conﬁdence(maxprob)-0.08-0.05-0.020.000.020.050.080.100.12Conﬁdence-AccuracyResNet-152ImageNetSGDSGLDSWA-DropSWA-TempSWAGSWAG-Diagmuch lower NLL on the larger PreResNet-164 and WideResNet28x10; the results for accuracy and
+ECE are analogous.
+
+5.3 Out-of-Domain Image Detection
+
+To evaluate SWAG on out-of-domain data detection we train a WideResNet as described in section
+5.1 on the data from ﬁve classes of the CIFAR-10 dataset  and then analyze predictions of SWAG
+variants along with the baselines on the full test set. We expect the outputted class probabilities on
+objects that belong to classes that were not present in the training data to have high-entropy reﬂecting
+the model’s high uncertainty in its predictions  and considerably lower entropy on the images that are
+similar to those on which the network was trained. We plot the histograms of predictive entropies
+on the in-domain and out-of-domain in Figure A.A7 for a qualitative comparison and report the
+symmetrized KL divergence between the binned in and out of sample distributions in Table 1  ﬁnding
+that SWAG and Dropout perform best on this measure. Additional details are in Appendix 5.2.
+
+5.4 Language Modeling with LSTMs
+
+We next apply SWAG to an LSTM network on language modeling tasks on Penn Treebank and
+WikiText-2 datasets. In Appendix 6 we demonstrate that SWAG easily outperforms both SWA and
+NT-ASGD [35]  a strong baseline for LSTM training  in terms of test and validation perplexities.
+We compare SWAG to SWA and the NT-ASGD method [35]  which is a strong baseline for training
+LSTM models. The main difference between SWA and NT-ASGD  which is also based on weight
+averaging  is that NT-ASGD starts weight averaging much earlier than SWA: NT-ASGD switches
+to ASGD (averaged SGD) typically around epoch 100 while with SWA we start averaging after
+pre-training for 500 epochs. We report test and validation perplexities for different methods and
+datasets in Table 1.
+As we can see  SWA substantially improves perplexities on both datasets over NT-ASGD. Further 
+we observe that SWAG is able to substantially improve test perplexities over the SWA solution.
+
+Table 1: Validation and Test perplexities for NT-ASGD  SWA and SWAG on Penn Treebank and
+WikiText-2 datasets.
+
+Method
+NT-ASGD
+SWA
+SWAG
+
+PTB val
+
+PTB test WikiText-2 val WikiText-2 test
+
+61.2
+59.1
+58.6
+
+58.8
+56.7
+56.26
+
+68.7
+68.1
+67.2
+
+65.6
+65.0
+64.1
+
+5.5 Regression
+
+Finally  while the empirical focus of our paper is classiﬁcation calibration  we also compare to
+additional approximate BNN inference methods which perform well on smaller architectures  includ-
+ing deterministic variational inference (DVI) [47]  single-layer deep GPs (DGP) with expectation
+propagation [4]  SGLD [46]  and re-parameterization VI [26] on a set of UCI regression tasks. We
+report test log-likelihoods  RMSEs and test calibration results in Appendix Tables 11 and 12 where it
+is possible to see that SWAG is competitive with these methods. Additional details are in Appendix 7.
+6 Discussion
+In this paper we developed SWA-Gaussian (SWAG) for approximate Bayesian inference in deep
+learning. There has been a great desire to apply Bayesian methods in deep learning due to their
+theoretical properties and past success with small neural networks. We view SWAG as a step towards
+practical  scalable  and accurate Bayesian deep learning for large modern neural networks.
+A key geometric observation in this paper is that the posterior distribution over neural network
+parameters is close to Gaussian in the subspace spanned by the trajectory of SGD. Our work shows
+Bayesian model averaging within this subspace can improve predictions over SGD or SWA solutions.
+Furthermore  Gur-Ari et al. [13] argue that the SGD trajectory lies in the subspace spanned by the
+eigenvectors of the Hessian corresponding to the top eigenvalues  implying that the SGD trajectory
+subspace corresponds to directions of rapid change in predictions. In recent work  Izmailov et al. [19]
+show promising results from directly constructing subspaces for Bayesian inference.
+
+9
+
+Acknowledgements
+
+WM  PI  and AGW were supported by an Amazon Research Award  Facebook Research  NSF
+IIS-1563887  and NSF IIS-1910266. WM was additionally supported by an NSF Graduate Research
+Fellowship under Grant No. DGE-1650441. DV was supported by the Russian Science Foundation
+grant no.19-71-30020. We would like to thank Jacob Gardner and Polina Kirichenko for helpful
+discussions.
+
+References
+[1] Athiwaratkun  B.  Finzi  M.  Izmailov  P.  and Wilson  A. G. (2019). There are many consistent
+explanations for unlabeled data: why you should average. In International Conference on Learning
+Representations. arXiv: 1806.05594.
+
+[2] Blier  L. and Ollivier  Y. (2018). The Description Length of Deep Learning models. In Advances
+
+in Neural Information Processing Systems  page 11.
+
+[3] Blundell  C.  Cornebise  J.  Kavukcuoglu  K.  and Wierstra  D. (2015). Weight Uncertainty in
+
+Neural Networks. In International Conference on Machine Learning. arXiv: 1505.05424.
+
+[4] Bui  T.  Hernández-Lobato  D.  Hernandez-Lobato  J.  Li  Y.  and Turner  R. (2016). Deep
+gaussian processes for regression using approximate expectation propagation. In International
+Conference on Machine Learning  pages 1472–1481.
+
+[5] Chen  T.  Fox  E. B.  and Guestrin  C. (2014). Stochastic Gradient Hamiltonian Monte Carlo. In
+
+International Conference on Machine Learning. arXiv: 1402.4102.
+
+[6] Chen  X.  Lee  J. D.  Tong  X. T.  and Zhang  Y. (2016). Statistical Inference for Model Parameters
+
+in Stochastic Gradient Descent. arXiv: 1610.08637.
+
+[7] Coates  A.  Ng  A.  and Lee  H. (2011). An Analysis of Single-Layer Networks in Unsuper-
+vised Feature Learning. In Proceedings of the Fourteenth International Conference on Artiﬁcial
+Intelligence and Statistics  pages 215–223.
+
+[8] Dasgupta  S. and Hsu  D. (2007). On-Line Estimation with the Multivariate Gaussian Distribution.
+In Bshouty  N. H. and Gentile  C.  editors  Twentieth Annual Conference on Learning Theory. 
+volume 4539  pages 278–292  Berlin  Heidelberg. Springer Berlin Heidelberg.
+
+[9] Gal  Y. and Ghahramani  Z. (2016). Dropout as a Bayesian Approximation. In International
+
+Conference on Machine Learning.
+
+[10] Gal  Y.  Hron  J.  and Kendall  A. (2017). Concrete Dropout. In Advances in Neural Information
+
+Processing Systems. arXiv: 1705.07832.
+
+[11] Graves  A. (2011). Practical variational inference for neural networks. In Advances in neural
+
+information processing systems  pages 2348–2356.
+
+[12] Guo  C.  Pleiss  G.  Sun  Y.  and Weinberger  K. Q. (2017). On Calibration of Modern Neural
+
+Networks. In International Conference on Machine Learning. arXiv: 1706.04599.
+
+[13] Gur-Ari  G.  Roberts  D. A.  and Dyer  E. (2019). Gradient descent happens in a tiny subspace.
+
+[14] Halko  N.  Martinsson  P.-G.  and Tropp  J. A. (2011). Finding structure with randomness:
+Probabilistic algorithms for constructing approximate matrix decompositions. SIAM review 
+53(2):217–288.
+
+[15] He  K.  Zhang  X.  Ren  S.  and Sun  J. (2016). Deep Residual Learning for Image Recognition.
+
+In CVPR. arXiv: 1512.03385.
+
+[16] Hernández-Lobato  J. M. and Adams  R. (2015). Probabilistic Backpropagation for Scalable
+Learning of Bayesian Neural Networks. In Advances in Neural Information Processing Systems.
+
+[17] Huang  G.  Liu  Z.  van der Maaten  L.  and Weinberger  K. Q. (2017). Densely Connected
+
+Convolutional Networks. In CVPR. arXiv: 1608.06993.
+
+10
+
+[18] Ioffe  S. and Szegedy  C. (2015). Batch normalization: Accelerating deep network training by
+
+reducing internal covariate shift. arXiv preprint arXiv:1502.03167.
+
+[19] Izmailov  P.  Maddox  W. J.  Kirichenko  P.  Garipov  T.  Vetrov  D.  and Wilson  A. G. (2019).
+
+Subspace inference for bayesian deep learning. arXiv preprint arXiv:1907.07504.
+
+[20] Izmailov  P.  Podoprikhin  D.  Garipov  T.  Vetrov  D.  and Wilson  A. G. (2018). Averaging
+weights leads to wider optima and better generalization. Uncertainty in Artiﬁcial Intelligence
+(UAI).
+
+[21] Kendall  A. and Gal  Y. (2017). What Uncertainties Do We Need in Bayesian Deep Learning
+
+for Computer Vision? In Advances in Neural Information Processing Systems  Long Beach.
+
+[22] Keskar  N. S.  Mudigere  D.  Nocedal  J.  Smelyanskiy  M.  and Tang  P. T. P. (2017). On
+Large-Batch Training for Deep Learning: Generalization Gap and Sharp Minima. In International
+Conference on Learning Representations. arXiv: 1609.04836.
+
+[23] Khan  M. E.  Nielsen  D.  Tangkaratt  V.  Lin  W.  Gal  Y.  and Srivastava  A. (2018). Fast and
+Scalable Bayesian Deep Learning by Weight-Perturbation in Adam. In International Conference
+on Machine Learning. arXiv: 1806.04854.
+
+[24] Kingma  D. P.  Salimans  T.  and Welling  M. (2015a). Variational Dropout and the Local
+
+Reparameterization Trick. arXiv:1506.02557 [cs  stat]. arXiv: 1506.02557.
+
+[25] Kingma  D. P.  Salimans  T.  and Welling  M. (2015b). Variational dropout and the local
+reparameterization trick. In Advances in Neural Information Processing Systems  pages 2575–
+2583.
+
+[26] Kingma  D. P. and Welling  M. (2013). Auto-encoding variational bayes. In International
+
+Conference on Learning Representations.
+
+[27] Kirkpatrick  J.  Pascanu  R.  Rabinowitz  N.  Veness  J.  Desjardins  G.  Rusu  A. A.  Milan  K. 
+Quan  J.  Ramalho  T.  Grabska-Barwinska  A.  et al. (2017). Overcoming catastrophic forgetting
+in neural networks. Proceedings of the national academy of sciences  page 201611835.
+
+[28] Kuleshov  V.  Fenner  N.  and Ermon  S. (2018). Accurate Uncertainties for Deep Learning
+
+Using Calibrated Regression. In International Conference on Machine Learning  page 9.
+
+[29] Lakshminarayanan  B.  Pritzel  A.  and Blundell  C. (2017). Simple and Scalable Predictive
+Uncertainty Estimation using Deep Ensembles. In Advances in Neural Information Processing
+Systems.
+
+[30] Loshchilov  I. and Hutter  F. (2019). Decoupled Weight Decay Regularization. In International
+
+Conference on Learning Representations. arXiv: 1711.05101.
+
+[31] Louizos  C. and Welling  M. (2017). Multiplicative normalizing ﬂows for variational bayesian
+
+neural networks. In International Conference on Machine Learning.
+
+[32] MacKay  D. J. C. (1992a). Bayesian Interpolation. Neural Computation.
+
+[33] MacKay  D. J. C. (1992b). A Practical Bayesian Framework for Backpropagation Networks.
+
+Neural Computation  4(3):448–472.
+
+[34] Mandt  S.  Hoffman  M. D.  and Blei  D. M. (2017). Stochastic Gradient Descent as Approximate
+
+Bayesian Inference. JMLR  18:1–35.
+
+[35] Merity  S.  Keskar  N. S.  and Socher  R. (2017). Regularizing and optimizing lstm language
+
+models. arXiv preprint arXiv:1708.02182.
+
+[36] Molchanov  D.  Ashukha  A.  and Vetrov  D. (2017). Variational dropout sparsiﬁes deep neural
+
+networks. arXiv preprint arXiv:1701.05369.
+
+[37] Mukhoti  J. and Gal  Y. (2018). Evaluating Bayesian Deep Learning Methods for Semantic
+
+Segmentation.
+
+11
+
+[38] Neal  R. M. (1996). Bayesian Learning for Neural Networks  volume 118 of Lecture Notes in
+
+Statistics. Springer New York  New York  NY.
+
+[39] Niculescu-Mizil  A. and Caruana  R. (2005). Predicting good probabilities with supervised
+learning. In International Conference on Machine Learning  pages 625–632  Bonn  Germany.
+ACM Press.
+
+[40] Nikishin  E.  Izmailov  P.  Athiwaratkun  B.  Podoprikhin  D.  Garipov  T.  Shvechikov  P. 
+Vetrov  D.  and Wilson  A. G. (2018). Improving stability in deep reinforcement learning with
+weight averaging.
+
+[41] Polyak  B. T. and Juditsky  A. B. (1992). Acceleration of Stochastic Approximation by Averag-
+
+ing. SIAM Journal on Control and Optimization  30(4):838–855.
+
+[42] Ritter  H.  Botev  A.  and Barber  D. (2018a). Online Structured Laplace Approximations For
+Overcoming Catastrophic Forgetting. In Advances in Neural Information Processing Systems.
+arXiv: 1805.07810.
+
+[43] Ritter  H.  Botev  A.  and Barber  D. (2018b). A Scalable Laplace Approximation for Neural
+
+Networks. In International Conference on Learning Representations.
+
+[44] Ruppert  D. (1988). Efﬁcient Estimators from a Slowly Convergent Robbins-Munro Process.
+Technical Report 781  Cornell University  School of Operations Report and Industrial Engineering.
+
+[45] Russakovsky  O.  Deng  J.  Su  H.  Krause  J.  Satheesh  S.  Ma  S.  Huang  Z.  Karpathy  A. 
+Khosla  A.  Bernstein  M.  Berg  A. C.  and Fei-Fei  L. (2015). ImageNet Large Scale Visual
+Recognition Challenge. IJCV  115(3):211–252. arXiv: 1409.0575.
+
+[46] Welling  M. and Teh  Y. W. (2011). Bayesian learning via stochastic gradient langevin dynamics.
+In Proceedings of the 28th international conference on machine learning (ICML-11)  pages
+681–688.
+
+[47] Wu  A.  Nowozin  S.  Meeds  E.  Turner  R. E.  Hernández-Lobato  J. M.  and Gaunt  A. L.
+(2019). Fixing variational bayes: Deterministic variational inference for bayesian neural networks.
+In Inernational Conference on Learning Representations. arXiv preprint arXiv:1810.03958.
+
+[48] Yang  G.  Zhang  T.  Kirichenko  P.  Bai  J.  Wilson  A. G.  and De Sa  C. (2019). Swalp:
+Stochastic weight averaging in low precision training. In International Conference on Machine
+Learning  pages 7015–7024.
+
+[49] Yazici  Y.  Foo  C.-S.  Winkler  S.  Yap  K.-H.  Piliouras  G.  and Chandrasekhar  V. (2019). The
+Unusual Effectiveness of Averaging in GAN Training. In International Conference on Learning
+Representations. arXiv: 1806.04498.
+
+[50] Zhang  G.  Sun  S.  Duvenaud  D.  and Grosse  R. (2017). Noisy Natural Gradient as Variational
+
+Inference. arXiv:1712.02390 [cs  stat]. arXiv: 1712.02390.
+
+12
+
+,Wesley Maddox
+Pavel Izmailov
+Timur Garipov
+Dmitry Vetrov
+Andrew Gordon Wilson

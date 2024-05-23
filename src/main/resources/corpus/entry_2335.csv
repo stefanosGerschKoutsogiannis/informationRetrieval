@@ -1,0 +1,812 @@
+2019,Gossip-based Actor-Learner Architectures for Deep Reinforcement Learning,Multi-simulator training has contributed to the recent success of Deep Reinforcement Learning (Deep RL) by stabilizing learning and allowing for higher training throughputs. In this work  we propose Gossip-based Actor-Learner Architectures (GALA) where several actor-learners (such as A2C agents) are organized in a peer-to-peer communication topology  and exchange information through asynchronous gossip in order to take advantage of a large number of distributed simulators. We prove that GALA agents remain within an epsilon-ball of one-another during training when using loosely coupled asynchronous communication. By reducing the amount of synchronization between agents  GALA is more computationally efficient and scalable compared to A2C  its fully-synchronous counterpart. GALA also outperforms A2C  being more robust and sample efficient. We show that we can run several loosely coupled GALA agents in parallel on a single GPU and achieve significantly higher hardware utilization and frame-rates than vanilla A2C at comparable power draws.,Gossip-based Actor-Learner Architectures for Deep
+
+Reinforcement Learning
+
+Department of Electrical and Computer Engineering
+
+Mahmoud Assran
+
+Facebook AI Research &
+
+McGill University
+
+Joshua Romoff
+
+Facebook AI Research &
+
+Department of Computer Science
+
+McGill University
+
+mahmoud.assran@mail.mcgill.ca
+
+joshua.romoff@mail.mcgill.ca
+
+Nicolas Ballas
+
+Facebook AI Research
+
+ballasn@fb.com
+
+Joelle Pineau
+
+Facebook AI Research
+
+jpineau@fb.com
+
+Michael Rabbat
+
+Facebook AI Research
+mikerabbat@fb.com
+
+Abstract
+
+Multi-simulator training has contributed to the recent success of Deep Reinforce-
+ment Learning by stabilizing learning and allowing for higher training throughputs.
+We propose Gossip-based Actor-Learner Architectures (GALA) where several actor-
+learners (such as A2C agents) are organized in a peer-to-peer communication
+topology  and exchange information through asynchronous gossip in order to take
+advantage of a large number of distributed simulators. We prove that GALA agents
+remain within an ✏-ball of one-another during training when using loosely cou-
+pled asynchronous communication. By reducing the amount of synchronization
+between agents  GALA is more computationally efﬁcient and scalable compared
+to A2C  its fully-synchronous counterpart. GALA also outperforms A3C  being
+more robust and sample efﬁcient. We show that we can run several loosely coupled
+GALA agents in parallel on a single GPU and achieve signiﬁcantly higher hardware
+utilization and frame-rates than vanilla A2C at comparable power draws.
+
+1
+
+Introduction
+
+Deep Reinforcement Learning (Deep RL) agents have reached superhuman performance in a few
+domains [Silver et al.  2016  2018  Mnih et al.  2015  Vinyals et al.  2019]  but this is typically at
+signiﬁcant computational expense [Tian et al.  2019]. To both reduce running time and stabilize
+training  current approaches rely on distributed computation wherein data is sampled from many
+parallel simulators distributed over parallel devices [Espeholt et al.  2018  Mnih et al.  2016]. Despite
+the growing ubiquity of multi-simulator training  scaling Deep RL algorithms to a large number of
+simulators remains a challenging task.
+On-policy approaches train a policy by using samples generated from that same policy  in which case
+data sampling (acting) is entangled with the training procedure (learning). To perform distributed
+training  these approaches usually introduce multiple learners with a shared policy  and multiple
+actors (each with its own simulator) associated to each learner. The shared policy can either be
+updated in a synchronous fashion (e.g.  learners synchronize gradients before each optimization
+step [Stooke and Abbeel  2018])  or in an asynchronous fashion [Mnih et al.  2016]. Both approaches
+have drawbacks: synchronous approaches suffer from straggler effects (bottlenecked by the slowest
+individual simulator)  and therefore may not exhibit strong scaling efﬁciency; asynchronous methods
+are robust to stragglers  but prone to gradient staleness  and may become unstable with a large number
+of actors [Clemente et al.  2017].
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+Alternatively  off-policy approaches typically train a policy by sampling from a replay buffer of
+past transitions [Mnih et al.  2015]. Training off-policy allows for disentangling data-generation
+from learning  which can greatly increase computational efﬁciency when training with many parallel
+actors [Espeholt et al.  2018  Horgan et al.  2018  Kapturowski et al.  2019  Gruslys et al.  2018].
+Generally  off-policy updates need to be handled with care as the sampled transitions may not conform
+to the current policy and consequently result in unstable training [Fujimoto et al.  2018].
+We propose Gossip-based Actor-Learner Architectures (GALA)  which aim to retain the robustness
+of synchronous on-policy approaches  while improving both their computational efﬁciency and
+scalability. GALA leverages multiple agents  where each agent is composed of one learner and
+possibly multiple actors/simulators. Unlike classical on-policy approaches  GALA does not require
+that each agent share the same policy  but rather it inherently enforces (through gossip) that each
+agent’s policy remain ✏-close to all others throughout training. Relaxing this constraint allows us to
+reduce the synchronization needed between learners  thereby improving the algorithm’s computational
+efﬁciency.
+Instead of computing an exact average between all the learners after a local optimization step  gossip-
+based approaches compute an approximate average using loosely coupled and possibly asynchronous
+communication (see Nedi´c et al. [2018] and references therein). While this approximation implicitly
+injects some noise in the aggregate parameters  we prove that this is in fact a principled approach as the
+learners’ policies stay within an ✏-ball of one-another (even with non-linear function approximation) 
+the size of which is directly proportional to the spectral-radius of the agent communication topology
+and their learning rates.
+As a practical algorithm  we propose GALA-A2C  an algorithm that combines gossip with A2C agents.
+We compare our approach on six Atari games [Machado et al.  2018] following Stooke and Abbeel
+[2018] with vanilla A2C  A3C and the IMPALA off-policy method [Dhariwal et al.  2017  Mnih et al. 
+2016  Espeholt et al.  2018]. Our main empirical ﬁndings are:
+
+1. Following the theory  GALA-A2C is empirically stable. Moreover  we observe that GALA
+can be more stable than A2C when using a large number of simulators  suggesting that the
+noise introduced by gossiping can have a beneﬁcial effect.
+
+2. GALA-A2C has similar sample efﬁciency to A2C and greatly improves its computational
+
+efﬁciency and scalability.
+
+3. GALA-A2C achieves signiﬁcantly higher hardware utilization and frame-rates than vanilla
+
+A2C at comparable power draws  when using a GPU.
+
+4. GALA-A2C is competitive in term of performance relative to A3C and IMPALA.
+
+Perhaps most remarkably  our empirical ﬁndings for GALA-A2C are obtained by simply using the
+default hyper-parameters from A2C. Our implementation of GALA-A2C is publicly available at
+https://github.com/facebookresearch/gala.
+
+2 Technical Background
+
+Reinforcement Learning. We consider the standard Reinforcement Learning setting [Sutton and
+Barto  1998]  where the agent’s objective is to maximize the expected value from each state V (s) =
+
+E⇥P1i=0 irt+i|st = s⇤   is the discount factor which controls the bias towards nearby rewards. To
+maximize this quantity  the agent chooses at each discrete time step t an action at in the current state
+st based on its policy ⇡(at|st) and transitions to the next state st+1 receiving reward rt based on the
+environment dynamics.
+Temporal difference (TD) learning [Sutton  1984] aims at learning an approximation of the expected
+return parameterized by ✓  i.e.  the value function V (s; ✓)  by iteratively updating its parameters via
+gradient descent:
+
+(1)
+where GN
+i=0 irt+i + N V (st+n; ✓t) is the N-step return. Actor-critic methods [Sutton
+et al.  2000  Mnih et al.  2016] simultaneously learn both a parameterized policy ⇡(at|st; !) with
+parameters ! and a critic V (st; ✓). They do so by training a value function via the TD error deﬁned
+
+t =PN1
+
+r✓GN
+
+t  V (st; ✓)2
+
+2
+
+in (1) and then proceed to optimize the policy using the policy gradient (PG) with the value function
+as a baseline:
+
+r! ( log ⇡(at|st; !)At)  
+
+(2)
+where At = GN
+t  V (st; ✓t) is the advantage function  which represents the relative value the current
+action has over the average. In order to both speed up training time and decorrelate observations  Mnih
+et al. [2016] collect samples and perform updates with several asynchronous actor-learners. Speciﬁ-
+cally  each worker i 2{ 1  2  ..  W}  where W is the number of parallel workers  collects samples
+according to its current version of the policy weights !i  and computes updates via the standard
+actor-critic gradient deﬁned in (2)  with an additional entropy penalty term that prevents premature
+convergence to deterministic policies:
+
+r!i  log ⇡(at|st; !i)At  ⌘Xa
+
+⇡(a|st; !i) log ⇡(a|st; !i)! .
+
+The workers then perform HOGWILD! [Recht et al.  2011] style updates (asynchronous writes)
+to a shared set of master weights before synchronizing their weights with the master’s. More
+recently  Dhariwal et al. [2017] removed the asynchrony from A3C  referred to as A2C  by instead
+synchronously collecting transitions in parallel environments i 2{ 1  2  ..  W} and then performing a
+large batched update:
+
+(3)
+
+(4)
+
+r!" 1
+
+W
+
+WXi=1  log ⇡(ai
+
+t; !)Ai
+
+t|si
+
+t  ⌘Xa
+
+⇡(a|si
+
+t; !) log ⇡(a|si
+
+t; !)!# .
+
+i
+
+i=1 x(0)
+
+i
+
+j=1 p(k)
+
+i j x(k)
+
+nPn
+
+Gossip algorithms. Gossip algorithms are used to solve the distributed averaging problem. Suppose
+there are n agents connected in a peer-to-peer graph topology  each with parameter vector x(0)
+i 2 Rd.
+Let X (0) 2 Rn⇥d denote the row-wise concatenation of these vectors. The objective is to iteratively
+across all agents. Typical gossip iterations have the form
+compute the average vector 1
+X (k+1) = P (k)X (k)  where P (k) 2 Rn⇥n is referred to as the mixing matrix and deﬁnes the
+communication topology. This corresponds to the update x(k+1)
+for an agent vi.
+At an iteration k  an agent vi only needs to receive messages from other agents vj for which p(k)
+i j 6= 0 
+so sparser matrices P (k) correspond to less communication and less synchronization between agents.
+The mixing matrices P (k) are designed to be row stochastic (each entry is greater than or equal to
+k=0 P (k) = 1⇡>  where ⇡ is the ergodic limit
+of the Markov chain deﬁned by P (k) and 1 is a vector with all entries equal to 1 [Seneta  1981].1
+Consequently  the gossip iterations converge to a limit X (1) = 1(⇡>X (0)); meaning the value
+at an agent i converges to x(1)
+. In particular  if the matrices P (k) are symmetric
+and doubly-stochastic (each row and each column must sum to 1)  we obtain an algorithm such that
+⇡j = 1/n for all j  and therefore x(1)
+converges to the average of the agents’
+initial vectors.
+For the particular case of GALA  we only require the matrices P (k) to be row stochastic in order to
+show the ✏-ball guarantees.
+
+zero  and each row sums to 1) so that limK!1QK
+
+i = 1/nPn
+
+i =Pn
+
+=Pn
+
+j=1 x(0)
+
+j=1 ⇡jx(0)
+
+j
+
+j
+
+j
+
+3 Gossip-based Actor-Learner Architectures
+
+We consider the distributed RL setting where n agents (each composed of a single learner and several
+actors) collaborate to maximize the expected return V (s). Each agent vi has a parameterized policy
+network ⇡(at|st; !i) and value function V (st; ✓i). Let xi = (!i ✓ i) denote agent vi’s complete set
+of trainable parameters. We consider the speciﬁc case where each vi corresponds to a single A2C
+agent  and the agents are conﬁgured in a directed and peer-to-peer communication topology deﬁned
+by the mixing matrix P 2 Rn⇥n.
+In order to maximize the expected reward  each GALA-A2C agent alternates between one local policy-
+gradient and TD update  and one iteration of asynchronous gossip with its peers. Pseudocode is
+
+1Assuming that information from every agent eventually reaches all other agents
+
+3
+
+Algorithm 1 Gossip-based Actor-Learner Architectures for agent vi using A2C
+Require: Initialize trainable policy and critic parameters xi = (!i ✓ i).
+1: for t = 0  1  2  . . . do
+2:
+3:
+4:
+5:
+6:
+7:
+8:
+9: end for
+1 We set the non-zero mixing weights for agent vi to pi j =
+
+Take N actions {at} according to ⇡!i and store transitions {(st  at.rt  st+1)}
+Compute returns GN
+Perform A2C optimization step on xi using TD in (1) and batched policy-gradient in (4)
+Broadcast (non-blocking) new parameters xi to all out-peers in N out
+if Receive buffer contains a message mj from each in-peer vj in N in
+end if
+
+t =PN1
+(xi +Pj mj)1
+
+i=0 irt+i + N V (st+n; ✓i) and advantages At = GN
+
+xi 1
+1+|N in
+i |
+
+then
+
+.
+
+1
+
+i
+
+i
+
+1+|N in
+i |
+
+t  V (st; ✓i)
+
+. Average parameters with messages
+
+i
+
+i
+
+provided in Algorithm 1  where N in
+:= {vj | pi j > 0} denotes the set of agents that send messages
+to agent vi (in-peers)  and N out
+:= {vj | pj i > 0} the set of agents that vi sends messages to (out-
+peers). During the gossip phase  agents broadcast their parameters to their out-peers  asynchronously
+(i.e.  don’t wait for messages to reach their destination)  and update their own parameters via a convex
+combination of all received messages. Agents broadcast new messages when old transmissions are
+completed and aggregate all received messages once they have received a message from each in-peer.
+Note that the GALA agents use non-blocking communication  and therefore operate asynchronously.
+Local iteration counters may be out-of-sync  and physical message delays may result in agents
+incorporating outdated messages from their peers. One can algorithmically enforce an upper bound
+on the message staleness by having the agent block and wait for communication to complete if more
+than ⌧  0 local iterations have passed since the agent last received a message from its in-peers.
+Theoretical ✏-ball guarantees: Next we provide the ✏-ball theoretical guarantees for the asyn-
+chronous GALA agents  proofs of which can be found in Appendix B. Let k 2 N denote the global
+iteration counter  which increments whenever any agent (or subset of agents) completes an iteration of
+the loop deﬁned in Algorithm 1. We deﬁne x(k)
+i 2 Rd as the value of agent vi’s trainable parameters
+at iteration k  and X (k) 2 Rn⇥d as the row-concatenation of these parameters.
+For our theoretical guarantees we let the communication topologies be directed and time-varying
+graphs  and we do not make any assumptions about the base GALA learners. In particular  let the
+mapping Ti : x(k)
+i 2 Rd characterize agent vi’s local training dynamics (i.e. 
+agent vi optimizes its parameters by computing x(k)
+))  where ↵> 0 is a reference learning
+rate  and g(k)
+i 2 Rd can be any update vector. Lastly  let G(k) 2 Rn⇥d denote the row-concatenation
+of these update vectors.
+Proposition 1. For all k  0  it holds that
+
+i 2 Rd 7! x(k)
+
+i T i(x(k)
+
+i  ↵g(k)
+
+i
+
+X (k+1)  X
+
+(k+1)  ↵
+
+kXs=0
+
+k+1sG(s)  
+
+(k+1) := 1n1T
+
+n X (k+1) denotes the average of the learners’ parameters at iteration k + 1 
+where X
+and  2 [0  1] is related to the joint spectral radius of the graph sequence deﬁning the communication
+topology at each iteration.
+
+n
+
+Proposition 1 shows that the distance of a learners’ parameters from consensus is bounded at each
+iteration. However  without additional assumptions on the communication topology  the constant 
+may equal 1  and the bound in Proposition 1 can be trivial. In the following proposition  we make
+sufﬁcient assumptions with respect to the graph sequence that ensure < 1.
+Proposition 2. Suppose there exists a ﬁnite integer B  0 such that the (potentially time-varying)
+graph sequence is B-strongly connected  and suppose that the upper bound ⌧ on the message delays
+in Algorithm 1 is ﬁnite. If learners run Algorithm 1 from iteration 0 to k + 1  where k  ⌧ + B  then
+it holds that
+
+X (k+1)  X
+
+(k+1) 
+
+4
+
+↵ ˜L
+1  
+
+ 
+
+where < 1 is related to the joint spectral radius of the graph sequence  ↵ is the reference learning
+rate  ˜ :=  ⌧ +B
+local optimization updates during training.
+
+⌧ +B+1   and L := sups=1 2 ...G(s) denotes an upper bound on the magnitude of the
+
+Proposition 2 states that the agents’ parameters are guaranteed to reside within an ✏-ball of their
+average at all iterations k  ⌧ + B. The size of this ball is proportional to the reference learning-rate 
+the spectral radius of the graph topology  and the upper bound on the magnitude of the local gradient
+updates. One may also be able to control the constant L in practice since Deep RL agents are typically
+trained with some form of gradient clipping.
+
+4 Related work
+
+Several recent works have approached scaling up RL by using parallel environments. Mnih et al.
+[2016] used parallel asynchronous agents to perform HOGWILD! [Recht et al.  2011] style updates
+to a shared set of parameters. Dhariwal et al. [2017] proposed A2C  which maintains the parallel
+data collection  but performs updates synchronously  and found this to be more stable empirically.
+While A3C was originally designed as a purely CPU-based method  Babaeizadeh et al. [2017]
+proposed GA3C  a GPU implementation of the algorithm. Stooke and Abbeel [2018] also scaled up
+various RL algorithms by using signiﬁcantly larger batch sizes and distributing computation onto
+several GPUs. Differently from those works  we propose the use of Gossip Algorithms to aggregate
+information between different agents and thus simulators. Nair et al. [2015]  Horgan et al. [2018] 
+Espeholt et al. [2018]  Kapturowski et al. [2019]  Gruslys et al. [2018] use parallel environments as
+well  but disentangle the data collection (actors) from the network updates (learners). This provides
+several computational beneﬁts  including better hardware utilization and reduced straggler effects. By
+disentangling acting from learning these algorithms must use off-policy methods to handle learning
+from data that is not directly generated from the current policy (e.g.  slightly older policies).
+Gossip-based approaches have been extensively studied in the control-systems literature as a way
+to aggregate information for distributed optimization algorithms [Nedi´c et al.  2018]. In particular 
+recent works have proposed to combine gossip algorithms with stochastic gradient descent in order to
+train Deep Neural Networks [Lian et al.  2018  2017  Assran et al.  2019]  but unlike our work  focus
+only on the supervised classiﬁcation paradigm.
+
+5 Experiments
+
+We evaluate GALA for training Deep RL agents on Atari-2600 games [Machado et al.  2018]. We
+focus on the same six games studied in Stooke and Abbeel [2018]. Unless otherwise-stated  all
+learning curves show averages over 10 random seeds with 95% conﬁdence intervals shaded in. We
+follow the reproducibility checklist [Pineau  2018]  see Appendix A for details.
+We compare A2C [Dhariwal et al.  2017]  A3C [Mnih et al.  2016]  IMPALA [Espeholt et al.  2018] 
+and GALA-A2C. All methods are implemented in PyTorch [Paszke et al.  2017]. While A3C was
+originally proposed with CPU-based agents with 1-simulator per agent  Stooke and Abbeel [2018]
+propose a large-batch variant in which each agent manages 16-simulators and performs batched
+inference on a GPU. We found this large-batch variant to be more stable and computationally
+efﬁcient (cf. Appendix C.1). We use the Stooke and Abbeel [2018] variant of A3C to provide a more
+competitive baseline. We parallelize A2C training via the canonical approach outlined in Stooke and
+Abbeel [2018]  whereby individual A2C agents (running on potentially different devices)  all average
+their gradients together before each update using the ALLREDUCE primitive.2 For A2C and A3C we
+use the hyper-parameters suggested in Stooke and Abbeel [2018]. For IMPALA we use the hyper-
+parameters suggested in Espeholt et al. [2018]. For GALA-A2C we use the same hyper-parameters as
+the original (non-gossip-based) method. All GALA agents are conﬁgured in a directed ring graph. All
+implementation details are described in Appendix C. For the IMPALA baseline  we use a prerelease of
+TorchBeast [Küttler et al.  2019] available at https://github.com/facebookresearch/torchbeast.
+
+2This is mathematically equivalent to a single A2C agent with multiple simulators (e.g.  n agents  with b
+
+simulators each  are equivalent to a single agent with nb simulators).
+
+5
+
+Table 1: Across all training seeds we select the best ﬁnal policy produced by each method at the end
+of training and evaluate it over 10 evaluation episodes (up to 30 no-ops at the start of the episode).
+Evaluation actions generated from arg maxa ⇡(a|s). The table depicts the mean and standard error
+across these 10 evaluation episodes.
+
+IMPALA1
+
+IMPALA
+A3C
+A2C
+A2C
+GALA-A2C
+GALA-A2C
+
+BeamRider
+
+Steps
+50M 8220
+40M 7118 ±2536
+40M 5674 ±752
+25M 8755 ±811
+40M 9829 ±1355
+25M 9500 ±1020
+40M 10188 ±1316
+
+Breakout
+641
+127 ±65
+414 ±56
+419 ±3
+495 ±57
+690 ±72
+690 ±72
+
+Pong
+21
+21 ±0
+21 ±0
+21 ±0
+21 ±0
+21 ±0
+21 ±0
+
+Qbert
+
+18902
+7878 ±2573
+14923 ±460
+16805 ±172
+19928 ±99
+18810 ±37
+20150 ±28
+
+Seaquest
+1717
+462 ±2
+1840 ±0
+1850 ±5
+1894 ±6
+1874 ±4
+1892 ±6
+
+SpaceInvaders
+1727
+4071 ±393
+2232 ±302
+2846 ±22
+3021 ±36
+2726 ±189
+3074 ±69
+
+1 Espeholt et al. [2018] results using shallow network (identical to the network used in our experiments).
+
+Convergence and stability: We begin by empirically studying the convergence and stability prop-
+erties of A2C and GALA-A2C. Figure 1a depicts the percentage of successful runs (out of 10 trials) of
+standard policy-gradient A2C when we sweep the number of simulators across six different games.
+We deﬁne a run as successful if it achieves better than 50% of nominal 16-simulator A2C scores.
+When using A2C  we observe an identical trend across all games in which the number of successful
+runs decreases signiﬁcantly as we increase the number of simulators. Note that the A2C batch size is
+proportional to the number of simulators  and when increasing the number of simulators we adjust
+the learning rate following the recommendation in Stooke and Abbeel [2018].
+Figure 1a also depicts the percentage of successful runs when A2C agents communicate their
+parameters using gossip algorithms (GALA-A2C). In every simulator sweep across the six games
+(600 runs)  the gossip-based architecture increases or maintains the percentage of successful runs
+relative to vanilla A2C  when using identical hyper-parameters. We hypothesize that exercising
+slightly different policies at each learner using gossip-algorithms can provide enough decorrelation
+in gradients to improve learning stability. We revisit this point later on (cf. Figure 3b). We note
+that Stooke and Abbeel [2018] ﬁnd that stepping through a random number of uniform random
+actions at the start of training can partially mitigate this stability issue. We did not use this random
+start action mitigation in the reported experiments.
+While Figure 1a shows that GALA can be used to stabilize multi-simulator A2C and increase the
+number of successfull runs  it does not directly say anything about the ﬁnal performance of the
+learned models. Figures 1b and 1c show the rewards plotted against the number of environment steps
+when training with 64 simulators. Using gossip-based architectures stabilizes and maintains the peak
+performance and sample efﬁciency of A2C across all six games (Figure 1b)  and also increases the
+number of convergent runs (Figure 1c).
+Figures 1d and 1e compare the wall-clock time convergence of GALA-A2C to vanilla A2C. Not only
+is GALA-A2C more stable than A2C  but it also runs at a higher frame-rate by mitigating straggler
+effects. In particular  since GALA-A2C learners do not need to synchronize their gradients  each
+learner is free to run at its own rate without being hampered by variance in peer stepping times.
+
+Comparison with distributed Deep RL approaches: Figure 1 also compares GALA-A2C to state-
+of-the-art methods like IMPALA and A3C.3 In each game  the GALA-A2C learners exhibited good
+sample efﬁciency and computational efﬁciency  and achieved highly competitive ﬁnal game scores.
+Next we evaluate the ﬁnal policies produced by each method at the end of training. After training
+across 10 different seeds  we are left with 10 distinct policies per method. We select the best ﬁnal
+policy and evaluate it over 10 evaluation episodes  with actions generated from arg maxa ⇡(a|s).
+In almost every single game  the GALA-A2C learners achieved the highest evaluation scores of any
+method. Notably  the GALA-A2C learners that were trained for 25M steps achieved (and in most
+cases surpassed) the scores for IMPALA learners trained for 50M steps [Espeholt et al.  2018].
+
+3We report results for both the TorchBeast implementation of IMPALA  and from Table C.1 from Espeholt
+
+et al. [2018]
+
+6
+
+(a) Simulator sweep: Percentage of convergent runs out of 10 trials.
+
+(b) Sample complexity: Best 3 runs for each method.
+
+(c) Sample complexity: Average across 10 runs.
+
+(d) Computational complexity: Best 3 runs for each method.
+
+(e) Computational complexity: Average across 10 runs.
+
+(f) Energy efﬁciency: Best 3 runs for each method.
+
+(g) Energy efﬁciency: Average across 10 runs.
+
+Figure 1: (a) GALA increases or maintains the percentage of convergent runs relative to A2C. (b)-
+(c) GALA maintains the best performance of A2C while being more robust. (d)-(e) GALA achieves
+competitive scores in each game and in the shortest amount of time. (f)-(g) GALA achieves competitive
+game scores while being energy efﬁcient.
+
+7
+
+(a)
+
+(b)
+
+Figure 2: (a) The radius of the ✏-ball within which the agents’ parameters reside during training.
+The theoretical upper bound in Proposition 1 is explicitly calculated and compared to the true
+empirical quantity. The bound in Proposition 1 is remarkably tight. (b) Average correlation between
+agents’ gradients during training (darker colors depict low correlation and lighter colors depict higher
+correlations). Neighbours in the GALA-A2C topology are annotated with the label “peer.” The
+GALA-A2C heatmap is generally much darker than the A2C heatmap  indicating that GALA-A2C
+agents produce more diverse gradients with signiﬁcantly less correlation.
+
+(a)
+
+(b)
+
+Figure 3: Comparing GALA-A2C hardware utilization to that of A2C when using one NVIDIA V100
+GPU and 48 Intel CPUs. (a) Samples of instantaneous GPU utilization and power draw plotted
+against each other. Bubble sizes indicate frame-rates obtained by the corresponding algorithms;
+larger bubbles depict higher frame-rates. GALA-A2C achieves higher hardware utilization than
+A2C at comparable power draws. This translates to much higher frame-rates and increased energy
+efﬁciency. (b) Hardware utilization/energy efﬁciency vs. number of simulators. GALA-A2C beneﬁts
+from increased parallelism and achieves a 10-fold improvement in GPU utilization over A2C.
+
+Effects of gossip: To better understand the stabilizing effects of GALA  we evaluate the diversity
+in learner policies during training. Figure 2a shows the distance of the agents’ parameters from
+consensus throughout training. The theoretical upper bound in Proposition 1 is also explicitly
+calculated and plotted in Figure 2a. As expected  the learner policies remain within an ✏-ball of
+one-another in weight-space  and this size of this ball is remarkably well predicted by Proposition 1.
+Next  we measure the diversity in the agents’ gradients. We hypothesize that the ✏-diversity in the
+policies predicted by Proposition 1  and empirically observed in Figure 2a  may lead to less correlation
+in the agents’ gradients. The categorical heatmap in Figure 2b shows the pair-wise cosine-similarity
+between agents’ gradients throughout training  computed after every 500 local environment steps 
+and averaged over the ﬁrst 10M training steps. Dark colors depict low correlations and light colors
+depict high correlations. We observe that GALA-A2C agents exhibited less gradient correlations than
+A2C agents. Interestingly  we also observe that GALA-A2C agents’ gradients are more correlated with
+those of peers that they explicitly communicate with (graph neighbours)  and less correlated with
+those of agents that they do not explicitly communicate with.
+
+Computational performance: Figure 3 showcases the hardware utilization and energy efﬁciency
+of GALA-A2C compared to A2C as we increase the number of simulators. Speciﬁcally  Figure 3a
+shows that GALA-A2C achieves signiﬁcantly higher hardware utilization than vanilla A2C at com-
+parable power draws. This translates to much higher frame-rates and increased energy efﬁciency.
+Figure 3b shows that GALA-A2C is also better able to leverage increased parallelism and achieves
+a 10-fold improvement in GPU utilization over vanilla A2C. Once again  the improved hardware
+utilization and frame-rates translate to increased energy efﬁciency. In particular  GALA-A2C steps
+
+8
+
+through roughly 20 thousand more frames per Kilojoule than vanilla A2C. Figures 1f and 1g compare
+game scores as a function of energy utilization in Kilojoules. GALA-A2C is distinctly more energy
+efﬁcient than the other methods  achieving higher game scores with less energy utilization.
+
+6 Conclusion
+
+We propose Gossip-based Actor-Learner Architectures (GALA) for accelerating Deep Reinforcement
+Learning by leveraging parallel actor-learners that exchange information through asynchronous
+gossip. We prove that the GALA agents’ policies are guaranteed to remain within an ✏-ball during
+training  and verify this empirically as well. We evaluated our approach on six Atari games  and ﬁnd
+that GALA-A2C improves the computational efﬁciency of A2C  while also providing extra stability
+and robustness by decorrelating gradients. GALA-A2C also achieves signiﬁcantly higher hardware
+utilization than vanilla A2C at comparable power draws  and is competitive with state-of-the-art
+methods like A3C and IMPALA.
+
+Acknowledgments
+We would like to thank the authors of TorchBeast for providing their pytorch implementation of
+IMPALA.
+
+References
+Mahmoud Assran. Asynchronous subgradient push: Fast  robust  and scalable multi-agent optimiza-
+
+tion. Master’s thesis  McGill University  2018.
+
+Mahmoud Assran and Michael Rabbat. Asynchronous subgradient-push.
+
+arXiv:1803.08950  2018.
+
+arXiv preprint
+
+Mahmoud Assran  Nicolas Loizou  Nicolas Ballas  and Michael Rabbat. Stochastic gradient push for
+distributed deep learning. Proceedings of the 36th International Conference on Machine Learning 
+97:344–353  2019.
+
+Mohammad Babaeizadeh  Iuri Frosio  Stephen Tyree  Jason Clemons  and Jan Kautz. Reinforce-
+ment learning through asynchronous advantage actor-critic on a gpu. In Proceedings of the 5th
+International Conference on Learning Representations  2017.
+
+Vincent D Blondel  Julien M Hendrickx  Alex Olshevsky  and John N Tsitsiklis. Convergence in
+multiagent coordination  consensus  and ﬂocking. Proceedings of the 44th IEEE Conference on
+Decision and Control  pages 2996–3000  2005.
+
+Alfredo V Clemente  Humberto N Castejón  and Arjun Chandra. Efﬁcient parallel methods for deep
+
+reinforcement learning. arXiv preprint arXiv:1705.04862  2017.
+
+Prafulla Dhariwal  Christopher Hesse  Oleg Klimov  Alex Nichol  Matthias Plappert  Alec Radford 
+
+John Schulman  Szymon Sidor  Yuhuai Wu  and Peter Zhokhov. Openai baselines  2017.
+
+Lasse Espeholt  Hubert Soyer  Remi Munos  Karen Simonyan  Volodymir Mnih  Tom Ward  Yotam
+Doron  Vlad Firoiu  Tim Harley  Iain Dunning  et al. Impala: Scalable distributed deep-rl with
+importance weighted actor-learner architectures. Proceedings of the 35th International Conference
+on Machine Learning  80:1407–1416  2018.
+
+Scott Fujimoto  Herke van Hoof  and David Meger. Addressing function approximation error in
+actor-critic methods. Proceedings of the 35th International Conference on Machine Learning  80:
+1582–1591  2018.
+
+Audrunas Gruslys  Mohammad Gheshlaghi Azar  Marc G. Bellemare  and Rémi Munos. The reactor:
+A sample-efﬁcient actor-critic architecture. Proceedings of the 6th International Conference on
+Learning Representations  2018.
+
+Christoforos N Hadjicostis and Themistoklis Charalambous. Average consensus in the presence of
+delays in directed graph topologies. IEEE Transactions on Automatic Control  59(3):763–768 
+2013.
+
+Dan Horgan  John Quan  David Budden  Gabriel Barth-Maron  Matteo Hessel  Hado van Hasselt 
+and David Silver. Distributed prioritized experience replay. Proceedings of the 6th International
+Conference on Learning Representations  2018.
+
+9
+
+Steven Kapturowski  Georg Ostrovski  Will Dabney  John Quan  and Remi Munos. Recurrent
+experience replay in distributed reinforcement learning. Proceedings of the 7th International
+Conference on Learning Representations  2019.
+
+Heinrich Küttler  Nantas Nardelli  Thibaut Lavril  Marco Selvatici  Viswanath Sivakumar  Tim
+Rocktäschel  and Edward Grefenstette. Torchbeast: A pytorch platform for distributed rl. arXiv
+preprint arXiv:1910.03552  2019.
+
+Xiangru Lian  Ce Zhang  Huan Zhang  Cho-Jui Hsieh  Wei Zhang  and Ji Liu. Can decentralized
+algorithms outperform centralized algorithms? a case study for decentralized parallel stochastic
+gradient descent. Advances in Neural Information Processing Systems  pages 5330–5340  2017.
+Xiangru Lian  Wei Zhang  Ce Zhang  and Ji Liu. Asynchronous decentralized parallel stochastic
+gradient descent. Proceedings of the 35th International Conference on Machine Learning  80:
+3043–3052  2018.
+
+Marlos C. Machado  Marc G. Bellemare  Erik Talvitie  Joel Veness  Matthew J. Hausknecht  and
+Michael Bowling. Revisiting the arcade learning environment: Evaluation protocols and open
+problems for general agents. Proceedings of the 27th International Joint Conference on Artiﬁcial
+Intelligence  pages 5573–5577  2018.
+
+Volodymyr Mnih  Koray Kavukcuoglu  David Silver  Andrei A Rusu  Joel Veness  Marc G Bellemare 
+Alex Graves  Martin Riedmiller  Andreas K Fidjeland  Georg Ostrovski  et al. Human-level control
+through deep reinforcement learning. Nature  518(7540):529  2015.
+
+Volodymyr Mnih  Adria Puigdomenech Badia  Mehdi Mirza  Alex Graves  Timothy Lillicrap  Tim
+Harley  David Silver  and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement
+learning. Proceedings of the 33rd International conference on machine learning  48:1928–1937 
+2016.
+
+Arun Nair  Praveen Srinivasan  Sam Blackwell  Cagdas Alcicek  Rory Fearon  Alessandro De
+Maria  Vedavyas Panneershelvam  Mustafa Suleyman  Charles Beattie  Stig Petersen  Shane Legg 
+Volodymyr Mnih  Koray Kavukcuoglu  and David Silver. Massively parallel methods for deep
+reinforcement learning. CoRR  abs/1507.04296  2015.
+
+Angelia Nedi´c  Alex Olshevsky  and Michael G Rabbat. Network topology and communication-
+computation tradeoffs in decentralized optimization. Proceedings of the IEEE  106(5):953–976 
+2018.
+
+Adam Paszke  Sam Gross  Soumith Chintala  Gregory Chanan  Edward Yang  Zachary DeVito 
+Zeming Lin  Alban Desmaison  Luca Antiga  and Adam Lerer. Automatic differentiation in
+pytorch. 2017.
+
+Joelle Pineau. The machine learning reproducibility checklist (version 1.0)  2018.
+Benjamin Recht  Christopher Re  Stephen Wright  and Feng Niu. Hogwild: A lock-free approach to
+parallelizing stochastic gradient descent. Advances in Neural Information Processing Systems  24:
+693–701  2011.
+
+Eugene Seneta. Non-negative Matrices and Markov Chains. Springer  1981.
+David Silver  Aja Huang  Chris J Maddison  Arthur Guez  Laurent Sifre  George Van Den Driessche 
+Julian Schrittwieser  Ioannis Antonoglou  Veda Panneershelvam  Marc Lanctot  et al. Mastering
+the game of go with deep neural networks and tree search. Nature  529(7587):484  2016.
+
+David Silver  Thomas Hubert  Julian Schrittwieser  Ioannis Antonoglou  Matthew Lai  Arthur Guez 
+Marc Lanctot  Laurent Sifre  Dharshan Kumaran  Thore Graepel  et al. A general reinforcement
+learning algorithm that masters chess  shogi  and go through self-play. Science  362(6419):
+1140–1144  2018.
+
+Adam Stooke and Pieter Abbeel. Accelerated methods for deep reinforcement learning. arXiv
+
+preprint arXiv:1803.02811  2018.
+
+Richard S Sutton and Andrew G Barto. Introduction to reinforcement learning  volume 135. MIT
+
+press Cambridge  1998.
+
+Richard S Sutton  David A McAllester  Satinder P Singh  and Yishay Mansour. Policy gradient
+methods for reinforcement learning with function approximation. Advances in neural information
+processing systems  pages 1057–1063  2000.
+
+10
+
+Richard Stuart Sutton. Temporal credit assignment in reinforcement learning. PhD thesis  University
+
+of Massachusetts Amherst  1984.
+
+Yuandong Tian  Jerry Ma  Qucheng Gong  Shubho Sengupta  Zhuoyuan Chen  James Pinkerton 
+and C Lawrence Zitnick. Elf opengo: An analysis and open reimplementation of alphazero.
+Proceedings of the 36th International Conference on Machine Learning  97:6244–6253  2019.
+
+John Tsitsiklis  Dimitri Bertsekas  and Michael Athans. Distributed asynchronous deterministic
+and stochastic gradient optimization algorithms. IEEE transactions on automatic control  31(9):
+803–812  1986.
+
+O Vinyals  I Babuschkin  J Chung  M Mathieu  M Jaderberg  W Czarnecki  A Dudzik  A Huang 
+
+P Georgiev  R Powell  et al. Alphastar: Mastering the real-time strategy game starcraft ii  2019.
+Jacob Wolfowitz. Products of indecomposable  aperiodic  stochastic matrices. Proceedings of the
+
+American Mathematical Society  14(5):733–737  1963.
+
+11
+
+,Mahmoud Assran
+Joshua Romoff
+Nicolas Ballas
+Joelle Pineau
+Michael Rabbat

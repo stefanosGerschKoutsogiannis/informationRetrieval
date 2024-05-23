@@ -1,0 +1,940 @@
+2019,Differentiable Ranking and Sorting using Optimal Transport,Sorting is used pervasively in machine learning  either to define elementary algorithms  such as $k$-nearest neighbors ($k$-NN) rules  or to define test-time metrics  such as top-$k$ classification accuracy or ranking losses. Sorting is however a poor match for the end-to-end  automatically differentiable pipelines of deep learning. Indeed  sorting procedures output two vectors  neither of which is differentiable: the vector of sorted values is piecewise linear  while the sorting permutation itself (or its inverse  the vector of ranks) has no differentiable properties to speak of  since it is integer-valued. We propose in this paper to replace the usual \texttt{sort} procedure with a differentiable proxy. Our proxy builds upon the fact that sorting can be seen as an optimal assignment problem  one in which the $n$ values to be sorted are matched to an \emph{auxiliary} probability measure supported on any \emph{increasing} family of $n$ target values. From this observation  we propose extended rank and sort operators by considering optimal transport (OT) problems (the natural relaxation for assignments) where the auxiliary measure can be any weighted measure supported on $m$ increasing values  where $m \ne n$. We recover differentiable operators by regularizing these OT problems with an entropic penalty  and solve them by applying Sinkhorn iterations. Using these smoothed rank and sort operators  we propose differentiable proxies for the classification 0/1 loss as well as for the quantile regression loss.,Differentiable Ranks and Sorting
+
+using Optimal Transport
+
+Marco Cuturi Olivier Teboul
+
+Jean-Philippe Vert
+
+Google Research  Brain Team
+
+{cuturi oliviert jpvert}@google.com
+
+Abstract
+
+Sorting is used pervasively in machine learning  either to deﬁne elementary algo-
+rithms  such as k-nearest neighbors (k-NN) rules  or to deﬁne test-time metrics 
+such as top-k classiﬁcation accuracy or ranking losses. Sorting is however a poor
+match for the end-to-end  automatically differentiable pipelines of deep learning.
+Indeed  sorting procedures output two vectors  neither of which is differentiable:
+the vector of sorted values is piecewise linear  while the sorting permutation itself
+(or its inverse  the vector of ranks) has no differentiable properties to speak of  since
+it is integer-valued. We propose in this paper to replace the usual sort procedure
+with a differentiable proxy. Our proxy builds upon the fact that sorting can be
+seen as an optimal assignment problem  one in which the n values to be sorted are
+matched to an auxiliary probability measure supported on any increasing family
+of n target values. From this observation  we propose extended rank and sort
+operators by considering optimal transport (OT) problems (the natural relaxation
+for assignments) where the auxiliary measure can be any weighted measure sup-
+ported on m increasing values  where m (cid:54)= n. We recover differentiable operators
+by regularizing these OT problems with an entropic penalty  and solve them by
+applying Sinkhorn iterations. Using these smoothed rank and sort operators  we
+propose differentiable proxies for the classiﬁcation 0/1 loss as well as for the
+quantile regression loss.
+
+Introduction
+
+1
+Sorting n real values stored in an array x = (x1  . . .   xn) ∈ Rn requires ﬁnding a permutation
+σ in the symmetric group Sn such that xσ := (xσ1  . . .   xσn) is increasing. A call to a sorting
+procedure returns either the vector of sorted values S(x) := xσ  or the vector R(x) of the ranks
+of these values  namely the inverse of the sorting permutation  R(x) := σ−1. For instance  if the
+input vector x = (0.38  4 −2  6 −9)  one has σ = (5  3  1  2  4)  and the sorted vector S(x) is
+xσ = (−9 −2  0.38  4  6)  while R(x) = σ−1 = (3  4  2  5  1) lists the rank of each entry in x.
+On (not) learning with sorting and ranking. Operators R and S play an important role across
+statistics and machine learning. For instance  R is the main workhorse behind order statistics [12] 
+but also appears prominently in k-NN rules  in which R is applied on a vector of distances to select
+the closest neighbors to a query point. Ranking is also used to assess the performance of an algorithm:
+either at test time  such as 0/1 and top-k classiﬁcation accuracies and NDCG metrics when learning-
+to-rank [21]  or at train time  by selecting pairs [9  8] and triplets [37] of points of interest. The
+sorting operator S is of no less importance  and can be used to handle outliers in robust statistics  as
+in trimmed [20] and least-quantile regression [32] or median-of-means estimators [26  25]. Yet  and
+although examples of using R and S abound in ML  neither R nor S are actively used in end-to-end
+learning approaches: while S is not differentiable everywhere  R is outright pathological  since it is
+piecewise constant and has therefore a Jacobian ∂R/∂x that is almost everywhere zero.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+Everywhere differentiable proxies to ranking and sorting. Replacing the usual ranking and sort-
+ing operators by differentiable approximations holds an interesting promise  as it would immediately
+enable an end-to-end training of any algorithm or metric that uses sorting. For instance  all of the test
+metrics enumerated above could be upgraded to training losses  if one were able to replace their inner
+calls to R and S by differentiable proxies. More generally  one can envision applications in which
+these proxies can be used to impose rank/sorting based constraints  such as fairness considerations that
+rely on the quantiles of (logistic) regression outputs [14  22]. In the literature  such smoothed ranks
+operators appeared ﬁrst in [36]  where a softranks operator is deﬁned as the expectation of the rank
+operator under a random perturbation  Ez[R(x + z)]  where z is a standard Gaussian random vector.
+That expectation (and its gradient w.r.t. x) were approximated in [36] using a O(n3) algorithm.
+Shortly after  [29] used the fact that the rank of each value xi in x can be written as(cid:80)j 1xi>xj   and
+smoothed these indicator functions with logistic maps gτ (u) := (1 + exp(−u/τ ))−1. The soft-rank
+operator they propose is A1n where A = gτ (D)  where gτ is applied elementwise to the pairwise
+matrix of differences D = [xi − xj]ij  for a total of O(n2) operations. A similar yet more reﬁned
+approach was recently proposed by [18]  building on the same pairwise difference matrix D to output
+a unimodal row-stochastic matrix. This yields as in [36] a probabilistic rank for each input.
+Our contribution: smoothed R and S operators using optimal transport (OT). We show ﬁrst
+that the sorting permutation σ for x can be recovered by solving an optimal assignment (OA) problem 
+from an input measure supported on all values in x to a second auxiliary target measure supported on
+any increasing family y = (y1 < ··· < yn). Indeed  a key result from OT theory states that  pending
+a simple condition on the matching cost  the OA is achieved by matching the smallest element in
+x to y1  the second smallest to y2  and so forth  therefore “revealing” the sorting permutation of x.
+We leverage the ﬂexibility of OT to introduce generalized “split” ranking and sorting operators that
+use target measures with only m (cid:54)= n weighted target values  and use the resulting optimal transport
+plans to compute convex combinations of ranks and sorted values. These operators are however far
+too costly to be of practical interest and  much like sorting algorithms  remain non-differentiable.
+To recover tractable and differentiable operators  we regularize the OT problem and solve it using
+the Sinkhorn algorithm [10]  at a cost of O(nm(cid:96)) operations  where (cid:96) is the number of Sinkhorn
+iterations needed for the algorithm to converge. We show that the size m of the target measure can be
+set as small as 3 in some applications  while (cid:96) rarely exceeds 100 with the settings we consider.
+Outline. We recall ﬁrst the link between the R and S operators and OT between 1D measures  to
+deﬁne then generalized Kantorovich rank and sort operators in §2. We turn them into differentiable
+operators using entropic regularization  and discuss in §3 the several parameters that can shape
+this smoothness. Using these smooth operators  we propose in §4 alternatives to cross-entropy and
+least-quantile losses to learn classiﬁers and regression functions.
+Notations. We write On ⊂ Rn for the set of increasing vectors of size n  and Σn ⊂ Rn
++ for the
+probability simplex. 1n is the n-vector of ones. Given c = (c1  . . .   cn) ∈ Rn  we write c for the
+cumulative sum of c  namely vector (c1 + ··· + ci)i. Given two permutations σ ∈ Sn  τ ∈ Sm
+and a matrix A ∈ Rn×m  we write Aστ for the n × m matrix [Aσiτj ]ij obtained by permuting the
+rows and columns of A using σ  τ. For any x ∈ R  δx is the Dirac measure on x. For a probability
+measure ξ ∈ P(R)  we write Fξ for its cumulative distribution function (CDF)  and Qξ for its quantile
+function (generalized if ξ is discrete). Functions are applied element-wise on vectors or matrices; the
+◦ operator stands for the element-wise product of vectors.
+2 Ranking and Sorting as an Optimal Transport Problem
+
+The fact that solving the OT problem between two discrete univariate measures boils down to sorting
+is well known [33  §2]. The usual narrative states that the Wasserstein distance between two univariate
+measures reduces to comparing their quantile functions  which can be obtained by inverting CDFs 
+which are themselves computed by considering the sorted values of the supports of these measures.
+This downstream connection from OT to quantiles  CDFs and ﬁnally sorting has been exploited in
+several works  notably because the n log n price for sorting is far cheaper than the order n3 log n [35]
+one has to pay to solve generic OT problems. This is evidenced by the recent surge in interest for
+sliced Wasserstein distances [30  5  23]. We propose in this section to go instead upstream  that is
+to redeﬁne ranking and sorting functions as byproducts of the resolution of an optimal assignment
+problem between measures supported on the reals. We then propose in Def.1 generalized rank and
+sort operators using the Kantorovich formulation of OT.
+
+2
+
+i=1 aiδxi and υ =(cid:80)m
+
+Solving the OT problem between 1D measures using sorting. Let ξ  υ be two discrete probability
+measures on R  deﬁned respectively by their supports x  y and probability weight vectors a  b as
+ξ =(cid:80)n
+j=1 bjδyj . We consider in what follows a translation invariant and non-
+negative ground metric deﬁned as (x  y) ∈ R2 (cid:55)→ h(y − x)  where h : R → R+. With that ground
+cost  the OT problem between ξ and υ boils down to the following LP  writing Cxy := [h(yj − xi)]ij 
+(1)
+OTh(ξ  υ) := min
+
+P∈U (a b)(cid:104)P  Cxy (cid:105)  where U (a  b) := {P ∈ Rn×m
+
+|P 1m = a  P T 1n = b} .
+
++
+
+We make in what follows the additional assumption that h is convex. A fundamental result [33 
+Theorem 2.9] states that in that case (see also [13] for the more involved case where h is concave)
+OTh(ξ  υ) can be computed in closed form using the quantile functions Qξ  Qυ of ξ  υ:
+
+OTh(ξ  υ) =(cid:90)[0 1]
+
+h (Qυ(u) − Qξ(u)) du.
+
+(2)
+
+Therefore  to compute OT between ξ and υ  one only needs to integrate the difference in their quantile
+functions  which can be done by inverting the empirical distribution functions for ξ  υ  which itself
+only requires sorting the entries in x and y to obtain their sorting permutations σ and τ. Additionally 
+Eq. (2) allows us not only to recover the value of OTh as deﬁned in Eq. (1)  but it can also be used to
+recover the corresponding optimal solution P(cid:63) in n + m operations  using the permutations σ and τ
+to build a so-called north-west corner solution [28  §3.4.2]:
+Proposition 1. Let σ and τ be sorting permutations for x and y. Deﬁne N to be the north-west
+corner solution using permuted weights aσ  bτ . Then Nσ−1 τ−1 is optimal for (1).
+Such a permuted north-western corner solution is illustrated in Figure 1(b). It is indeed easy to check
+that in that case (P(cid:63))σ τ runs from the top-left (north-west) to the bottom right corner. In the simple
+case where n = m and a = b = 1n/n  the solution Nσ−1 τ−1 is a permutation matrix divided by n 
+namely a matrix equal to 0 everywhere except for its entries indexed by (i  τ ◦ σ−1)i which are all
+equal to 1/n. That solution is a vertex of the Birkhoff [3] polytope  namely  an optimal assignment
+which to the i-th value in x associates the (τ ◦ σ−1)i-th value in y; informally  this solution assigns
+the i-th smallest entry in x to the i-th smallest entry in y.
+Generalizing sorting  CDFs and quantiles using optimal transport. From now on in this paper 
+we make the crucial assumption that y is already sorted  that is  y1 < ··· < ym. τ is therefore the
+identity permutation. When in addition n = m  the i-th value in x is simply assigned to the σ
+-th
+value in y. Conversely  and as illustrated in Figure 1(a)  the rank i value in x is assigned to the i-th
+value yi. Because of this  R and S can be rewritten using the optimal assignment matrix P(cid:63):
+Proposition 2. Let n = m and a = b = 1n/n. Then for all strictly convex functions h and y ∈ On 
+if P(cid:63) is an optimal solution to (1)  then
+1
+...
+n
+
+(cid:63) x = Qξ(b) ∈ On.
+
+ = nFξ(x)  S(x) = nP T
+
+R(x) = n2P(cid:63)b = nP(cid:63)
+
+−1
+i
+
+These identities stem from the fact that nP(cid:63) is a permutation matrix  which can be applied to the
+vector nb = (1  . . .   n) to recover the rank of each entry in x  or transposed and applied to x to
+recover the sorted values of x. The former expression can be equivalently interpreted as n times
+the CDF of ξ evaluated elementwise to x  the latter as the quantiles of ξ at levels b. The identities
+in Prop. 2 are valid when the input measures ξ  υ are uniform and of the same size. The ﬁrst
+contribution of this paper is to consider more general scenarios  in which m  the size of y  can be
+smaller than n  and where weights a  b need not be uniform. This is a major departure from previous
+references [18  36  29]  which all require pairwise comparisons between the entries in x. We show in
+our applications that m can be as small as 3 when trying to recover a quantile  as in Figs. 1  3.
+Kantorovich ranks and sorts. The so-called Kantorovich formulation of OT [33  §1.5] can be used
+to compare discrete measures of varying sizes and weights. Solving that problem usually requires
+splitting the mass ai of a point xi so that it it assigned across many points yj (or vice-versa). As a
+result  the i-th line (or j-th column) of a solution P(cid:63) ∈ Rn×m
+has usually more than one positive
+entry. Extending directly the formulas presented in Prop. 2 we recover extended operators that we call
+Kantorovich ranking and sorting operators. These operators are new to the best of our knowledge.
+
++
+
+3
+
+The K-ranking operator computes convex com-
+binations of rank values (as described in the
+entries nb) while the K-sorting operator com-
+putes convex combinations of values contained
+in x directly. Note that we consider here
+convex combinations (weighted averages) of
+these ranks/values  according to the Euclidean
+geometry. Extending more generally these
+combinations to Fréchet means using alterna-
+tive geometries (KL  hyperbolic  etc) on these
+ranks/values is left for future work. Because
+these quantities are only deﬁned pointwisely
+(we output vectors and not functions) and de-
+pend on the ordering of a  x  b  y  we drop our
+reference to measure ξ in notations.
+Deﬁnition 1. For any (x  a  y  b) ∈ Rn ×
+Σn × Om × Σm  let P(cid:63) ∈ U (a  b) be an opti-
+mal solution for (1) with a given convex func-
+tion h. The K-ranks and K-sorts of x w.r.t to a
+evaluated using (b  y) are respectively:
+
+−1 ◦ (P(cid:63)b) ∈ [0  n]n 
+−1 ◦ (P T
+(cid:63) x) ∈ Om.
+
+(cid:101)R (a  x; b  y) := na
+(cid:101)S (a  x; b  y) := b
+The K-rank vector map (cid:101)R outputs a vector of
+
+size n containing a continuous rank for each
+entry for x (these entries can be alternatively in-
+terpreted as n times a “synthetic” CDF value in
+[0  1]  itself a convex mixture of the CDF values
+bj of the yj onto which each xi is transported).
+
+Figure 1: (a) sorting seen as transporting optimally
+x to milestones in y. (b) Kantorovich sorting gen-
+eralizes the latter by considering target measures y
+with m = 3 non-uniformly weighted points (here
+b = [.48  .16  .36]). K-ranks and K-sorted vectors
+
+(cid:101)R (cid:101)S are generalizations of R and S that operate by
+
+mixing ranks in b or mixing original values in x to
+form continuous ranks for the elements in x and m
+“synthetic” quantiles at levels b. (c) Entropy regular-
+ized OT generalizes further K-operations by solving
+OT with the Sinkhorn algorithm  which results in
+dense transport plans differentiable in all inputs.
+
+(cid:101)S is a split-quantile operator outputting m in-
+
+creasing values which are each  respectively 
+barycenters of some of the entries in x. The fact that these values are increasing can be obtained
+by a simple argument in which ξ and υ are cast again as uniform measures of the same size using
+duplicated supports xi and yj  and then use the monotonicity given by the third identity of Prop. 2.
+Computations and Non-differentiability The generalized ranking and sorting operators presented
+in Def. 1 are interesting in their own right  but have very little practical appeal. For one  their
+computation relies on solving an OT problem at a cost of O(nm(n + m) log(nm))[35] and remains
+therefore far more costly than regular sorting  even when m is very small. Furthermore  these operators
+remain fundamentally not differentiable. This can be hinted by the simple fact that it is difﬁcult to
+guarantee in general that a solution P(cid:63) to (1) is unique. Most importantly  the Jacobian ∂P(cid:63)/∂x is 
+very much like R  null almost everywhere. This can be visualized by looking at Figure 1(b) to notice
+that an inﬁnitesimal change in x would not change P(cid:63) (notice however that an inﬁnitesimal change in
+weights a would; that Jacobian would involve North-west corner type mass transfers). All of these
+pathologies — computational cost  non-uniqueness of optimal solution and non-differentiability —
+can be avoided by using regularized OT [10].
+
+3 The Sinkhorn Ranking and Sorting Operators
+
+Both K-rank (cid:101)R and K-sort (cid:101)S operators are expressed using the optimal solution P(cid:63) to the linear
+
+program in (1). However  P(cid:63) is not differentiable w.r.t inputs a  x nor parameters b  y [2  §5]. We
+propose instead to rely on a differentiable variant [10  11] of the OT problem that uses entropic
+regularization [38  17  24]  as detailed in [28  §4]. This differentiability is reﬂected in the fact that
+the optimal regularized transport plan is a dense matrix (yielding more arrows in Fig. 1(c))  which
+ensures differentiability everywhere w.r.t. both a and x.
+
+4
+
+x1x2x3x4x5y5y4y3y2y1x1x2x3x4x5y1y2y3P?=".08.12.04.16.2.2.2#2U✓155 h.48.16.36i◆.48.641x1x2x3x4x5x1x2x3x4x5y1y2y3(a)(b)(c)?=(4 5 1 2 3)R(x)=5·".6.81.2.4# S(x)="x4x5x1x2x3#=xeR(x)=5·".576.9281.48.48# eS(x)=.166x1+.4167(x4+x5).75x1+.25x2.444x2+.556x3Figure 2: Behaviour of the S-ranks (cid:101)Rε (a  x; b  y) and S-sort operators (cid:101)Sε (a  x; b  y) as a function
+of ε. Here n = m = 10  b is uniform and y = (0  . . .   m − 1)/(m − 1) is the regular grid in
+[0  1]. (left) input data x presented as a bar plot. (center) Vector output of (cid:101)Rε (a  x; b  y) (various
+continuous) ranks as a function of ε. When ε is small  one recovers an integer valued vector of ranks.
+As ε increases  regularization kicks in and produces mixtures of rank values that are continuous.
+These mixed ranks are closer for values that are close in absolute terms  as is the case with the 0-th
+and 9-th index of the input vector whose continuous ranks are almost equal when ε ≈ 10−2. (right)
+vector of "soft" sorted values. These converge to the average of values in x as ε is increased.
+
+Consider ﬁrst a regularization strength ε > 0 to deﬁne the solution to the regularized OT problem:
+
+P ε
+
+(cid:63) := argmin
+
+P∈U (a b) (cid:104)P  Cxy (cid:105) − εH(P )
+
+  where H(P ) = −(cid:88)i j
+
+Pij (log Pij − 1) .
+
+(cid:63) has the factorized form D(u)KD(v)  where K = exp(−Cxy/ε)
+One can easily show [10] that P ε
+and u ∈ Rn and v ∈ Rm are ﬁxed points of the Sinkhorn iteration outlined in Alg. 1. To differentiate
+(cid:63) w.r.t. a or x one can use the implicit function theorem  but this would require solving a linear
+P ε
+system using K. We consider here a more direct approach  using algorithmic differentiation of the
+Sinkhorn iterations  after a number (cid:96) of iterations needed for Alg. 1 to converge [19  4  15]. That
+number (cid:96) depends on the choice of ε [16]: typically  the smaller ε  the more iterations (cid:96) are needed to
+ensure that each successive update in v  u brings the column-sum of the iterate D(u)KD(v) closer
+to b  namely that the difference between v◦ K T u and b (as measured by a discrepancy function ∆ as
+used in Alg. 1) falls below a tolerance parameter η. Assuming P ε
+(cid:63) has been computed  we introduce
+Sinkhorn ranking and sorting operators by simply appending an ε subscript to the quantities presented
+(cid:63) = D(u)KD(v).
+in Def. 1  and replacing P(cid:63) in these deﬁnitions by the regularized OT solution P ε
+
+Deﬁnition 2 (Sinkhorn Rank & Sort). Given a regularization
+strength ε > 0  run Alg.1 to deﬁne
+
+(cid:101)Rε (a  x; b  y) := na
+(cid:101)Sε (a  x; b  y) := b
+
+−1 ◦ u ◦ K(v ◦ b) ∈ [0  n]n 
+−1 ◦ v ◦ K T (u ◦ x) ∈ Rm.
+
+Algorithm 1: Sinkhorn
+Inputs: a  b  x  y  ε  h  η
+Cxy ← [h(yj − xi)]ij;
+K ← e−Cxy/ε  u = 1n;
+repeat
+until ∆(v ◦ K T u  b) < η;
+Result: u  v  K
+
+v ← b/K T u  u ← a/Kv
+
+Sensitivity to ε. Parameter ε plays the same role as other
+temperature parameters in previously proposed smoothed
+sorting operators [29  36  18]: the smaller ε is  the closer the
+Sinkhorn operator’s output is to the original vectors of ranks
+and sorted values; The bigger ε  the closer P ε
+
+illustrated in Fig. 2. Although choosing a small value for ε might seem natural  in the sense that
+
+(cid:63) to matrix abT   and therefore all entries of (cid:101)Rε collapse
+to the average of n¯b  while all entries of (cid:101)Sε collapse to the weigted average (using a) of x  as
+(cid:101)Rε (cid:101)Sε approximate more faithfully R  S  one should not forget that this would result in recovering
+
+the deﬁciencies of R  S in terms of differentiability. When learning with such operators  it may
+therefore be desirable to use a value for ε that is large enough to ensure ∂P ε
+(cid:63) /∂x has non-null entries.
+We usually set ε = 10−2 or 10−3 when x  y lie in [0 1] as in Fig. 2. We have kept ε ﬁxed throughout
+Alg. 1  but we do notice some speedups using scheduling as advocated by [34].
+
+5
+
+01234567890.00.20.40.60.8Entries of x10410310210110010102468Entries of R(x) as a function of 01234567890.20.30.40.50.60.70.8Comparing S(x) with S(x) for various =1.0=0.1=0.01=0.001=0.0001S(x)Parallelization. The Sinkhorn computations laid out in Algorithm 1 imply the application of kernels
+K or K T to vectors v and u of size m and n respectively. These computation can be carried out in
+parallel to compare S vectors x1  . . .   xS ∈ Rn of real numbers  with respective probability weights
+a1  . . .   aS  to a single vector y with weights b. To do so  one can store all kernels Ks := e−Cs/ε in
+a tensor of size S × n × m  where Cs = Cxsy.
+Numerical Stability. When using small regularization strengths  we recommend to cast Sinkhorn
+iterations in the log-domain by considering the following stabilized iterations for each pair of vectors
+xs  y  resulting in the following updates (with α and β initialized to 0n and 0m) 
+
+α ← ε log a + minε(cid:16)Cxsy − α1T
+β ← ε log b + minε(cid:0)C T
+
+m − 1nβT(cid:17) + α 
+n(cid:1) + β 
+
+xsy − 1mαT − β1T
+
+repeat
+
+Algorithm 2: Sinkhorn Ranks/Sorts
+
+where minε is the soft-minimum operator applied linewise to a matrix to output a vector  namely for
+
+M ∈ Rn×m  minε(M ) ∈ Rn and is such that [minε(M )]i = −ε(log(cid:80)j e−Mij /ε). The rationale
+
+behind the substractions/additions of α and β above is that once a Sinkhorn iteration is carried out 
+the terms inside the parenthesis above are normalized  in the sense that once divided by ε  their
+exponentials sum to one (they can be used to recover a coupling). Therefore  they must be negative 
+which improves the stability of summing exponentials [28  §4.4].
+Cost function. Any nonneg-
+ative convex function h can
+be used to deﬁne the ground
+cost  notably h(u) = |u|p 
+with p set to either 1 or 2. An-
+other important result that we
+inherit from OT is that  as-
+suming ε is close enough to 0 
+the transport matrices P (cid:63)
+ε we
+obtain should not vary under
+the application of any increas-
+ing map to each entry in x or
+y. We take advantage of this
+important result to stabilize
+further Sinkhorn’s algorithm 
+and at the same time resolve
+the thorny issue of being able
+to settle for a value for ε that can be used consistently  regardless of the range of values in x. We
+propose to set y to be the regular grid on [0  1] with m points  and rescale the input entries of x so
+that they cover [0  1] to deﬁne the cost matrice Cxy. We rescale the entries of x using an increasing
+squashing function  such as arctan or a logistic map. We also notice in our experiments that it is
+important to standardize input vectors x before squashing them into [0  1]n  namely to apply  given a
+squashing function g  the map ˜g on x before computing the cost matrix Cxy:
+
+Inputs: (as  xs)s ∈ (Σn × Rn)S  (b  y) ∈ Σm × Om  h  ε  η (cid:101)g.
+∀s (cid:101)xs =(cid:101)g(xs)  Cs = [h(yj − ((cid:101)xs)i)]ij  αs = 0n  βs = 0m.
+n(cid:1) + βs
+∀s  βs ← ε log bs + minε(cid:0)C T
+s − βs1T
+s(cid:17) + αs
+∀s  αs ← ε log as + minε(cid:16)Cs − αs1T
+m − 1nβT
+until maxs ∆(cid:0)exp(cid:0)C T
+n(cid:1) 1n  b(cid:1) < η;
+s(cid:17) b 
+s ◦ exp(cid:16)Cxsy − αs1T
+∀s (cid:101)Rε(xs) ← a−1
+m − 1nβT
+n(cid:1) xs.
+s ◦ exp(cid:0)C T
+∀s (cid:101)Sε(xs) ← b−1
+s − βs1T
+Result:(cid:16)(cid:101)Rε(xs) (cid:101)Sε(xs)(cid:17)s
+
+xsy − 1mαT
+.
+
+xsy − 1mαT
+
+s − 1mαT
+
+s − βs1T
+
+(3)
+
+(4)
+
+˜g : x (cid:55)→ g(cid:32) x − (xT 1n)1n
+
+n(cid:107)x − (xT 1n)1n(cid:107)2(cid:33) .
+
+1√
+
+The choices that we have made are summarized in Alg. 2  but we believe there are opportunities to
+perfect them depending on the task.
+Soft τ quantiles. To illustrate the ﬂexibility offered by
+the freedom to choose a non-uniform target measure b  y 
+we consider the problem of computing a smooth approxi-
+mation of the τ quantile of a discrete distribution ξ  where
+τ ∈ [0  1]. This smooth approximation can be obtained by
+transporting ξ towards a tilted distribution  with weights
+split roughly as τ on the left and (1 − τ ) on the right 
+with the addition of a small “ﬁller” weight in the mid-
+dle. This ﬁller weight is set to a small value t  and
+is designed to “capture” whatever values may lie close
+to that quantile. This choice results in m = 3  with
+
+Figure 3: Computing the 30% quantile
+of 20 values as the weighted average of
+values that are selected by the Sinkhorn
+algorithm to send their mass onto ﬁller
+weight t located halfway in [0  1]  and
+“sandwiched” by two masses approxi-
+mately equal to τ  1 − τ.
+
+6
+
+01/21⌧=30%0.65t=0.10.25Figure 4: Error bars (averages over 12 runs) for test accuracy curves on CIFAR-10 using the same
+networks structures  a vanilla CNN for 4 convolution layers on the left and a resnet18 on the right.
+We use the ADAM optimizer with a constant stepsize set to 10−4.
+
+Figure 5: Identical setup to Fig. 4  with the CIFAR-100 database.
+
+weights b = [τ − t/2  t  1 − τ − t/2] and target values
+y = [0  1/2  1] as in Figure 3  in which t = 0.1. With
+such weights/locations  a differentiable approximation to the τ-quantile of the inputs can be recovered
+as the second entry of vector ˜Sε:
+
+˜qε(x; τ  t) =(cid:101)Sε 1n
+
+n
+
+1 − τ − t/2(cid:35)  
+  x;(cid:34) τ − t/2
+
+t
+
+0
+1
+2
+
+1   h2
+
+.
+
+(5)
+
+4 Learning with Smoothed Ranks and Sorts
+Differentiable approximation of the top-k Loss. Given a set of labels {1  . . .   L} and a space Ω of
+input points  a parameterized multiclass classiﬁer on Ω is a function fθ : Ω → RL. The function
+decides the class attributed to ω by selecting a label with largest activation  l(cid:63) ∈ argmaxl[fθ(ω)]l.
+To train the classiﬁer using a training set {(ωi  li)} ∈ (Ω × L)N   one typically resorts to minimizing
+the cross-entropy loss  which results in solving minθ(cid:80)i 1T
+We propose a differentiable variant of the 0/1 and more generally top k losses that bypasses com-
+binatorial consideration [27  39] nor builds upon non-differentiable surrogates [6]. Ignoring the
+degenerate case in which l(cid:63) is not unique  given a query ω  stating that the the label l(cid:63) has been
+selected is equivalent to stating that the entry indexed at l(cid:63) of the vector of ranks R(fθ(ω)) is L.
+Given a labelled pair (ω  l)  the 0/1 loss of the classiﬁer for that pair is therefore 
+
+L log fθ(ωi) − [fθ(ωi)]li.
+
+L0/1(fθ(ω)  l) = H (L − [R(fθ(ω)]l)  
+
+(6)
+
+7
+
+0100200300400500600epoch0.760.780.800.820.84accuracy vanilla CNNsoft error loss cross entropy loss 0100200300400500600epoch0.850.860.870.880.890.900.91accuracy resnet18soft error loss cross entropy loss 0100200300400500600epoch0.300.350.400.450.500.55accuracy vanilla CNNsoft error loss cross entropy loss 0100200300400500600epoch0.300.350.400.450.500.55accuracy resnet18soft error loss cross entropy loss algorithm
+
+n=3
+
+n=7
+
+n=9
+
+n=15
+
+Stochastic NeuralSort
+
+Deterministic NeuralSort
+
+0.122 (0.734)
+0.097 (0.716)
+0.126 (0.742)
+Table 1: Sorting exact and partial precision on the neural sort task averaged over 10 runs. Our
+method performs better than the method presented in [18] for all the sorting tasks  with the exact
+same network architecture.
+
+0.920 (0.946)
+0.919 (0.945)
+0.928 (0.950)
+
+0.452 (0.829)
+0.434 (0.824)
+0.497 (0.847)
+
+0.636 (0.873)
+0.610 (0.862)
+0.656 (0.882)
+
+Our
+
+n=5
+
+0.790 (0.907)
+0.777 (0.901)
+0.811 (0.917)
+
+where H is the heaviside function: H(u) = 1 if u > 0 and H(u) = 0 for u ≤ 0. More generally  if
+for some labelled input ω  the entry [R(fθ)]lo is bigger than L − k + 1  then that labelled example
+has a top-k error of 0. Conversely  if [R(fθ)]l is smaller than L − k + 1  then the top-k error is 1.
+The top-k error can be therefore formulated as in (6)  where the argument L − [R(fθ(ω)]l within the
+Heaviside function is replaced by L − [R(fθ(ω)]l − k + 1.
+The 0/1 and top-k losses are unstable on two different counts: H is discontinuous  and so is R
+with respect to the entries fθ(ω). The differentiable loss that we propose  as a replacement for
+cross-entropy (or more generalized top-k cross entropy losses [1])  leverages therefore both the
+Sinkhorn rank operator and a smoothed Heaviside like function. Because Sinkhorn ranks are always
+within the boundaries of [0  L]  we propose to modify this loss by considering a continuous increasing
+function Jk from [0  L] to R:
+
+(cid:101)Lk ε(fθ(ω)  l) = Jk(cid:18)L −(cid:20)(cid:101)Rε(cid:18) 1L
+
+L
+
+  fθ(ω);
+
+1L
+L
+
+ 
+
+1L
+L
+
+  h(cid:19)(cid:21)l(cid:19)  
+
+We propose the simple family of ReLU losses Jk(u) = max(0  u − k + 1)  and have focused our
+experiments on the case k = 1. We train a vanilla CNN (4 Conv2D with 2 max-pooling layers 
+ReLU activation  2 fully connected layers  batchnorm on each) and a Resnet18 on CIFAR-10 and
+CIFAR-100. Fig. 4 and 5 report test-set classiﬁcation accuracies / epochs. We used ε = 10−3 
+η = 10−3  a squared distance cost h(u) = u2 and a stepsize of 10−4 with the ADAM optimizer.
+Learning CNNs by sorting handwritten num-
+bers. We use the MNIST experiment setup
+in [18]  in which a CNN is given n numbers
+between between 0 and 9999 given as 4 con-
+catenated MNIST images. The labels are the
+ranks (within n pairs) of each of these n num-
+bers. We use the code kindly made available by
+the authors. We use 100 epochs  and conﬁrm
+experimentally that S-sort performs on par with
+their neural-sort function. We set ε = 0.005.
+Least quantile regression. The goal of least
+quantile regression [32] is to minimize  given
+a vector of response variables z1  . . .   zN ∈ R
+and regressor variables W = [w1  . . .   wN ] ∈
+Rd×N   the τ quantile of the loss between re-
+sponse and predicted values  namely writing
+x = (|zi − fθ(wi)|)i and setting a = 1N /N
+and ξ the measure with weights a and support
+x  to minimize w.r.t. θ the quantile τ of ξ.
+We proceed by drawing mini-batches of size 512. Our baseline method (labelled ε = 0) consists in
+identifying which point  among those 512  has an error that is equal to the desired quantile  and then
+take gradient steps according to that point. Our proposal is to consider the soft τ quantile ˜qε(x; τ  t)
+operator deﬁned in (5)  using for the ﬁller weight t = 1/512. This is labelled as ε = 10−2. We use
+the datasets considered in [31] and consider the same regressor architecture  namely a 2 hidden layer
+NN with hidden layer size 64  ADAM optimizer and steplength 10−4. Results are summarized in
+Table2. We consider two quantiles  τ = 50% and 90%.
+For each quantile/dataset pair  we report the original (not-regularized) τ quantile of the errors
+evaluated on the entire training set  on an entire held-out test set  and the MSE on the test set of the
+
+Figure 6: Test accuracy on the simultaneous
+MNIST CNN / sorting task proposed in [18] (aver-
+age of 12 runs)
+
+8
+
+0501001502002503003504000.20.30.40.50.60.70.8all correct  n=5 our neural sort τ = 50%
+
+ε = 10−2 (our)
+
+τ = 90%
+
+ε = 10−2 (our)
+
+Quantile
+Method
+Dataset
+
+bio
+bike
+
+star
+
+facebook
+
+concrete
+community
+
+ε = 0
+Test MSE
+0.83
+0.31
+0.82
+0.46
+0.01
+0.18
+0.80
+0.68
+0.58
+0.45
+0.30
+0.48
+
+ε = 0
+Test MSE
+0.74
+1.19
+0.65
+1.60
+0.27
+0.27
+1.55
+0.77
+0.50
+1.08
+0.98
+0.46
+
+Train
+0.28
+0.14
+0.04
+0.33
+0.25
+0.06
+
+Train
+1.17
+0.76
+0.21
+1.29
+0.83
+0.77
+
+Train
+0.33
+0.23
+0.00
+0.55
+0.35
+0.27
+
+Test MSE
+0.81
+0.28
+0.87
+0.49
+0.04
+0.19
+0.89
+0.74
+0.61
+0.51
+0.32
+0.53
+
+Test MSE
+1.18
+1.17
+0.63
+1.57
+0.22
+0.27
+0.77
+1.57
+0.51
+1.08
+0.44
+0.98
+Table 2: Least quantile losses (averaged on 12 runs) obtained on datasets compiled by [31]. We
+consider two quantiles  at 50% and 90%. The baseline method (ε = 0) consists in estimating the
+quantile empirically and taking a gradient step with respect to that point. Our method (ε = 10−2)
+uses the softquantile operator ˜qε(x; τ  t) deﬁned in (5)  using for the ﬁller weight t = 1/512. We
+observe better performance at train time (which may be due to a “smoothed” optimization landscape
+with less local minima) but different behaviors on test sets  either using the quantile loss or the MSE.
+Note that we report here for both methods and for both train and test sets the “true” quantile error
+metric.
+
+Train
+1.15
+0.69
+0.27
+1.15
+0.72
+0.56
+
+function that is recovered. We notice that our algorithm reaches overall better quantile errors on the
+training set—this is our main goal—but comparable test/MSE errors.
+Conclusion. We have proposed in this paper differentiable proxies to the ranking and sorting
+operations. These proxies build upon the existing connection between sorting and the computation
+of OT in 1D. By generalizing sorting using OT  and then introducing a regularized form that can
+be solved using Sinkhorn iterations  we recover the simple beneﬁt that all of its steps can be easily
+automatically differentiated. We have shown that  with a focus on numerical stability  one can use
+there operators in various settings  including smooth extensions of test-time metrics that rely on sort 
+and which can be now used as training losses. For instance  we have used the Sinkhorn sort operator
+to provide a smooth approximation of quantiles to solve least-quantile regression problems  and the
+Sinkhorn rank operator to formulate an alternative to the cross-entropy that can mimic the 0/1 loss
+in multiclass classiﬁcation. This smooth approximation to the rank  and the resulting gradient ﬂow
+that we obtain is strongly reminiscent of rank based dynamics  in which players in a given game
+produce an effort (a gradient) that is a direct function of their rank (or standing) within the game 
+as introduced by [7]. Our use of the Sinkhorn algorithm can therefore be interpreted as a smooth
+mechanism to enact such dynamics. Several open questions remain: although the choice of a cost
+
+have in principle no inﬂuence on the vector of Sinkhorn ranks or sorted values in the limit when ε
+
+function h  target vector y and squashing function g (used to form vector(cid:101)x in Alg. 1  using Eq. 4)
+goes to 0 (they all converge to R and S)  these choices strongly shape the differentiability of (cid:101)Rε
+and (cid:101)Sε when ε > 0. Our empirical ﬁndings suggest that whitening and squashing all entries within
+
+[0  1] is crucial to obtain stable numerically  but more generally to retain consistent gradients across
+iterations  without having to re-deﬁne ε at each iteration.
+
+References
+[1] Leonard Berrada  Andrew Zisserman  and M Pawan Kumar. Smooth loss functions for deep
+
+top-k classiﬁcation. arXiv preprint arXiv:1802.07595  2018.
+
+[2] Dimitris Bertsimas and John N Tsitsiklis. Introduction to Linear Optimization. Athena Scientiﬁc 
+
+1997.
+
+[3] Garrett Birkhoff. Tres observaciones sobre el algebra lineal. Universidad Nacional de Tucumán
+
+Revista Series A  5:147–151  1946.
+
+[4] Nicolas Bonneel  Gabriel Peyré  and Marco Cuturi. Wasserstein barycentric coordinates:
+histogram regression using optimal transport. ACM Transactions on Graphics  35(4):71:1–
+71:10  2016.
+
+[5] Nicolas Bonneel  Julien Rabin  Gabriel Peyré  and Hanspeter Pﬁster. Sliced and Radon Wasser-
+stein barycenters of measures. Journal of Mathematical Imaging and Vision  51(1):22–45 
+2015.
+
+9
+
+[6] Stephen Boyd  Corinna Cortes  Mehryar Mohri  and Ana Radovanovic. Accuracy at the top. In
+
+Advances in neural information processing systems  pages 953–961  2012.
+
+[7] Yann Brenier. Rearrangement  convection  convexity and entropy. Philosophical Transactions
+
+of the Royal Society A  371: 20120343  2013.
+
+[8] Christopher Burges  Krysta Svore  Paul Bennett  Andrzej Pastusiak  and Qiang Wu. Learning
+to rank using an ensemble of lambda-gradient models. In Proceedings of the learning to rank
+Challenge  pages 25–35  2011.
+
+[9] Christopher J Burges  Robert Ragno  and Quoc V Le. Learning to rank with nonsmooth cost
+
+functions. In Advances in neural information processing systems  pages 193–200  2007.
+
+[10] Marco Cuturi. Sinkhorn distances: lightspeed computation of optimal transport. In Advances in
+
+Neural Information Processing Systems 26  pages 2292–2300  2013.
+
+[11] Marco Cuturi and Arnaud Doucet. Fast computation of Wasserstein barycenters. In Proceedings
+
+of ICML  volume 32  pages 685–693  2014.
+
+[12] Herbert Aron David and Haikady Navada Nagaraja. Order statistics. Encyclopedia of Statistical
+
+Sciences  2004.
+
+[13] Julie Delon  Julien Salomon  and Andrei Sobolevski. Local matching indicators for transport
+problems with concave costs. SIAM Journal on Discrete Mathematics  26(2):801–827  2012.
+
+[14] Michael Feldman  Sorelle A Friedler  John Moeller  Carlos Scheidegger  and Suresh Venkata-
+subramanian. Certifying and removing disparate impact. In Proceedings of the 21th ACM
+SIGKDD International Conference on Knowledge Discovery and Data Mining  pages 259–268.
+ACM  2015.
+
+[15] Rémi Flamary  Marco Cuturi  Nicolas Courty  and Alain Rakotomamonjy. Wasserstein discrim-
+
+inant analysis. Machine Learning  107(12):1923–1945  2018.
+
+[16] Joel Franklin and Jens Lorenz. On the scaling of multidimensional matrices. Linear Algebra
+
+and its Applications  114:717–735  1989.
+
+[17] Alfred Galichon and Bernard Salanié. Matching with trade-offs: revealed preferences over
+
+competing characteristics. Technical report  Preprint SSRN-1487307  2009.
+
+[18] Aditya Grover  Eric Wang  Aaron Zweig  and Stefano Ermon. Stochastic optimization of sorting
+
+networks via continuous relaxation. In Proceedings of ICLR 2019  2019.
+
+[19] Tatsunori Hashimoto  David Gifford  and Tommi Jaakkola. Learning population-level diffusions
+with generative RNNs. In International Conference on Machine Learning  pages 2417–2426 
+2016.
+
+[20] Peter J Huber. Robust statistics. Springer  2011.
+
+[21] Kalervo Järvelin and Jaana Kekäläinen. Cumulated gain-based evaluation of ir techniques. ACM
+
+Transactions on Information Systems (TOIS)  20(4):422–446  2002.
+
+[22] Ray Jiang  Aldo Pacchiano  Tom Stepleton  Heinrich Jiang  and Silvia Chiappa. Wasserstein
+
+fair classiﬁcation. arXiv preprint arXiv:1907.12059  2019.
+
+[23] Soheil Kolouri  Yang Zou  and Gustavo K Rohde. Sliced Wasserstein kernels for probability dis-
+tributions. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition 
+pages 5258–5267  2016.
+
+[24] JJ Kosowsky and Alan L Yuille. The invisible hand algorithm: Solving the assignment problem
+
+with statistical physics. Neural networks  7(3):477–490  1994.
+
+[25] Guillaume Lecué and Matthieu Lerasle. Robust machine learning by median-of-means: theory
+
+and practice. Annals of Statistics  2019. to appear.
+
+10
+
+[26] Gábor Lugosi  Shahar Mendelson  et al. Regularization  sparse recovery  and median-of-means
+
+tournaments. Bernoulli  25(3):2075–2106  2019.
+
+[27] Tan Nguyen and Scott Sanner. Algorithms for direct 0–1 loss optimization in binary classiﬁca-
+
+tion. In International Conference on Machine Learning  pages 1085–1093  2013.
+
+[28] Gabriel Peyré and Marco Cuturi. Computational optimal transport. Foundations and Trends in
+
+Machine Learning  11(5-6):355–607  2019.
+
+[29] Tao Qin  Tie-Yan Liu  and Hang Li. A general approximation framework for direct optimization
+
+of information retrieval measures. Information retrieval  13(4):375–397  2010.
+
+[30] Julien Rabin  Gabriel Peyré  Julie Delon  and Marc Bernot. Wasserstein barycenter and its
+application to texture mixing. In International Conference on Scale Space and Variational
+Methods in Computer Vision  pages 435–446. Springer  2011.
+
+[31] Yaniv Romano  Evan Patterson  and Emmanuel J Candès. Conformalized quantile regression.
+
+arXiv preprint arXiv:1905.03222  2019.
+
+[32] Peter J Rousseeuw. Least median of squares regression. Journal of the American statistical
+
+association  79(388):871–880  1984.
+
+[33] Filippo Santambrogio. Optimal transport for applied mathematicians. Birkhauser  2015.
+
+[34] Bernhard Schmitzer. Stabilized sparse scaling algorithms for entropy regularized transport
+
+problems. arXiv preprint arXiv:1610.06519  2016.
+
+[35] Robert E. Tarjan. Dynamic trees as search trees via euler tours  applied to the network simplex
+
+algorithm. Mathematical Programming  78(2):169–177  1997.
+
+[36] Michael Taylor  John Guiver  Stephen Robertson  and Tom Minka. Softrank: optimizing non-
+smooth rank metrics. In Proceedings of the 2008 International Conference on Web Search and
+Data Mining  pages 77–86. ACM  2008.
+
+[37] Kilian Q Weinberger and Lawrence K Saul. Distance metric learning for large margin nearest
+
+neighbor classiﬁcation. Journal of Machine Learning Research  10:207–244  2009.
+
+[38] Alan Geoffrey Wilson. The use of entropy maximizing models  in the theory of trip distribution 
+mode split and route split. Journal of Transport Economics and Policy  pages 108–126  1969.
+
+[39] Shaodan Zhai  Tian Xia  Ming Tan  and Shaojun Wang. Direct 0-1 loss minimization and
+margin maximization with boosting. In C. J. C. Burges  L. Bottou  M. Welling  Z. Ghahramani 
+and K. Q. Weinberger  editors  Advances in Neural Information Processing Systems 26  pages
+872–880. Curran Associates  Inc.  2013.
+
+11
+
+,Marco Cuturi
+Olivier Teboul

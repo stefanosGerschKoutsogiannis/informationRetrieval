@@ -1,0 +1,968 @@
+2019,Communication-Efficient Distributed Blockwise Momentum SGD with Error-Feedback,Communication overhead is a major bottleneck hampering the scalability of distributed machine learning systems. Recently  there has been a surge of interest in 
+using gradient compression to improve the communication efficiency of distributed neural network training. Using 1-bit quantization  signSGD with majority vote achieves a 32x reduction in communication cost. However  its convergence is based on unrealistic assumptions and can diverge in practice. In this paper  we propose a general distributed compressed SGD with Nesterov's momentum. We consider two-way compression  which compresses the gradients both to and from workers. Convergence analysis on nonconvex problems for general gradient compressors is provided. By partitioning the gradient into blocks  a blockwise compressor is introduced such that each gradient block is compressed and transmitted in 1-bit format with a scaling factor  leading to a nearly 32x reduction on communication. Experimental results show that the proposed method converges as fast as full-precision distributed momentum SGD and achieves the same testing accuracy. In particular  on distributed ResNet training with 7 workers on the ImageNet  the proposed algorithm achieves the same testing accuracy as momentum SGD using full-precision gradients  but with $46\%$ less wall clock time.,Communication-Efﬁcient Distributed Blockwise
+
+Momentum SGD with Error-Feedback
+
+Shuai Zheng⇤1 2  Ziyue Huang1  James T. Kwok1
+
+shzheng@amazon.com  {zhuangbq  jamesk}@cse.ust.hk
+
+1Department of Computer Science and Engineering
+Hong Kong University of Science and Technology
+
+2Amazon Web Services
+
+Abstract
+
+Communication overhead is a major bottleneck hampering the scalability of dis-
+tributed machine learning systems. Recently  there has been a surge of interest in
+using gradient compression to improve the communication efﬁciency of distributed
+neural network training. Using 1-bit quantization  signSGD with majority vote
+achieves a 32x reduction on communication cost. However  its convergence is based
+on unrealistic assumptions and can diverge in practice. In this paper  we propose
+a general distributed compressed SGD with Nesterov’s momentum. We consider
+two-way compression  which compresses the gradients both to and from workers.
+Convergence analysis on nonconvex problems for general gradient compressors
+is provided. By partitioning the gradient into blocks  a blockwise compressor is
+introduced such that each gradient block is compressed and transmitted in 1-bit
+format with a scaling factor  leading to a nearly 32x reduction on communica-
+tion. Experimental results show that the proposed method converges as fast as
+full-precision distributed momentum SGD and achieves the same testing accuracy.
+In particular  on distributed ResNet training with 7 workers on the ImageNet  the
+proposed algorithm achieves the same testing accuracy as momentum SGD using
+full-precision gradients  but with 46% less wall clock time.
+
+1
+
+Introduction
+
+Deep neural networks have been highly successful in recent years [9  10  17  22  27]. To achieve
+state-of-the-art performance  they often have to leverage the computing power of multiple machines
+during training [8  26  28  6]. Popular approaches include distributed synchronous SGD and its
+momentum variant SGDM  in which the computational load for evaluating a mini-batch gradient is
+distributed among the workers. Each worker performs local computation  and these local informations
+are then merged by the server for ﬁnal update on the model parameters. However  its scalability is
+limited by the possibly overwhelming cost due to communication of the gradient and model parameter
+[12]. Let d be the gradient/parameter dimensionality  and M be the number of workers. 64M d bits
+need to be transferred between the workers and server in each iteration.
+To mitigate this communication bottleneck  the two common approaches are gradient sparsiﬁcation
+and gradient quantization. Gradient sparsiﬁcation only sends the most signiﬁcant  information-
+preserving gradient entries. A heuristic algorithm is ﬁrst introduced in [16]  in which only the large
+entries are transmitted. On training a neural machine translation model with 4 GPUs  this greatly
+reduces the communication overhead and achieves 22% speedup [1]. Deep gradient compression
+[13] is another heuristic method that combines gradient sparsiﬁcation with other techniques such as
+momentum correction  local gradient clipping  and momentum factor masking  achieving signiﬁcant
+
+⇤The work was done before Shuai Zheng joined Amazon Web Services.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+reduction on communication cost. Recently  a stochastic sparsiﬁcation method was proposed in [23]
+that balances sparsity and variance by solving a constrained linear programming. MEM-SGD [18]
+combines top-k sparsiﬁcation with error correction. By keeping track of the accumulated errors 
+these can be added back to the gradient estimator before each transmission. MEM-SGD converges at
+the same rate as SGD on convex problems  whilst reducing the communication overhead by a factor
+equal to the problem dimensionality.
+On the other hand  gradient quantization mitigates the communication bottleneck by lowering the
+gradient’s ﬂoating-point precision with a smaller bit width. 1-bit SGD achieves state-of-the-art
+results on acoustic modeling while dramatically reducing the communication cost [16  19]. TernGrad
+[24] quantizes the gradients to ternary levels {1  0  1}. QSGD [2] employs stochastic randomized
+rounding to ensure unbiasedness of the estimator. Error-compensated quantized SGD (ECQ-SGD) was
+proposed in [25]  wherein a similar stochastic quantization function used in QSGD is employed  and
+an error bound is obtained for quadratic loss functions. Different from the error-feedback mechanism
+proposed in MEM-SGD  ECQ-SGD requires two more hyper-parameters and its quantization errors
+are decayed exponentially. Thus  error feedback is limited to a small number of iterations. Also 
+ECQ-SGD uses all-to-all broadcast (which may involve large network trafﬁc and idle time)  while we
+consider parameter-server architecture. Recently  Bernstein et al. proposed signSGD with majority
+vote [3]  which only transmits the 1-bit gradient sign between workers and server. A variant using
+momentum  called signum with majority vote  is also introduced though without convergence analysis
+[4] . Using the majority vote  signSGD achieves a notion of Byzantine fault tolerance [4]. Moreover 
+it converges at the same rate as distributed SGD  though it has to rely on the unrealistic assumptions
+of having a large mini-batch and unimodal symmetric gradient noise. Indeed  signSGD can diverge
+in some simple cases when these assumptions are violated [11]. With only a single worker  this
+divergence issue can be ﬁxed by using the error correction technique in MEM-SGD  leading to SGD
+with error-feedback (EF-SGD) [11].
+While only a single worker is considered in EF-SGD  we study in this paper the more interesting
+distributed setting. An extension of MEM-SGD and EF-SGD with parallel computing was proposed in
+[7] for all-to-all broadcast. Another related architecture is allreduce. Compression at the server can be
+implemented between the reduce and broadcast steps in tree allreduce  or between the reduce-scatter
+and allgather steps in ring allreduce. However  allreduce requires repeated gradient aggregations 
+and the compressed gradients need to be ﬁrst decompressed before they are summed. Hence  heavy
+overheads may be incurred.
+In this paper  we study the distributed setting with a parameter server architecture. To ensure efﬁcient
+communication  we consider two-way gradient compression  in which gradients in both directions
+(server to/from workers) are compressed. Note that existing works (except signSGD/signum with
+majority vote [3  4]) do not compress the aggregated gradients before sending back to workers.
+Moreover  as gradients in a deep network typically have similar magnitudes in each layer  each
+layer-wise gradient can be sufﬁciently represented using a sign vector and its average `1-norm. This
+layer-wise (or blockwise in general) compressor achieves nearly 32x reduction in communication cost.
+The resulant procedure is called communication-efﬁcient distributed SGD with error-feedback (dist-
+EF-SGD). Analogous to SGDM  we also propose a stochastic variant dist-EF-SGDM with Nesterov’s
+momentum [14]. The convergence properties of dist-EF-SGD(M) are studied theoretically.
+Our contributions are: (i) We provide a bound on dist-EF-SGD with general stepsize schedule for
+a class of compressors (including the commonly used sign-operator and top-k sparsiﬁcation). In
+particular  without relying on the unrealistic assumptions in [3  4]  we show that dist-EF-SGD with
+
+best of our knowledge  these are the ﬁrst convergence results on two-way gradient compression with
+Nesterov’s momentum; (iii) We propose a general blockwise compressor and show its theoretical
+properties. Experimental results show that the proposed algorithms are efﬁcient without losing
+prediction accuracy. After our paper has appeared  we note a similar idea was independently proposed
+in [21]. Different from ours  they do not consider changing stepsize  blockwise compressor and
+Nesterov’s momentum.
+
+distributed synchronous SGD; (ii) We study gradient compression with Nesterov’s momentum in a
+
+constant/decreasing/increasing stepsize converges at an O(1/pM T ) rate  which matches that of
+parameter server. For dist-EF-SGDM with constant stepsize  we obtain an O(1/pM T ) rate. To the
+
+2
+
+Notations. For a vector x  kxk1 and kxk2 are its `1- and `2-norms  respectively. sign(x) outputs a
+vector in which each element is the sign of the corresponding entry of x. For two vectors x  y  hx  yi
+denotes the dot product. For a function f  its gradient is rf.
+2 Related Work: SGD with Error-Feedback
+
+In machine learning  one is often interested in minimizing the expected risk F (x) = E⇠[f (x  ⇠)].
+which directly measures the generalization error [5]. Here  x 2 Rd is the model parameter  ⇠ is drawn
+from some unknown distribution  and f (x  ⇠) is the possibly nonconvex risk due to x. When the
+expectation is taken over a training set of size n  the expected risk reduces to empirical risk.
+Recently  Karimireddy et al. [11] introduced SGD with error-feedback (EF-SGD)  which combines
+gradient compression with error correction (Algorithm 1). A single machine is considered  which
+keeps the gradient difference that is not used for parameter update in the current iteration. In the next
+iteration t  the accumulated residual et is added to the current gradient. The corrected gradient pt is
+then fed into an -approximate compressor.
+Deﬁnition 1. [11] An operator C : Rd ! Rd is an -approximate compressor for  2 (0  1] if
+kC(x)  xk2
+Examples of -approximate compressors include the scaled sign operator C(v) = kvk1/d · sign(v)
+[11] and top-k operator (which only preserves the k coordinates with the largest absolute values) [18].
+One can also have randomized compressors that only satisfy Deﬁnition 1 in expectation. Obviously 
+it is desirable to have a large  while achieving low communication cost.
+
+2.
+2  (1  )kxk2
+
+pt = ⌘gt + et {stochastic gradient gt = rf (xt ⇠ t)}
+xt+1 = xt  t
+et+1 = pt  t
+
+Algorithm 1 SGD with Error-Feedback (EF-SGD) [11]
+1: Input: stepsize ⌘; compressor C(·).
+2: Initialize: x0 2 Rd; e0 = 0 2 Rd
+3: for t = 0  . . .   T  1 do
+4:
+5: t = C(pt) {compressed value output}
+6:
+7:
+8: end for
+EF-SGD achieves the same O(1/pT )) rate as SGD. To obtain this convergence guarantee  an
+important observation is that the error-corrected iterate ˜xt = xt  et satisﬁes the recurrence: ˜xt+1 =
+˜xt  ⌘gt  which is similar to that of SGD. This allows utilizing the convergence proof of SGD to
+bound the gradient difference krF (˜xt)  rF (xt)k2.
+3 Distributed Blockwise Momentum SGD with Error-Feedback
+
+3.1 Distributed SGD with Error-Feedback
+
+The proposed procedure  which extends EF-SGD to the distributed setting. is shown in Algorithm 2.
+The computational workload is distributed over M workers. A local accumulated error vector et i and
+a local corrected gradient vector pt i are stored in the memory of worker i. At iteration t  worker i
+pushes the compressed signal t i = C(pt i) to the parameter server. On the server side  all workers’
+t i’s are aggregated and used to update its global error-corrected vector ˜pt. Before sending back the
+ﬁnal update direction ˜pt to each worker  compression is performed to ensure a comparable amount
+of communication costs between the push and pull operations. Due to gradient compression on the
+server  we also employ a global accumulated error vector ˜et. Unlike EF-SGD in Algorithm 1  we do
+not multiply gradient gt i by the stepsize ⌘t before compression. The two cases make no difference
+when ⌘t is constant. However  when the stepsize is changing over time  this would affect convergence.
+We also rescale the local accumulated error et i by ⌘t1/⌘t. This modiﬁcation  together with the
+use of error correction on both workers and server  allows us to obtain Lemma 1. Because of these
+differences  note that dist-EF-SGD does not reduce to EF-SGD when M = 1. When C(·) is the
+identity mapping  dist-EF-SGD reduces to full-precision distributed SGD.
+
+3
+
+on each worker i
+
+Algorithm 2 Distributed SGD with Error-Feedback (dist-EF-SGD)
+1: Input: stepsize sequence {⌘t} with ⌘1 = 0; number of workers M; compressor C(·).
+2: Initialize: x0 2 Rd; e0 i = 0 2 Rd on each worker i; ˜e0 = 0 2 Rd on server
+3: for t = 0  . . .   T  1 do
+4:
+pt i = gt i + ⌘t1
+5:
+⌘t
+push t i = C(pt i) to server
+6:
+xt+1 = xt  ⌘t ˜t { ˜t is pulled from server}
+7:
+8:
+et+1 i = pt i  t i
+9:
+MPM
+pull t i from each worker i and ˜pt = 1
+10:
+push ˜t = C(˜pt) to each worker
+11:
+˜et+1 = ˜pt  ˜t
+12:
+13: end for
+
+et i {stochastic gradient gt i = rf (xt ⇠ t i)}
+
+i=1 t i + ⌘t1
+⌘t
+
+on server
+
+˜et
+
+2 kx  yk2
+
+2 for x  y 2 Rd).
+
+In the following  we investigate the convergence of dist-EF-SGD. We make the following assumptions 
+which are common in the stochastic approximation literature.
+Assumption 1. F is lower-bounded (i.e.  F⇤ = inf x2Rd F (x) > 1) and L-smooth (i.e.  F (x) 
+F (y) + hrF (y)  x  yi + L
+2⇤  2.
+Assumption 2. The stochastic gradient gt i has bounded variance: Et⇥kgt i  rF (xt)k2
+Assumption 3. The full gradient rF is uniformly bounded: krF (xt)k2
+This implies the second moment is bounded  i.e.  Et⇥kgt ik2
+i=1 et i⌘  where xt  ˜et 
+Lemma 1. Consider the error-corrected iterate ˜xt = xt  ⌘t1⇣˜et + 1
+and et i’s are generated from Algorithm 2. It satisﬁes the recurrence: ˜xt+1 = ˜xt  ⌘t
+i=1 gt i.
+The above Lemma shows that ˜xt is very similar to the distributed SGD iterate except that the
+stochastic gradients are evaluated at xt instead of ˜xt. This connection allows us to utilize the analysis
+of full-precision distributed SGD. In particular  we have the following Lemma.
+
+2  !2.
+2⇤  G2 ⌘ 2 + !2.
+MPM
+
+MPM
+
+1
+
+Lemma 2. E˜et + 1
+i=1 et i
+MPM
+
+2
+
+2  8(1)G2
+
+2
+
+⇥1 + 16
+
+2⇤ for any t  0.
+
+This implies that rF (˜xt) ⇡ rF (xt) by Assumption 1. Given the above results  we can prove
+convergence of the proposed method by utilizing tools used on the full-precision distributed SGD.
+Theorem 1. Suppose that Assumptions 1-3 hold. Assume that 0 <⌘ t < 3/(2L) for all t. For the
+{xt} sequence generated from Algorithm 2  we have
+EhkrF (xo)k2
+
+k=0 ⌘k (3  2L⌘k)
+
+[F (x0)  F⇤] +
+
+2i 
+
+2L2
+M
+
+⌘2
+t
+
+4
+
+T1Xt=0
+
+PT1
+
+k=0 ⌘k (3  2L⌘k)
+32L2(1  )G2
+
++
+
+2
+
+1 +
+
+16
+
+2 T1Xt=0
+
+PT1
+
+ 
+
+⌘t⌘2
+
+t1
+
+PT1
+k=0 ⌘k (3  2L⌘k)
+PT1
+
+t=0 ⌘t(32L⌘t)
+
+where o 2{ 0  . . .   T  1} is an index such that P (o = k) = ⌘k(32L⌘k)
+  8k = 0  . . .   T  1.
+The ﬁrst term on the RHS shows decay of the initial value. The second term is related to the variance 
+and the proposed algorithm enjoys variance reduction with more workers. The last term is due
+to gradient compression. A large  (less compression) makes this term smaller and thus faster
+convergence. Similar to the results in [11]  our bound also holds for unbiased compressors (e.g. 
+2 for some
+QSGD [2]) of the form C(·) = cU (·)  where E[U (x)] = x and E[kU (x)k2
+0 < c < 1. Then  cU (·) is a c-approximate compressor in expectation.
+The following Corollary shows that dist-EF-SGD has a convergence rate of O(1/pM T )  leading to
+a O(1/(M✏ 4)) iteration complexity for satisfying E[krF (xo)k2
+
+2]  ✏2.
+
+2]  1
+
+ckxk2
+
+4
+
+{G1  . . .  GB}.
+
+Algorithm 3 Distributed Blockwise SGD with Error-Feedback (dist-EF-blockSGD)
+1: Input: stepsize sequence {⌘t} with ⌘1 = 0; number of workers M; block partition
+2: Initialize: x0 2 Rd; e0 i = 0 2 Rd on each worker i; ˜e0 = 0 2 Rd on server
+3: for t = 0  . . .   T  1 do
+4:
+pt i = gt i + ⌘t1
+5:
+⌘t
+
+et i {stochastic gradient gt i = rf (xt ⇠ t i)}
+
+on each worker i
+
+on server
+
+d1
+
+dB
+
+sign(pt i G1)  . . .   kpt i GBk1
+
+push t i =hkpt i G1k1
+xt+1 = xt  ⌘t ˜t { ˜t is pulled from server}
+et+1 i = pt i  t i
+MPM
+pull t i from each worker i and ˜pt = 1
+sign(˜pt G1)  . . .   k˜pt GBk1
+
+push ˜t =hk˜pt G1k1
+˜et+1 = ˜pt  ˜t
+
+dB
+
+d1
+
+6:
+7:
+8:
+9:
+10:
+
+11:
+12:
+13: end for
+
+sign(pt i GB )i to server
+
+˜et
+
+i=1 t i + ⌘t1
+⌘t
+
+sign(˜pt GB )i to each worker
+
+Corollary 1. Let stepsize ⌘ = min( 1
+2L  
+
+pT /pM +(1)1/3(1/2+16/4)1/3T 1/3 ) for some > 0. Then 
+
+
+
+E[krF (xo)k2
+
+2] 
+
+E[krF (xo)k2
+
+2] 
+
+8L
+3T
+
++
+
+4L
+T
+
+
+
+[F (x0)  F⇤] + 2
+2(1  )1/3h 1
+[F (x0)  F⇤] + 2
+
+[F (x0)  F⇤] + L2
+1
+pM T
+ [F (x0)  F⇤] + 8L22G2i
+21/3
+1 +
+[F (x0)  F⇤] + L2
+
+3pM T
+
+2/3T 2/3
+
+16
+
+
+
+2
+
+.
+
+.
+
+In comparison  under the same assumptions  distributed synchronous SGD achieves
+
+Thus  the convergence rate of dist-EF-SGD matches that of distributed synchronous SGD (with
+full-precision gradients) after T  O(1/2) iterations  even though gradient compression is used.
+Moreover  more workers (larger M) leads to faster convergence. Note that the bound above does
+not reduce to that of EF-SGD when M = 1  as we have two-way compression. When M = 1  our
+bound also differs from Remark 4 in [11] in that our last term is O((1  )1/3/(4/3T 2/3))  while
+theirs is O((1  )/(2T )) (which is for single machine with one-way compression). Ours is worse
+by a factor of O(T 1/32/3/(1  )2/3)  which is the price to pay for two-way compression and a
+linear speedup of using M workers. Moreover  unlike signSGD with majority vote [3]  we achieve
+a convergence rate of O(1/pM T ) without assuming a large mini-batch size (= T ) and unimodal
+
+symmetric gradient noise.
+Theorem 1 only requires 0 <⌘ t < 3/(2L) for all t. This thus allows the use of any decreasing 
+increasing  or hybrid stepsize schedule. In particular  we have the following Corollary.
+Corollary 2. Let ⌘t =
+16L44M 2 or ⌘t =
+
+((t+1)T )1/4/(pM )+(1)1/3(1/2+16/4)1/3T 1/3 (decreasing stepsize) with T 
+T /pM +(1)1/3(1/2+16/4)1/3T 5/6 (increasing stepsize) with T  4L22M.
+
+Then  dist-EF-SGD converges to a stationary point at a rate of O(1/pM T ).
+
+pt+1
+
+
+
+To the best of our knowledge  this is the ﬁrst such result for distributed compressed SGD with
+decreasing/increasing stepsize on nonconvex problems. These two stepsize schedules can also be
+used together. For example  one can use an increasing stepsize at the beginning of training as
+warm-up  and then a decreasing stepsize afterwards.
+
+3.2 Blockwise Compressor
+A commonly used compressor is [11]:
+
+C(v) = kvk1/d · sign(v).
+
+5
+
+(1)
+
+1/(dkvk2
+
+1
+
+.
+
+1
+db
+
+2  minb2[B]
+
+Compared to using only the sign operator as in signSGD  the factor kvk1/d can preserve the gradient’s
+2)  and can be particularly
+magnitude. However  as shown in [11]  its  in Deﬁnition 1 is kvk2
+small when v is sparse. When  is closer to 1  the bound in Corollary 1 becomes smaller and thus
+convergence is faster. In this section  we achieve this by proposing a blockwise extension of (1).
+Speciﬁcally  we partition the compressor input v into B blocks  where each block b has db elements
+indexed by Gb. Block b is then compressed with scaling factor kvGbk1/db (where vGb is the subvector
+of v with elements in block b)  leading to: CB(v) = [kvG1k1/d1 · sign(vG1)  . . .  kvGBk1/dB ·
+sign(vGB )]. A similar compression scheme  with each layer being a block  is considered in the
+experiments of [11]. However  they provide no theoretical justiﬁcations. The following Proposition
+ﬁrst shows that CB(·) is also an approximate compressor.
+Proposition 1. Let [B] = {1  2  . . .   B}. CB is a (v)-approximate compressor  where (v) =
+minb2[B] kvGbk2
+dbkvGbk2
+The resultant algorithm will be called dist-EF-blockSGD (Algorithm 3) in the sequel. As can be seen 
+this is a special case of Algorithm 2. By replacing  with (v) in Proposition 1  the convergence
+results of dist-EF-SGD in Section 3.1 can be directly applied.
+There are many ways to partition the gradient into blocks. In practice  one can simply consider each
+parameter tensor/matrix/vector in the deep network as a block. The intuition is that (i) gradients in the
+same parameter tensor/matrix/vector typically have similar magnitudes  and (ii) the corresponding
+scaling factors can thus be tighter than the scaling factor obtained on the whole parameter  leading to
+a larger . As an illustration of (i)  Figure 1(a) shows the coefﬁcient of variation (which is deﬁned as
+the ratio of the standard deviation to the mean) of {|gt i|}i2Gb averaged over all blocks and iterations
+in an epoch  obtained from ResNet-20 on the CIFAR-100 dataset (with a mini-batch size of 16 per
+worker).2 A value smaller than 1 indicates that the absolute gradient values in each block concentrate
+around the mean. As for point (ii) above  consider the case where all the blocks are of the same
+size (db = ˜d 8b)  elements in the same block have the same magnitude (8i 2G b |vi| = cb for some
+cb)  and the magnitude is increasing across blocks (cb/cb+1 = ↵ for some ↵< 1). For the standard
+compressor in (1)   = kvk2
+B(1↵) for a sufﬁciently large B; whereas for the
+dkvk2
+proposed blockwise compressor  (v) = 1  (1+↵)
+B(1↵). Figure 1(b) shows the empirical estimates of
+kvk2
+
+2) and (v) in the ResNet-20 experiment. As can be seen  (v)  kvk2
+
+B(1↵)(1+↵B) ⇡ (1+↵)
+
+= (1+↵)(1↵B)
+
+2).
+1/(dkvk2
+
+1
+
+2
+
+1/(dkvk2
+
+(a) Coefﬁcient of variation of {|gt i|}i2Gb.
+
+(b)  for blockwise and non-block versions.
+
+Figure 1: Illustrations using the ResNet-20 in Section 4.1. Left: Averaged coefﬁcient of variation of
+{|gt i|}i2Gb. Right: Empirical estimates of  for the blockwise ((v) in Proposition 1) and non-block
+versions (kvk2
+2)). Each point is the minimum among all iterations in an epoch. The lower
+bounds  minb2[B] 1/db and 1/d  are also shown. Note that the ordinate is in log scale.
+
+1/(dkvk2
+
+The per-iteration communication costs of the various distributed algorithms are shown in Table 1.
+Compared to signSGD with majority vote [3]  dist-EF-blockSGD requires an extra 64M B bits for
+transmitting the blockwise scaling factors (each factor kvGbk1/db is stored in ﬂoat32 format and
+transmitted twice in each iteration). By treating each vector/matrix/tensor parameter as a block  B
+is typically in the order of hundreds. For most problems of interest  64M B/(2M d) < 103. The
+reduction in communication cost compared to full-precision distributed SGD is thus nearly 32x.
+
+2The detailed experimental setup is in Section 4.1.
+
+6
+
+0255075100125150175200Epoch105104103102101(v)kvk21dkvk22lowerbound(blockwise)lowerbound(non-block)Table 1: Communication costs of the various distributed gradient compression algorithms and SGD.
+
+algorithm
+
+full-precision SGD
+
+signSGD with majority vote
+
+dist-EF-blockSGD
+
+#bits per iteration
+
+64M d
+2M d
+
+2M d + 64M B
+
+1
+
+MPM
+
+3.3 Nesterov’s Momentum
+Momentum has been widely used in deep networks [20]. Standard distributed SGD with Nesterov’s
+momentum [14] and full-precision gradients uses the update: mt i = µmt1 i + gt i 8i 2 [M ] and
+i=1(µmt i + gt i)  where mt i is a local momentum vector maintained by each
+xt+1 = xt  ⌘t
+worker i at time t (with m0 i = 0)  and µ 2 [0  1) is the momentum parameter. In this section  we
+extend the proposed dist-EF-SGD with momentum. Instead of sending the compressed gt i + ⌘t1
+et i
+⌘t
+to the server  the compressed µmt i + gt i + ⌘t1
+et i is sent. The server merges all the workers’s
+⌘t
+results and sends it back to each worker. The resultant procedure with blockwise compressor is called
+dist-EF-blockSGDM (Algorithm 4)  and has the same communication cost as dist-EF-blockSGD.
+The corresponding non-block variant is analogous.
+Algorithm 4 Distributed Blockwise Momentum SGD with Error-Feedback (dist-EF-blockSGDM)
+1: Input: stepsize sequence {⌘t} with ⌘1 = 0; momentum parameter 0  µ < 1; number of
+2: Initialize: x0 2 Rd; m1 i = e0 i = 0 2 Rd on each worker i; ˜e0 = 0 2 Rd on server
+3: for t = 0  . . .   T  1 do
+4:
+5:
+6:
+
+workers M; block partition {G1  . . .  GB}.
+
+on each worker i
+
+d1
+
+et i
+
+sign(pt i G1)  . . .   kpt i GBk1
+
+mt i = µmt1 i + gt i {stochastic gradient gt i = rf (xt ⇠ t i)}
+pt i = µmt i + gt i + ⌘t1
+⌘t
+push t i =hkpt i G1k1
+xt+1 = xt  ⌘t ˜t { ˜t is pulled from server}
+et+1 i = pt i  t i
+MPM
+pull t i from each worker i and ˜pt = 1
+sign(˜pt G1)  . . .   k˜pt GBk1
+
+i=1 t i + ⌘t1
+⌘t
+
+dB
+
+d1
+
+˜et
+
+sign(pt i GB )i to server
+
+dB
+
+push ˜t =hk˜pt G1k1
+˜et+1 = ˜pt  ˜t
+
+sign(˜pt GB )i to each worker
+
+12:
+13:
+14: end for
+Similar to Lemma 1  the following Lemma shows that the error-corrected iterate ˜xt is very similar to
+Nesterov’s accelerated gradient iterate  except that the momentum is computed based on {xt}.
+MPM
+Lemma 3. The error-corrected iterate ˜xt = xt  ⌘t1(˜et + 1
+are generated from Algorithm 4  satisﬁes the recurrence: ˜xt+1 = ˜xt  ⌘t
+i=1 et ik2 is bounded and rF (˜xt) ⇡ rF (xt).
+As in Section 3.1  it can be shown that k˜et + 1
+The following Theorem shows the convergence rate of the proposed dist-EF-blockSGDM.
+Theorem 2. Suppose that Assumptions 1-3 hold. Let ⌘t = ⌘ for some ⌘> 0. For any ⌘  (1µ)2
+2L  
+and the {xt} sequence generated from Algorithm 4  we have
+[F (x0)  F⇤] +
+
+i=1 et i)  where xt  ˜et  and et i’s
+
+MPM
+
+MPM
+
+i=1(µmt i + gt i).
+
+4(1  µ)
+
+(2)
+
+1
+
+EhkrF (xo)k2
+
+2i 
+
+7:
+8:
+9:
+10:
+11:
+
+on server
+
+⌘T
+32L2⌘2(1  )G2
+
+2(1  µ)2
+
+1 +
+
++
+
+2L⌘µ4
+
+(1  µ)3
+
+2L⌘2
+
+(1  µ)M 1 +
+2 .
+
+16
+
+Compared to Theorem 1  using a larger momentum parameter µ makes the ﬁrst term (which depends
+on the initial condition) smaller but a worse variance term (second term) and error term due to
+gradient compression (last term). Similar to Theorem 1  a larger ⌘ makes the third term larger. The
+following Corollary shows that the proposed dist-EF-blockSGDM achieves a convergence rate of
+
+O(((1  µ)[F (x0)  F⇤] + 2/(1  µ))/pM T ).
+
+7
+
+(a) Mini-batch size: 8 per worker. (b) Mini-batch size: 16 per worker. (c) Mini-batch size: 32 per worker.
+Figure 2: Testing accuracy on CIFAR-100. Top: No momentum; Bottom: With momentum. The solid
+curve is the mean accuracy over ﬁve repetitions. The shaded region spans one standard deviation.
+
+Corollary 3. Let ⌘ =
+T  42L2M
+4(1)1/3[ (1µ)
+
+(1µ)4   EhkrF (xo)k2
+
+
+
+[F (x0)F⇤]+8L22G2/(1µ)2]
+
+2/3T 2/3
+
+4 Experiments
+
+
+
+pT /pM +(1)1/3(1/2+16/4)1/3T 1/3
+
+
+
+2i  h 2(1µ)
+1µi
+[F (x0)  F⇤] + L2
+⇥1 + 16
+2⇤1/3.
+
+for some >
+2pM T
+
+0.
+
+For any
+(1µ)4T +
+
++ 4L22µ42
+
+4.1 Multi-GPU Experiment on CIFAR-100
+
+In this experiment  we demonstrate that the proposed dist-EF-blockSGDM and dist-EF-blockSGD
+(µ = 0 in Algorithm 4)  though using fewer bits for gradient transmission  still has good convergence.
+For faster experimentation  we use a single node with multiple GPUs (an AWS P3.16 instance with 8
+Nvidia V100 GPUs  each GPU being a worker) instead of a distributed setting.
+Experiment is performed on the CIFAR-100 dataset  with 50K training images and 10K test images.
+We use a 20-layer ResNet [10]. Each parameter tensor/matrix/vector is treated as a block in dist-
+EF-blockSGD(M). They are compared with (i) distributed synchronous SGD (with full-precision
+gradient); (ii) distributed synchronous SGD (full-precision gradient) with momentum (SGDM); (iii)
+signSGD with majority vote [3]; and (iv) signum with majority vote [4]. All the algorithms are
+implemented in MXNet. We vary the mini-batch size per worker in {8  16  32}. Results are averaged
+over 5 repetitions. More details of the experiments are shown in Appendix A.1.
+Figure 2 shows convergence of the testing accuracy w.r.t. the number of epochs. As can be seen  dist-
+EF-blockSGD converges as fast as SGD and has slightly better accuracy  while signSGD performs
+poorly. In particular  dist-EF-blockSGD is robust to the mini-batch size  while the performance of
+signSGD degrades with smaller mini-batch size (which agrees with the results in [3]). Momentum
+makes SGD and dist-EF-blockSGD faster with mini-batch size of 16 or 32 per worker  particularly
+before epoch 100. At epoch 100  the learning rate is reduced  and the difference is less obvious. This
+is because a larger mini-batch means smaller variance 2  so the initial optimality gap F (x0)  F⇤ in
+(2) is more dominant. Use of momentum (µ > 0) is then beneﬁcial. On the other hand  momentum
+signiﬁcantly improves signSGD. However  signum is still much worse than dist-EF-blockSGDM.
+
+4.2 Distributed Training on ImageNet
+
+In this section  we perform distributed optimization on ImageNet [15] using a 50-layer ResNet. Each
+worker is an AWS P3.2 instance with 1 GPU  and the parameter server is housed in one node. We
+
+8
+
+(a) Test accuracy w.r.t. epoch.
+
+(b) Test accuracy w.r.t. time.
+
+(c) Workload breakdown.
+
+(d) Test accuracy w.r.t. epoch.
+
+(e) Test accuracy w.r.t. time.
+
+(f) Workload breakdown.
+
+Figure 3: Distributed training results on the ImageNet dataset. Top: 7 workers; Bottom: 15 workers.
+use the publicly available code3 in [4]  and the default communication library Gloo communication
+library in PyTorch. As in [4]  we use its allreduce implementation for SGDM  which is faster.
+As momentum accelerates the training for large mini-batch size in Section 4.1  we only compare
+the momentum variants here. The proposed dist-EF-blockSGDM is compared with (i) distributed
+synchronous SGD with momentum (SGDM); and (ii) signum with majority vote [4]. The number of
+workers M is varied in {7  15}. With an odd number of workers  a majority vote will not produce
+zero  and so signum does not lose accuracy by using 1-bit compression. More details of the setup are
+in Appendix A.2.
+Figure 3 shows the testing accuracy w.r.t. the number of epochs and wall clock time. As in Section 4.1 
+SGDM and dist-EF-blockSGDM have comparable accuracies  while signum is inferior. When 7
+workers are used  dist-EF-blockSGDM has higher accuracy than SGDM (76.77% vs 76.27%). dist-
+EF-blockSGDM reaches SGDM’s highest accuracy in around 13 hours  while SGDM takes 24 hours
+(Figure 3(b))  leading to a 46% speedup. With 15 machines  the improvement is smaller (Figure 3(e)).
+This is because the burden on the parameter server is heavier. We expect comparable speedup with the
+7-worker setting can be obtained by using more parameter servers. In both cases  signum converges
+fast but the test accuracies are about 4% worse.
+Figures 3(c) and 3(f) show a breakdown of wall clock time into computation and communication
+time.4 All methods have comparable computation costs  but signum and dist-EF-blockSGDM
+have lower communication costs than SGDM. The communication costs for signum and dist-EF-
+blockSGDM are comparable for 7 workers  but for 15 workers signum is lower. We speculate that it
+is because the sign vectors and scaling factors are sent separately to the server in our implementation 
+which causes more latency on the server with more workers. This may be alleviated if the two
+operations are fused.
+
+5 Conclusion
+
+In this paper  we proposed a distributed blockwise SGD algorithm with error feedback and mo-
+mentum. By partitioning the gradients into blocks  we can transmit each block of gradient using
+1-bit quantization with its average `1-norm. The proposed methods are communication-efﬁcient and
+have the same convergence rates as full-precision distributed SGD/SGDM for nonconvex objectives.
+Experimental results show that the proposed methods have fast convergence and achieve the same
+test accuracy as SGD/SGDM  while signSGD and signum only achieve much worse accuracies.
+
+3https://github.com/PermiJW/signSGD-with-Majority-Vote
+4Following [4]  communication time includes the extra computation time for error feedback and compression.
+
+9
+
+References
+[1] A. F. Aji and K. Heaﬁeld. Sparse communication for distributed gradient descent. In Proceedings
+of the Conference on Empirical Methods in Natural Language Processing  pages 440–445 
+2017.
+
+[2] D. Alistarh  D. Grubic  J. Li  R. Tomioka  and M. Vojnovic. QSGD: Communication-efﬁcient
+In Proceedings of the Neural Information
+
+SGD via gradient quantization and encoding.
+Processing Systems Conference  pages 1709–1720  2017.
+
+[3] J. Bernstein  Y. Wang  K. Azizzadenesheli  and A. Anandkumar. signSGD: Compressed
+optimisation for non-convex problems. In Proceedings of the International Conference on
+Machine Learning  pages 560–569  2018.
+
+[4] J. Bernstein  J.and Zhao  K. Azizzadenesheli  and A. Anandkumar. signSGD with majority vote
+is communication efﬁcient and fault tolerant. In Proceedings of the International Conference
+on Learning Representations  2019.
+
+[5] L. Bottou and Y. Lecun. Large scale online learning. In Proceedings of the Neural Information
+
+Processing Systems Conference  pages 217–224  2004.
+
+[6] J. Chen  X. Pan  R. Monga  S. Bengio  and R. Jozefowicz. Revisiting distributed synchronous
+
+SGD. Preprint arXiv:1604.00981  2016.
+
+[7] J. Cordonnier. Convex optimization using sparsiﬁed stochastic gradient descent with memory.
+
+Technical report  2018.
+
+[8] J. Dean  G.S. Corrado  R. Monga  K. Chen  M. Devin  Q.V. Le  and A. Ng. Large scale
+In Proceedings of the Neural Information Processing Systems
+
+distributed deep networks.
+Conference  pages 1223–1231  2012.
+
+[9] A. Graves. Generating sequences with recurrent neural networks. Preprint arXiv:1308.0850 
+
+2013.
+
+[10] K. He  X. Zhang  S. Ren  and J. Sun.
+
+Identity mappings in deep residual networks.
+
+Proceedings of the European conference on computer vision  pages 630–645  2016.
+
+In
+
+[11] S. P. Karimireddy  Q. Rebjock  S. U. Stich  and M. Jaggi. Error feedback ﬁxes signSGD
+and other gradient compression schemes. In Proceedings of the International Conference on
+Machine Learning  pages 3252–3261  2019.
+
+[12] M. Li  D. G. Andersen  A. J. Smola  and K. Yu. Communication efﬁcient distributed machine
+In Proceedings of the Neural Information Processing
+
+learning with the parameter server.
+Systems Conference  pages 19–27  2014.
+
+[13] Y. Lin  S. Han  H. Mao  Y. Wang  and W. J. Dally. Deep gradient compression: Reducing
+the communication bandwidth for distributed training. In Proceedings of the International
+Conference on Representation Learning  2018.
+
+[14] Y. E. Nesterov. A method for solving the convex programming problem with convergence rate
+
+o (1/kˆ 2). In Dokl. Akad. Nauk SSSR  volume 269  pages 543–547  1983.
+
+[15] O. Russakovsky  J. Deng  H. Su  J. Krause  S. Satheesh  S. Ma  Z. Huang  A. Karpathy 
+A. Khosla  M. Bernstein  A. C. Berg  and L. Fei-Fei. ImageNet large scale visual recognition
+challenge. International journal of computer vision  115(3):211–252  2015.
+
+[16] F. Seide  H. Fu  J. Droppo  G. Li  and D. Yu. 1-bit stochastic gradient descent and its application
+to data-parallel distributed training of speech dnns. In Proceedings of the Annual Conference of
+the International Speech Communication Association  2014.
+
+[17] D. Silver  A. Huang  C. J. Maddison  A. Guez  L. Sifre  George Van D. D.  J. Schrittwieser 
+I. Antonoglou  V. Panneershelvam  M. Lanctot  S. Dieleman  D. Grewe  J. Nham  N. Kalchbren-
+ner  I. Sutskever  T. Lillicrap  M. Leach  K. Kavukcuoglu  T. Graepel  and D Hassabis. Mastering
+the game of Go with deep neural networks and tree search. Nature  529(7587):484–489  2016.
+
+10
+
+[18] S. U. Stich  J. Cordonnier  and M. Jaggi. Sparsiﬁed SGD with memory. In Proceedings of the
+
+Neural Information Processing Systems Conference  pages 4452–4463  2018.
+
+[19] N. Strom. Scalable distributed dnn training using commodity gpu cloud computing.
+
+In
+Proceedings of the Annual Conference of the International Speech Communication Association 
+2015.
+
+[20] I. Sutskever  J. Martens  G. Dahl  and G. Hinton. On the importance of initialization and
+momentum in deep learning. In Proceedings of the International Conference on Machine
+Learning  pages 1139–1147  2013.
+
+[21] H. Tang  C. Yu  X. Lian  T. Zhang  and J. Liu. Doublesqueeze: Parallel stochastic gradient
+descent with double-pass error-compensated compression. In Proceedings of the International
+Conference on Machine Learning  pages 6155–6165  2019.
+
+[22] A. Vaswani  N. Shazeer  N. Parmar  J. Uszkoreit  L. Jones  A. N. Gomez  Ł. Kaiser  and
+I. Polosukhin. Attention is all you need. In Proceedings of the Neural Information Processing
+Systems Conference  pages 5998–6008  2017.
+
+[23] J. Wangni  J. Wang  J. Liu  and T. Zhang. Gradient sparsiﬁcation for communication-efﬁcient
+distributed optimization. In Proceedings of the Neural Information Processing Systems Confer-
+ence  pages 1306–1316  2018.
+
+[24] W. Wen  C. Xu  F. Yan  C. Wu  Y. Wang  Y. Chen  and H. Li. Terngrad: Ternary gradients to
+reduce communication in distributed deep learning. In Proceedings of the Neural Information
+Processing Systems Conference  pages 1509–1519  2017.
+
+[25] J. Wu  W. Huang  J. Huang  and T. Zhang. Error compensated quantized SGD and its applications
+to large-scale distributed optimization. In Proceedings of the International Conference on
+Machine Learning  pages 5321–5329  2018.
+
+[26] E. P. Xing  Q. Ho  W. Dai  J. K. Kim  J. Wei  S. Lee  X. Zheng  P. Xie  A. Kumar  and Y. Yu.
+Petuum: A new platform for distributed machine learning on big data. IEEE Transactions on
+Big Data  1(2):49–67  2015.
+
+[27] W. Zaremba  I. Sutskever  and O. Vinyals. Recurrent neural network regularization. Preprint
+
+arXiv:1409.2329  2014.
+
+[28] M. Zinkevich  M. Weimer  L. Li  and A. J. Smola. Parallelized stochastic gradient descent.
+In Proceedings of the Neural Information Processing Systems Conference  pages 2595–2603 
+2010.
+
+11
+
+,Shuai Zheng
+Ziyue Huang
+James Kwok

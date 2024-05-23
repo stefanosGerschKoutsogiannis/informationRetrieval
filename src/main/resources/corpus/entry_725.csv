@@ -1,0 +1,737 @@
+2016,Bayesian Intermittent Demand Forecasting for Large Inventories,We present a scalable and robust Bayesian method for demand forecasting in the context of a large e-commerce platform  paying special attention to intermittent and bursty target statistics. Inference is approximated by the Newton-Raphson algorithm  reduced to linear-time Kalman smoothing  which allows us to operate on several orders of magnitude larger problems than previous related work. In a study on large real-world sales datasets  our method outperforms competing approaches on fast and medium moving items.,Bayesian Intermittent Demand Forecasting for Large
+
+Inventories
+
+Matthias Seeger  David Salinas  Valentin Flunkert
+
+Amazon Development Center Germany
+
+matthis@amazon.de  dsalina@amazon.de  flunkert@amazon.de
+
+Krausenstrasse 38
+
+10115 Berlin
+
+Abstract
+
+We present a scalable and robust Bayesian method for demand forecasting in the
+context of a large e-commerce platform  paying special attention to intermittent
+and bursty target statistics. Inference is approximated by the Newton-Raphson
+algorithm  reduced to linear-time Kalman smoothing  which allows us to operate on
+several orders of magnitude larger problems than previous related work. In a study
+on large real-world sales datasets  our method outperforms competing approaches
+on fast and medium moving items.
+
+1
+
+Introduction
+
+Demand forecasting plays a central role in supply chain management  driving automated ordering 
+in-stock management  and facilities planning. Classical forecasting methods  such as exponential
+smoothing [10] or ARIMA models [5]  produce Gaussian predictive distributions. While sufﬁcient
+for inventories of several thousand fast-selling items  Gaussian assumptions are grossly violated
+for the extremely large catalogues maintained by e-commerce platforms. There  demand is highly
+intermittent and bursty: long runs of zeros  with islands of high counts. Decision making requires
+quantiles of predictive distributions [14]  whose accuracy suffer under erroneous assumptions.
+In this work  we detail a novel methodology for intermittent demand forecasting which operates in
+the industrial environment of a very large e-commerce platform. Implemented in Apache Spark
+[16]  our method is used to process many hundreds of thousands of items and several hundreds of
+millions of item-days. Key requirements are automated parameter learning (no expert interventions) 
+scalability and a high degree of operational robustness. Our system produces forecasts both for short
+(one to three weeks) and longer lead times (up to several months)  the latter require feature maps
+depending on holidays  sales days  promotions  and price changes. Previous work on intermittent
+demand forecasting in Statistics is surveyed in [15]: none of these address longer lead times. On a
+modelling level  our proposal is related to [6]  yet several novelties are essential for operating at the
+industrial scale we target here. This paper makes the following contributions:
+
+• A combination of generalized linear models and time series smoothing. The former enables
+medium and longer term forecasts  the latter provides temporal continuity and reasonable
+distributions over time. Compared to [6]  we provide empirical evidence for the usefulness
+of this combination.
+
+• A novel algorithm for maximum likelihood parameter learning in state space models with
+non-Gaussian likelihood  using approximate Bayesian inference. While there is substantial
+related prior work  our proposal stands out in robustness and scalability. We show how
+approximate inference is solved by the Newton-Raphson algorithm  fully reduced to Kalman
+smoothing once per iteration. This reduction scales linearly (a vanilla implementation
+
+30th Conference on Neural Information Processing Systems (NIPS 2016)  Barcelona  Spain.
+
+would scale cubically). While previously used in Statistics [7  Sect. 10.7]  this reduction
+is not widely known in Machine Learning. If L-BFGS is used instead (as proposed in [6]) 
+approximate inference fails in our real-world use cases.
+
+• A multi-stage likelihood  taylored to intermittent and bursty demand data (extension of
+[15])  and a novel transfer function for Poisson likelihood  which robustiﬁes the Laplace
+approximation for bursty data. We demonstrate that our approach would not work without
+these novelties.
+
+The structure of this paper is as follows. In Section 2  we introduce intermittent demand likelihood
+function as well as a generalized linear model baseline. Our novel latent state forecasting methodology
+is detailed in Section 3. We relate our approach to prior work in Section 4. In Section 5  we evaluate
+our methods both on publicly available data and on a large dataset of real-world demand in the context
+of e-commerce  comparing against state of the art intermittent forecasting methods.
+
+2 Generalized Linear Models
+
+In this section  we introduce a likelihood function for intermittent demand data  along with a
+generalized linear model as baseline. Denote demand by zit ∈ N (i for item  t for day). Our goal is
+to predict distributions of zit aggregates in the future. We do this by ﬁtting a probabilistic model to
+maximize the likelihood of training demand data  then drawing sample paths from the ﬁtted model 
+which represent forecast distributions. In the sequel  we ﬁx an item i and write zt instead of zit.
+A model is deﬁned by a likelihood P (zt|yt) and a latent function yt. An example is the Poisson:
+
+Ppoi(z|y) =
+
+1
+z!
+
+λ(y)ze−λ(y) 
+
+z ∈ N 
+
+(1)
+
+where the rate λ(y) depends on y through a transfer function. Demand data over large inventories is
+both intermittent (many zt = 0) and bursty (occasional large zt)  and is not well represented by a
+Poisson. A better choice is the multi-stage likelihood  generalizing a proposal in [15]. This likelihood
+decomposes into K = 3 stages  each with its latent function y(k). In stage k = 0  we emit z = 0 with
+probability1 σ(y(0)). Otherwise  we transfer to stage k = 1  where z = 1 is emitted with probability
+σ(y(1)). Finally  if z ≥ 2  then stage k = 2 draws z − 2 from the Poisson (1) with rate λ(y(2)).
+t w  we have a generalized linear model
+If the latent function yt (or functions yt
+(GLM) [11]. Features in xt include kernels anchored at holidays (Christmas  Halloween)  seasonality
+indicators (DayOfWeek  MonthOfYear)  promotion or price change indicators. The weights w are
+learned by maximizing the training data likelihood. For the multi-stage likelihood  this amounts to
+separate instances of binary classiﬁcation at stages 0  1  and Poisson regression at stage 2. Generalized
+linear forecasters work reasonably well  but have some important drawbacks. They lack temporal
+continuity: for short term predictions  even simple smoothers can outperform a tuned GLM. More
+important  a GLM predicts overly narrow forecast distributions  whose widths do not grow over time 
+and it neglects temporal correlations. Both drawbacks are alleviated in Gaussian linear time series
+models  such as exponential smoothing (ES) [10]. A major challenge is to combine this technology
+with general likelihood functions (Poisson  multi-stage) to enable intermittent demand forecasting.
+
+(k)) is linear  yt = x(cid:62)
+
+3 Latent State Forecasting
+
+In this section  we develop latent state forecasting for intermittent demand  combining GLMs  general
+likelihoods  and exponential smoothing time series models. We begin with a single likelihood
+P (zt|yt)  for example the Poisson (1)  then consider a multi-stage extension. The latent process is
+(2)
+
+εt ∼ N (0  1).
+
+bt = w(cid:62)xt 
+
+yt = a(cid:62)
+
+t lt−1 + bt 
+
+lt = F lt−1 + gtεt 
+
+Here  bt is the GLM deterministic linear function  lt is a latent state. This innovation state space
+model (ISSM) [10] is deﬁned by at  gt and F   as well as the prior l0 ∼ P (l0). Note that ISSMs are
+characterized by a single Gaussian innovation variable εt per time step. In our experiments here  we
+
+1 Here  σ(u) := (1 + e−u)−1 is the logistic sigmoid.
+
+2
+
+employ a simple2 instance:
+
+yt = lt−1 + bt 
+
+lt = lt−1 + αεt 
+
+l0 ∼ N (µ0  σ2
+0) 
+
+meaning that F = [1]  at = [1]  gt = [α]  and the latent state contains a level component only. The
+free parameters are w (weights)  α > 0  and µ0  σ0 > 0 of P (l0)  collected in the vector θ.
+
+3.1 Training. Prediction. Multiple Stages
+
+We would like to learn θ by maximizing the likelihood of data [zt]t=1 ... T . Compared to the
+(cid:62)](cid:62)
+GLM case  this is harder to do  since latent (unobserved) variables s = [ε1  . . .   εT−1  l0
+have to be integrated out. If our likelihood P (zt|yt) was Gaussian  this marginalization could be
+computed analytically via Kalman smoothing [10]. With a non-Gaussian likelihood  the problem is
+analytically intractable  yet is amenable to the Laplace approximation [4  Sect. 4.4]. The exact log
+t P (zt|yt)P (s) ds  where y = y(s) is
+the afﬁne mapping given by (2). We proceed in two steps. First  we ﬁnd the mode of the posterior:
+ˆs = argmax log P (z  s|θ)  the inner optimization problem. Second  we replace − log P (z  s|θ)
+by its quadratic Taylor approximation f (s; θ) at the mode. The criterion to replace the negative
+
+likelihood is log P (z|θ) = log(cid:82) P (z  s|θ) ds = log(cid:82)(cid:81)
+log likelihood is ψ(θ) := − log(cid:82) e−f (s;θ ) ds. More precisely  denote φt(yt) := − log P (zt|yt) 
+
+and let ˆy = y(ˆs)  where ˆs is the posterior mode. The log-concavity of the likelihood implies
+that φt(yt) is convex  and φ(cid:48)(cid:48)
+t (yt) > 0. The quadratic Taylor approximation to φt(yt) at ˆyt is
+˜φt(yt) := − log N (˜zt|yt  σ2
+t = 1/φ(cid:48)(cid:48)
+t )  where σ2
+t(ˆyt). Now  Laplace’s
+approximation to − log P (z|θ) can be written as
+
+t (ˆyt) and ˜zt = ˆyt − σ2
+t φ(cid:48)
+(cid:17)
+(cid:88)
+
+φt(ˆyt) − ˜φt(ˆyt)
+
+(cid:16)
+
+(cid:90) (cid:89)
+
+ψ(θ) = − log
+
+N (˜zt|yt  σ2
+
+t )P (s) ds +
+
+  y = y(s; θ).
+
+(3)
+
+t
+
+t
+
+For log-concave3 P (zt|yt)  the inner optimization is a convex problem. We use the Newton-Raphson
+algorithm to solve it. This algorithm iterates between ﬁtting the current criterion by its local second
+order approximation and minimizing the quadratic surrogate. For the former step  we compute yt
+values by a forward pass (2)  then replace the potentials P (zt|yt) by N (˜zt|yt  σ2
+t )  where the values
+t are determined by the second order ﬁt (as above  but ˆyt → yt). The latter step amounts to
+˜zt  σ2
+computing the posterior mean (equal to the mode) E[s] of the resulting Gaussian-linear model. This
+inference problem is solved by Kalman smoothing.4
+Not only ﬁnding the mode ˆs  but also the computation of ∇θ ψ  is fully reduced to Kalman smoothing.
+This point is crucial. We can ﬁnd ˆs by the most effective optimization algorithm there is. In
+general  each Newton step requires the O(T 3) inversion of a Hessian matrix. We reduce it to Kalman
+smoothing  a robust algorithm with O(T ) scaling. As shown in Section 4  Newton-Raphson is
+essential here: other commonly used optimizers fail to ﬁnd ˆs in a reasonable time.
+Prediction samples are obtained as follows. Denote observed demand by [z1  z2  . . .   zT ]  unobserved
+demand in the prediction range by [zT +1  zT +2  . . . ]. We run Newton-Raphson one more time to
+obtain the Gaussian approximation to the posterior P (lT|z1:T ) over the ﬁnal state. For each sample
+path [zT +t]  we draw lT ∼ P (lT|z1:T )  εT +t ∼ N (0  1)  compute [yT +t] by a forward pass  and
+zT +t ∼ P (zT +t|yT +t). Drawing prediction samples is not more expensive than from a GLM.
+Finally  we generalize latent state forecasting to the multi-stage likelihood. As for the GLM  we learn
+parameters θ(k) separately for each stage k. Stages k = 0  1 are binary classiﬁcation  while stage
+k = 2 is count regression. Say that a day t is active at stage k if zt ≥ k. Recall that with GLMs  we
+simply drop non-active days. Here  we use ISSMs for [y(k)
+] on the full range t = 1  . . .   T   but all
+non-active y(k)
+are considered unobserved: no likelihood potential is associated with t. Both Kalman
+smoothing and mode ﬁnding (Laplace approximation) are adapted to missing observations  which
+presents no difﬁculties (see also Section 5.1).
+
+t
+
+t
+
+2 More advanced variants include damping  linear trend  and seasonality factors [10].
+3 Unless otherwise said  all likelihoods in this paper are log-concave.
+4 We use a numerically robust implementation of Kalman smoothing  detailed in [10  Sect. 12].
+
+3
+
+3.2 Some Details
+
+log P (s) = (cid:80)
+
+In this section  we sketch technical details  most of which are novel contributions. As demonstrated
+in our experiments  these details are essential for the whole approach to work robustly at the intended
+scale on our difﬁcult real-world data. Full details are given in a supplemental report.
+(cid:80)
+We use L-BFGS for the outer optimization of ψ(θ)  encoding the constrained parameters: α =
+αm + (αM − αm)σ(θ1); 0 < αm < αM ; σ0 = log(1 + eθ2) > 0. We add a quadratic regularizer
+j(ρj/2)(θj − ¯θj)2 to the criterion  where ρj  ¯θj are shared across all items. Finally  recall that
+with the multi-stage likelihood  day t is unobserved at stage k > 1 if zt < k. If for some item  there
+are less than 7 observed days in a stage  we skip training and fall back to ﬁxed parameters ¯θ.
+Every single evaluation of ψ(θ) requires ﬁnding the posterior mode ˆs. This high-dimensional inner
+optimization has to converge robustly in few iterations: ˆs = argmin F (s; θ) := − log P (z|s) −
+t φt(yt) − log P (s). The use of Newton-Raphson and its reduction to linear-time
+Kalman smoothing was noted above. The algorithm is extended by a line search procedure as well as
+a heuristic to pick a starting point s0 (see supplemental report).
+We have to compute the gradient ∇θ ψ(θ)  where the criterion is given by (3). The main difﬁculty
+here are indirect dependencies: ψ(θ  ˆy  ˆs)  where ˆy = y(ˆs; θ)  ˆs = ˆs(θ). Since ˆs is computed by
+an iterative algorithm  commonly used automated differentiation tools do not sensibly apply here.
+Maybe the most difﬁcult indirect term is (∂ˆs ψ)(cid:62)(∂ˆs/∂θj)  where θj ∈ θ. First  ˆs is deﬁned by
+∂ˆs F = 0. Taking the derivative w.r.t. θj on both sides  we obtain (∂ˆs/∂θj) = −(∂ˆs ˆs F )−1∂ˆs θj F  
+so we are looking at −(∂ˆs θj F )(cid:62)(∂ˆs ˆs F )−1(∂ˆs ψ). It is of course out of the question to compute and
+invert ∂ˆs ˆs F . But (∂ˆs ˆs F )−1(∂ˆs ψ) corresponds to the posterior mean for an ISSM with Gaussian
+likelihood  which depends on ∂ˆs ψ. This means that the indirect gradient part costs one more run
+of Kalman smoothing  independent of the number of parameters θj. Note that the same reasoning
+underlies our reduction of Newton-Raphson to Kalman smoothing.
+A ﬁnal novel contribution is essential for making the Laplace approximation work on real-world bursty
+demand data. Recall the transfer function λ(y) for the Poisson likelihood (1) at the highest stage
+k = 2. As shown in Section 4  the exponential choice λ = ey fails for all but short term forecasts.
+With a GLM  the logistic transfer λ(y) = g(y) works well  where g(u) := log(1 + eu). It behaves
+like ey for y < 0  but grows linearly for positive y. However  it exhibits grave problems for latent
+state forecasting. Denote φ(y) := − log P (z|y)  where P (z|y) is the Poisson with logistic transfer.
+Recall Laplace’s approximation from Section 3.1: φ(·) is ﬁt by a quadratic ˜φ(·) = (· − ˜z)/(2σ2) 
+where σ2 = 1/φ(cid:48)(cid:48)(y)  ˜z = y − σ2φ(cid:48)(y). For large y and z = 0  these two terms scale as ey  while
+for z > 0 they grow polynomially. In real-world data  we regularly exhibit sizable counts (say  a
+few zt > 25  driving up yt)  followed by a single zt = 0. At this point  huge values (˜zt  σ2
+t ) arise 
+causing cancellation errors in ψ(θ)  and the outer optimization terminates prematurely.
+The root cause for these issues lies with the transfer function: g(y) ≈ y for large y  its curvature
+behaves as e−y. Our remedy is to propose the novel twice logistic transfer function: λ(y) =
+g(y(1 + κg(y))  where κ > 0. If φκ(y) = − log P (z|y) with the new transfer function  then φκ(y)
+behaves similar to φ(y) for small or negative y  but crucially (φκ)(cid:48)(cid:48)(y) ≈ 2κ for large y and any
+z ∈ N. This means that Laplace approximation terms are O(1/κ). Setting κ = 0.01 resolves all
+problems described above. Importantly  the resulting Poisson likelihood is log-concave for any
+κ ≥ 0. We conjecture that similar problems may arise with other “local” variational or expectation
+propagation inference approximations as well. The twice logistic transfer function should therefore
+be of wider applicability.
+
+4 Related Work
+
+Our work has precursors both in Statistics and Machine Learning. Maximum likelihood learning for
+exponential smoothing models is developed in [10]. These methods are limited to Gaussian likelihood 
+approximate Bayesian inference is not used. Starting from Croston’s method [10  Sect. 16.2]  there
+is a sizable literature on intermittent demand forecasting  as reviewed in [15]. The best-performing
+method in [15] uses negative binomial likelihood and a damped dynamic  parameters are learned
+by maximum likelihood. There is no latent (random) state  and neither non-Gaussian inference nor
+Kalman smoothing are required. It does not allow for a combination with GLMs.
+
+4
+
+We employ approximate Bayesian inference in a linear dynamical system  for which there is a lot
+of prior work in Machine Learning [3  1  2]. While Laplace’s technique is the most frequently used
+deterministic approximation in Statistics  both in publications and in automated inference systems
+[13]  other techniques such as expectation propagation are applicable to models of interest here
+[12  8]. The robustness and predictable running time of Laplace’s approximation are key in our
+application  where inference is driving parameter learning  running in parallel over hundreds of
+thousands of items. Expectation propagation is not guaranteed to converge  and Markov chain Monte
+Carlo methods even lack automated convergence tests.
+The work most closely related to ours is [6]. They target intermittent demand forecasting  using a
+Laplace approximation for maximum likelihood learning  allow for a combination with GLMs  and
+go beyond our work transferring information between items by way of a hierarchical prior distribution.
+Their work is evaluated on small datasets and short term scenarios only. In contrast  our system runs
+robustly on many hundreds of thousands of items and many millions of item-days  a three orders
+of magnitude larger scale than what they report. They do not explore the value of a feature-based
+deterministic part  which on our real-world data is essential for medium term forecasts. We ﬁnd that a
+number of choices in [6] are limiting when it comes to robustness and scalability. First  they choose a
+likelihood which is not log-concave for two reasons: they use a negative binomial distribution instead
+of a Poisson  and they use zero-inﬂation instead of a multi-stage setup.5 This means their inner
+optimization problem is non-convex  jeopardizing robustness and efﬁciency of the nested learning
+process. Moreover  in our multi-stage setup  the conditional probability of zt = 0 versus zt > 0 is
+represented exactly  while zero-inﬂation caters for a time-independent zero probability only.
+Next  they use an exponential transfer function
+λ = ey for the negative binomial rate  while
+we propose the novel twice logistic function
+(Section 3.2). Experiments with the exponen-
+tial choice on our data resulted in total failure 
+at least beyond short term forecasts. Its huge
+curvature for large y results in extremely large
+and instable predictions around holidays. In fact 
+the exponential function causes rapid growth of
+predictions even without a linear function ex-
+tension  unless the random process is strongly
+damped. Finally  they use a standard L-BFGS
+solver for their inner problem  evaluating the cri-
+terion using additional sparse matrix software.
+In contrast  we enable Newton-Raphson by re-
+ducing it to Kalman smoothing. In Figure 1 
+we evaluate the usefulness of L-BFGS for mode
+ﬁnding in our setup.6 L-BFGS clearly fails to
+attain decent accuracy in any reasonable amount
+of time  while Newton-Raphson converges reli-
+ably. Such inner reliability is key to reaching our goal of fully automated learning in an industrial
+system. In conclusion  while the lack of public code for [6] precludes a direct comparison  their ap-
+proach  while partly more advanced  should be limited to smaller problems  shorter forecast horizons 
+and would be hard to run in an industrial setting.
+
+Figure 1: Comparison Newton-Raphson vs. L-
+BFGS for inner optimization. Sampled at ﬁrst
+evaluation of ψ(θ). Shown are median (p10  p90)
+over ca. 1500 items. L-BFGS fails to converge to
+decent accuracy.
+
+5 Experiments
+
+In this section  we present experimental results  comparing variants of our approach to related work.
+
+5.1 Out of Stock Treatment
+
+With a large and growing inventory  a fraction of items is out of stock at any given time  meaning
+that order fulﬁllments are delayed or do not happen at all. When out of stock  an item cannot be sold
+
+5 Zero-inﬂation  p0I{zt=0} + (1 − p0)P (cid:48)(zt|yt)  destroys log-concavity for zt = 0.
+6 The inner problem is convex  its criterion is efﬁciently implemented (no dependence on foreign code). The
+
+situation in [6] is likely more difﬁcult.
+
+5
+
+103104105time[ms]10−710−610−510−410−310−210−1100101102103104105106gradientnormnewtonlbfgs(zt = 0)  yet may still elicit considerable customer demand. The probabilistic nature of latent state
+forecasting renders it easy to use out of stock information. If an item is not in stock at day t  the data
+zt = 0 is explained away  and the corresponding likelihood term should be dropped. As noted in
+Section 3.1  this presents no difﬁculty in our framework.
+
+Figure 2: Demand forecast for an item which is partially out of stock. Each panel: Training range
+left (green)  prediction range right (red)  true targets black. In color: Median  P10 to P90. Bottom:
+Out of stock (≥ 80% of day) marked in red. Left: Out of stock signal ignored. Demand forecast
+drops to zero  strong underbias in prediction range. Right: Out of stock regions treated as missing
+observations. Demand becomes uncertain in out of stock region. No underbias in prediction range.
+
+In Figure 2  we show demand forecasts for an item which is out of stock during certain periods in
+the training range. It is obvious that ignoring the out of stock signal leads to systematic underbias
+(since zt = 0 is interpreted as “no demand”). This underbias is corrected for by treating out of stock
+regions as having unobserved targets. Note that an item may be partially out of stock during a day 
+still creating some sales. In such cases  we could treat zt as unobserved  but lower-bounded by the
+sales  and an expectation maximization extension may be applied. However  such situations are
+comparatively rare in our data (compared to full-day out of stock). In the rest of this section  latent
+state forecasting is taking out of stock information into account.
+
+5.2 Comparative Study
+
+We present experimental results obtained on a number of datasets  containing intermittent counts
+time series. Parts contains monthly demand of spare parts at a US automobile company  is publicly
+available  and was previously used in [10  15  6]. Further results are obtained on internal daily
+e-commerce sales data. In either case  we subsampled the sets in a stratiﬁed manner from a larger
+volume used in our production setting. EC-sub is medium size and contains fast and medium moving
+items. EC-all is a large dataset (more than 500K items  150M item-days)  being the union of
+EC-sub with items which are slower moving. Properties of these datasets are given in Figure 3  top
+left. Demand is highly intermittent and bursty in all cases  as witnessed by a large CV 2 and a high
+proportion of zt = 0: these properties are typical for supply chain data. Not only is EC-all much
+larger than any public demand forecasting dataset we are aware of  our internal datasets consists of
+longer series (up to 10×) and are more bursty than Parts.
+The following methods are compared. ETS is exponential smoothing with Gaussian additive errors
+and automatic model selection  a frequently used R package [9]. NegBin is our implementation of
+the negative binomial damped dynamic variant of [15]. We consider two variants of our latent state
+forecaster: LS-pure without features  and LS-feats with a feature vector xt (basic seasonality 
+kernels at holidays  price changes  out of stock). Predictive distributions are represented by 100
+samples over the prediction range (length 8 for Parts  length 365 for others). We employ quadratic
+regularization for all methods except ETS (see Section 3.2). Hyperparameters consist of regularization
+constants ρj and centers ¯θj (full details are given in the supplemental report). We tune7 such
+parameters on random 10% of the data  evaluating test results on the remaining 90%. For LS-pure
+and LS-feats  we use two sets of tuned hyperparameters on the largest set EC-all: one for the
+EC-sub part  the other for the rest.
+Our metrics quantify the forecast accuracy of certain quantiles of predictive distributions. They
+are deﬁned in terms of spans [L  L + S) in the prediction range  where L are lead times.
+In
+general  we ignore days when items are out of stock (see Figure 3  top left  for in-stock ratios).
+
+7 We found that careful hyperparameter tuning is important for obtaining good results  also for NegBin.
+In contrast  regularization is not even mentioned in [15] (our implementation of NegBin includes the same
+quadratic regularization as for our methods).
+
+6
+
+Dec2013Mar2014Jun2014Sep2014Dec2014Mar2015Jun2015Sep2015unobservedDaysDec2013Mar2014Jun2014Sep2014Dec2014Mar2015Jun2015Sep2015unobservedDaysIf πit = I{i in stock at t}  deﬁne Zi;(L S) =(cid:80)L+S−1
+is deﬁned as Rρ[I; (L  S)] = |I|−1(cid:80)
+
+πitzit. For ρ ∈ (0  1)  the predicted ρ-quantile
+of Zi;(L S) is denoted by ˆZ ρ
+i;(L S). These predictions are obtained from the sample paths by ﬁrst
+summing over the span  then estimating the quantile by way of sorting. The ρ-quantile loss8 is
+deﬁned as Lρ(z  ˆz) = 2(z − ˆz)(ρI{z>ˆz} − (1 − ρ)I{z≤ˆz}). The P(ρ · 100) risk metric for [L  L + S)
+i;(L S))  where the left argument Zi;(L S)
+is computed from test targets.9 We focus on P50 risk (ρ = 0.5; mean absolute error) and P90 risk
+(ρ = 0.9; the 0.9-quantile is often relevant for automated ordering).
+
+i∈I Lρ(Zi;(L S)  ˆZ ρ
+
+t=L
+
+# items
+Unit t
+
+Median CV 2
+Freq. zt = 0
+In-stock ratio
+Avg. size series
+# item-days
+
+Parts
+19874
+month
+
+2.4
+54%
+100%
+
+33
+
+656K
+
+EC-sub
+39700
+day
+5.8
+46%
+73%
+329
+13M
+
+EC-all
+534884
+
+day
+9.7
+83%
+71%
+293
+157M
+
+Figure 3: Table: Dataset properties. CV 2 = Var[zt]/E[zt]2 measures burstiness. (a): Sum of
+weekly P50 point (median) forecast over a one-year prediction range for the different methods
+(lines) as well as sum of true demand (shaded area)  on dataset I = EC-sub. (b): Weekly P50 risk
+R0.5[I; (7 · k  7)]  k = 0  1  . . .   for same dataset. (c): Same as (b) for P90 risk.
+
+We plot the P50 and P90 risk on dataset EC-sub  as well the sum of P50 point (median) forecast and
+the true demand  in the three panels of Figure 3. All methods work well in the ﬁrst week  but there
+are considerable differences further out. Naturally  losses are highest during the Christmas peak sales
+period. LS-feats strongly outperforms all others in this critical region (see Figure 3  top right)  by
+means of its features (holidays  seasonality). The Gaussian predictive distributions of ETS exhibit
+growing errors over time. With the exception of the Christmas period  NegBin works rather well (in
+particular in P50 risk)  but is uniformly outperformed by both LS-pure  and LS-feats in particular.
+A larger range of results are given in Table 1 (Parts  EC-sub) and Table 2 (EC-all)  where numbers
+are relative to NegBin. Note that the R code for ETS could not be run on the large EC-all. On
+Parts  NegBin works best  yet LS-pure comes close (we did not use features on this dataset). On
+EC-sub  LS-feats outperforms all others in all scenarios. The featureless NegBin and LS-pure are
+comparable on this dataset. On the largest set EC-all  LS-feats generally outperforms the others 
+but differences are smaller.
+Finally  we report running times of parameter learning (outer optimization) for LS-feats on EC-sub.
+L-BFGS was run with maxIters = 55  gradTol = 10−5. Our experimental cluster consists of
+about 150 nodes  with Intel Xeon E5-2670 CPUs (4 cores) and 30GB RAM. Proﬁling was done
+separately in each stage: k = 0 (P 5 = 0.180s  P 50 = 1.30s  P 95 = 2.15s)  k = 1 (P 5 = 0.143s 
+P 50 = 1.11s  P 95 = 1.79s)  k = 2 (P 5 = 0.138s  P 50 = 1.29s  P 95 = 3.25s). Here  we
+quote median (P50)  5% and 95% percentiles (P5  P95). The largest time recorded was 10.4s. The
+narrow spread of these numbers witnesses the robustness and predictability of the nested optimization
+process  crucial properties in the context of production systems running on parallel compute clusters.
+
+8 EZ [Lρ(Z  ˆz)] is minimized by the ρ-quantile. Also  L0.5(z  ˆz) = |z − ˆz|.
+
+9 More precisely  we ﬁlter I before use in Rρ[I; (L  S)]: I(cid:48) = {i ∈ I |(cid:80)L+S−1
+
+t=L
+
+πit ≥ 0.8S}.
+
+7
+
+sumunitsETSNegBinLS-pureLS-featstruedemand(a)Oct14Nov14Dec14Jan15Feb15Mar15Apr15May15Jun15Jul15Aug15P50riskETSNegBinLS-pureLS-feats(b)Oct14Nov14Dec14Jan15Feb15Mar15Apr15May15Jun15Jul15Aug15P90riskETSNegBinLS-pureLS-feats(c)Parts
+
+P90 risk
+
+P50 risk
+
+(L  S)
+ETS
+LS-pure
+LS-feats
+NegBin
+
+(0  2)
+1.04
+1.08
+–
+1.00
+
+dy(8)
+1.04
+1.06
+–
+1.00
+
+(0  2)
+1.19
+1.04
+–
+1.00
+
+dy(8)
+1.38
+1.06
+–
+1.00
+
+(0  56)
+0.99
+1.07
+0.80
+1.00
+
+EC-sub
+
+P90 risk
+(21  84) wk(33)
+1.13
+0.99
+0.85
+1.00
+
+0.75
+0.97
+0.73
+1.00
+
+(0  56)
+1.07
+0.95
+0.84
+1.00
+
+P50 risk
+(21  84) wk(33)
+1.18
+0.99
+0.94
+1.00
+
+1.10
+1.03
+0.84
+1.00
+
+Table 1: Results for dataset Parts (left) and EC-sub (right). Metric values relative to NegBin
+(each column). dy(8): Average of Rρ[I; (k  1)]  k = 0  . . .   7. wk(33): Average of Rρ[I; (7 · k  7)] 
+k = 0  . . .   32.
+
+(L  S)
+LS-pure
+LS-feats
+NegBin
+
+(0  56)
+1.11
+0.95
+1.00
+
+P90 risk
+(21  84) wk(33)
+0.99
+0.89
+1.00
+
+1.03
+0.86
+1.00
+
+(0  56)
+1.00
+0.92
+1.00
+
+P50 risk
+(21  84) wk(33)
+1.05
+0.98
+1.00
+
+1.03
+0.88
+1.00
+
+Table 2: Results for dataset EC-all. Metric values relative to NegBin (each column). ETS could not
+be run at this scale.
+
+6 Conclusions. Future Work
+
+In this paper  we developed a framework for maximum likelihood learning of probabilistic latent
+state forecasting models  which can be seen as principled time series extensions of generalized linear
+models. We pay special attention to the intermittent and bursty statistics of demand  characteristic for
+the vast inventories maintained by large retailers or e-commerce platforms. We show how approximate
+Bayesian inference techniques can be implemented in a robust and highly scalable way  so to enable
+a forecasting system which runs safely on hundred of thousands of items and hundreds of millions of
+item-days.
+We can draw some conclusions from our comparative study on a range of real-world datasets. Our
+proposed method strongly outperforms competitors on sales data from fast and medium moving
+items. Besides good short term forecasts due to temporal smoothness and well-calibrated growth of
+uncertainty  our use of a feature vector seems most decisive for medium term forecasts. On slow
+moving items  simpler methods like NegBin [15] are competitive  even though they lack signal
+models which could be learned from data.
+We are investigating several directions for future work. Our current system uses time-independent
+ISSMs  in particular gt = [α] means that the same amount of innovation variance is applied every day.
+This assumption is violated by our data  where a lot more variation happens in the weeks leading up
+to Christmas or before major holidays than during the rest of the year. To this end  we are exploring
+learning two parameters: αh during high-variation periods  and αl for all remaining days. We also
+plan to augment the state lt by seasonality10 factors [10  Sect. 14] (both at  gt depend on time then).
+One of the most important future directions is to learn about and exploit dependencies between
+the demand time series of different items. In fact  the strategy to learn and forecast each item
+independently is not suitable for items with a short demand history  or for slow moving items. One
+approach we pursue is to couple latent processes by a shared (global) linear or non-linear function.
+
+Acknowledgements
+
+We would like to thank Maren Mahsereci for determining the running time ﬁgures  and the Wupper
+team for all the hard work without which this paper would not have happened.
+
+10 Currently  periodic seasonality is dealt with by features in xt.
+
+8
+
+References
+[1] D. Barber. Expectation correction for smoothing in switching linear Gaussian state space
+
+models. Journal of Machine Learning Research  7:2515–2540  2006.
+
+[2] D. Barber  T. Cemgil  and S. Chiappa. Bayesian Time Series Models. Cambridge University
+
+Press  1st edition  2011.
+
+[3] M. Beal. Variational Algorithms for Approximate Bayesian Inference. PhD thesis  Gatsby Unit 
+
+UCL  2003.
+
+[4] C. Bishop. Pattern Recognition and Machine Learning. Springer  1st edition  2006.
+
+[5] G. Box  G. Jenkins  and G. Reinsel. Time Series Analysis: Forecasting and Control. John Wiley
+
+& Sons  4th edition  2013.
+
+[6] N. Chapados. Effective Bayesian modeling of groups of related count time series. In E. Xing
+and T. Jebara  editors  International Conference on Machine Learning 31  pages 1395–1403.
+JMLR.org  2014.
+
+[7] J. Durbin and S. Koopman. Time Series Analysis by State Space Methods. Oxford Statistical
+
+Sciences. Oxford University Press  2nd edition  2012.
+
+[8] Tom Heskes and Onno Zoeter. Expectation propagation for approximate inference in dy-
+namic Bayesian networks. In A. Darwiche and N. Friedman  editors  Uncertainty in Artiﬁcial
+Intelligence 18. Morgan Kaufmann  2002.
+
+[9] R. Hyndman and Y. Khandakar. Automatic time series forecasting: the forecast package for R.
+
+Journal of Statistical Software  26(3):1–22  2008.
+
+[10] R. Hyndman  A. Koehler  J. Ord  and R. Snyder. Forecasting with Exponential Smoothing: The
+
+State Space Approach. Springer  1st edition  2008.
+
+[11] P. McCullach and J.A. Nelder. Generalized Linear Models. Number 37 in Monographs on
+
+Statistics and Applied Probability. Chapman & Hall  1st edition  1983.
+
+[12] T. Minka. Expectation propagation for approximate Bayesian inference. In J. Breese and
+
+D. Koller  editors  Uncertainty in Artiﬁcial Intelligence 17. Morgan Kaufmann  2001.
+
+[13] H. Rue and S. Martino. Approximate Bayesian inference for latent Gaussian models by using
+integrated nested Laplace approximations. Journal of Roy. Stat. Soc. B  71(2):319–392  2009.
+
+[14] L. Snyder and Z. Shen. Fundamentals of Supply Chain Theory. John Wiley & Sons  1st edition 
+
+2011.
+
+[15] R. Snyder  J. Ord  and A. Beaumont. Forecasting the intermittent demand for slow-moving
+inventories: A modelling approach. International Journal on Forecasting  28:485–496  2012.
+
+[16] M. Zaharia  M. Chowdhury  T. Das  A. Dave  J. Ma  M. McCauley  M. Franklin  S. Shenker 
+and I. Stoica. Resilient distributed datasets: A fault-tolerant abstraction for in-memory cluster
+computing. In Proceedings of the 9th USENIX conference on Networked Systems Design and
+Implementation (NSDI)  page 2  2012.
+
+9
+
+,Matthias Seeger
+David Salinas
+Valentin Flunkert

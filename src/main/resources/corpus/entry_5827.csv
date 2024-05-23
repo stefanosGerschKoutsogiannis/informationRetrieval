@@ -1,0 +1,774 @@
+2016,VIME: Variational Information Maximizing Exploration,Scalable and effective exploration remains a key challenge in reinforcement learning (RL). While there are methods with optimality guarantees in the setting of discrete state and action spaces  these methods cannot be applied in high-dimensional deep RL scenarios. As such  most contemporary RL relies on simple heuristics such as epsilon-greedy exploration or adding Gaussian noise to the controls. This paper introduces Variational Information Maximizing Exploration (VIME)  an exploration strategy based on maximization of information gain about the agent's belief of environment dynamics. We propose a practical implementation  using variational inference in Bayesian neural networks which efficiently handles continuous state and action spaces. VIME modifies the MDP reward function  and can be applied with several different underlying RL algorithms. We demonstrate that VIME achieves significantly better performance compared to heuristic exploration methods across a variety of continuous control tasks and algorithms  including tasks with very sparse rewards.,VIME: Variational Information Maximizing
+
+Exploration
+
+Rein Houthooft§†‡  Xi Chen†‡  Yan Duan†‡  John Schulman†‡  Filip De Turck§  Pieter Abbeel†‡
+
+‡ OpenAI
+
+† UC Berkeley  Department of Electrical Engineering and Computer Sciences
+
+§ Ghent University - imec  Department of Information Technology
+
+Abstract
+
+Scalable and effective exploration remains a key challenge in reinforcement learn-
+ing (RL). While there are methods with optimality guarantees in the setting of dis-
+crete state and action spaces  these methods cannot be applied in high-dimensional
+deep RL scenarios. As such  most contemporary RL relies on simple heuristics
+such as -greedy exploration or adding Gaussian noise to the controls. This paper
+introduces Variational Information Maximizing Exploration (VIME)  an explo-
+ration strategy based on maximization of information gain about the agent’s belief
+of environment dynamics. We propose a practical implementation  using varia-
+tional inference in Bayesian neural networks which efﬁciently handles continuous
+state and action spaces. VIME modiﬁes the MDP reward function  and can be
+applied with several different underlying RL algorithms. We demonstrate that
+VIME achieves signiﬁcantly better performance compared to heuristic exploration
+methods across a variety of continuous control tasks and algorithms  including
+tasks with very sparse rewards.
+
+1
+
+Introduction
+
+Reinforcement learning (RL) studies how an agent can maximize its cumulative reward in a previously
+unknown environment  which it learns about through experience. A long-standing problem is how to
+manage the trade-off between exploration and exploitation. In exploration  the agent experiments
+with novel strategies that may improve returns in the long run; in exploitation  it maximizes rewards
+through behavior that is known to be successful. An effective exploration strategy allows the agent
+to generate trajectories that are maximally informative about the environment. For small tasks  this
+trade-off can be handled effectively through Bayesian RL [1] and PAC-MDP methods [2–6]  which
+offer formal guarantees. However  these guarantees assume discrete state and action spaces. Hence  in
+settings where state-action discretization is infeasible  many RL algorithms use heuristic exploration
+strategies. Examples include acting randomly using -greedy or Boltzmann exploration [7]  and
+utilizing Gaussian noise on the controls in policy gradient methods [8]. These heuristics often rely on
+random walk behavior which can be highly inefﬁcient  for example Boltzmann exploration requires
+a training time exponential in the number of states in order to solve the well-known n-chain MDP
+[9]. In between formal methods and simple heuristics  several works have proposed to address the
+exploration problem using less formal  but more expressive methods [10–14]. However  none of
+them fully address exploration in continuous control  as discretization of the state-action space scales
+exponentially in its dimensionality. For example  the Walker2D task [15] has a 26-dim state-action
+space. If we assume a coarse discretization into 10 bins for each dimension  a table of state-action
+visitation counts would require 1026 entries.
+
+This paper proposes a curiosity-driven exploration strategy  making use of information gain about the
+agent’s internal belief of the dynamics model as a driving force. This principle can be traced back
+to the concepts of curiosity and surprise [16–18]. Within this framework  agents are encouraged
+to take actions that result in states they deem surprising—i.e.  states that cause large updates to the
+dynamics model distribution. We propose a practical implementation of measuring information gain
+using variational inference. Herein  the agent’s current understanding of the environment dynamics is
+represented by a Bayesian neural networks (BNN) [19  20]. We also show how this can be interpreted
+as measuring compression improvement  a proposed model of curiosity [21]. In contrast to previous
+curiosity-based approaches [10  22]  our model scales naturally to continuous state and action spaces.
+The presented approach is evaluated on a range of continuous control tasks  and multiple underlying
+RL algorithms. Experimental results show that VIME achieves signiﬁcantly better performance than
+naïve exploration strategies.
+
+2 Methodology
+
+In Section 2.1  we establish notation for the subsequent equations. Next  in Section 2.2  we explain
+the theoretical foundation of curiosity-driven exploration. In Section 2.3 we describe how to adapt this
+idea to continuous control  and we show how to build on recent advances in variational inference for
+Bayesian neural networks (BNNs) to make this formulation practical. Thereafter  we make explicit
+the intuitive link between compression improvement and the variational lower bound in Section 2.4.
+Finally  Section 2.5 describes how our method is practically implemented.
+
+2.1 Preliminaries
+
+This paper assumes a ﬁnite-horizon discounted Markov decision process (MDP)  deﬁned by
+(S A P  r  ρ0  γ  T )  in which S ⊆ Rn is a state set  A ⊆ Rm an action set  P : S × A × S → R≥0
+a transition probability distribution  r : S × A → R a bounded reward function  ρ0 : S → R≥0
+an initial state distribution  γ ∈ (0  1] a discount factor  and T the horizon. States and actions
+viewed as random variables are abbreviated as S and A. The presented models are based on the
+optimization of a stochastic policy πα : S × A → R≥0  parametrized by α. Let µ(πα) denote its
+t=0 γtr(st  at)]  where τ = (s0  a0  . . .) denotes the
+whole trajectory  s0 ∼ ρ0(s0)  at ∼ πα(at|st)  and st+1 ∼ P(st+1|st  at).
+
+expected discounted return: µ(πα) = Eτ [(cid:80)T
+
+2.2 Curiosity
+
+Our method builds on the theory of curiosity-driven exploration [16  17  21  22]  in which the agent
+engages in systematic exploration by seeking out state-action regions that are relatively unexplored.
+The agent models the environment dynamics via a model p(st+1|st  at; θ)  parametrized by the
+random variable Θ with values θ ∈ Θ. Assuming a prior p(θ)  it maintains a distribution over
+dynamic models through a distribution over θ  which is updated in a Bayesian manner (as opposed to
+a point estimate). The history of the agent up until time step t is denoted as ξt = {s1  a1  . . .   st}.
+According to curiosity-driven exploration [17]  the agent should take actions that maximize the
+reduction in uncertainty about the dynamics. This can be formalized as maximizing the sum of
+reductions in entropy
+
+(cid:80)
+t (H(Θ|ξt  at) − H(Θ|St+1  ξt  at))  
+
+(1)
+through a sequence of actions {at}. According to information theory  the individual terms equal
+the mutual information between the next state distribution St+1 and the model parameter Θ  namely
+I (St+1; Θ|ξt  at). Therefore  the agent is encouraged to take actions that lead to states that are
+maximally informative about the dynamics model. Furthermore  we note that
+
+I (St+1; Θ|ξt  at) = Est+1∼P(·|ξt at)
+
+(cid:2)DKL[p(θ|ξt  at  st+1)(cid:107) p(θ|ξt)](cid:3) 
+
+(2)
+
+the KL divergence from the agent’s new belief over the dynamics model to the old one  taking
+expectation over all possible next states according to the true dynamics P. This KL divergence can
+be interpreted as information gain.
+
+2
+
+mutual information along a trajectory(cid:80)
+
+If calculating the posterior dynamics distribution is tractable  it is possible to optimize Eq. (2)
+directly by maintaining a belief over the dynamics model [17]. However  this is not generally the
+case. Therefore  a common practice [10  23] is to use RL to approximate planning for maximal
+t I (St+1; Θ|ξt  at) by adding each term I (St+1; Θ|ξt  at)
+as an intrinsic reward  which captures the agent’s surprise in the form of a reward function. This
+is practically realized by taking actions at ∼ πα(st) and sampling st+1 ∼ P(·|st  at) in order to
+add DKL[p(θ|ξt  at  st+1)(cid:107) p(θ|ξt)] to the external reward. The trade-off between exploitation and
+exploration can now be realized explicitly as follows:
+
+r(cid:48)(st  at  st+1) = r(st  at) + ηDKL[p(θ|ξt  at  st+1)(cid:107) p(θ|ξt)] 
+
+(3)
+with η ∈ R+ a hyperparameter controlling the urge to explore. In conclusion  the biggest practical
+issue with maximizing information gain for exploration is that the computation of Eq. (3) requires
+calculating the posterior p(θ|ξt  at  st+1)  which is generally intractable.
+
+2.3 Variational Bayes
+
+We propose a tractable solution to maximize the information gain objective presented in the previous
+section. In a purely Bayesian setting  we can derive the posterior distribution given a new state-action
+pair through Bayes’ rule as
+
+p(θ|ξt  at  st+1) =
+
+(4)
+with p(θ|ξt  at) = p(θ|ξt) as actions do not inﬂuence beliefs about the environment [17]. Herein  the
+denominator is computed through the integral
+
+p(st+1|ξt  at)
+
+ 
+
+p(θ|ξt)p(st+1|ξt  at; θ)
+
+p(st+1|ξt  at) =
+
+p(st+1|ξt  at; θ)p(θ|ξt)dθ.
+
+(5)
+
+Θ
+
+In general  this integral tends to be intractable when using highly expressive parametrized models
+(e.g.  neural networks)  which are often needed to accurately capture the environment model in
+high-dimensional continuous control.
+
+We propose a practical solution through variational inference [24]. Herein  we embrace the fact that
+calculating the posterior p(θ|D) for a data set D is intractable. Instead we approximate it through
+an alternative distribution q(θ; φ)  parameterized by φ  by minimizing DKL[q(θ; φ)(cid:107) p(θ|D)]. This is
+done through maximization of the variational lower bound L[q(θ; φ) D]:
+
+L[q(θ; φ) D] = Eθ∼q(·;φ) [log p(D|θ)] − DKL[q(θ; φ)(cid:107) p(θ)].
+
+(6)
+Rather than computing information gain in Eq. (3) explicitly  we compute an approximation to it 
+leading to the following total reward:
+
+r(cid:48)(st  at  st+1) = r(st  at) + ηDKL[q(θ; φt+1)(cid:107)q(θ; φt)] 
+
+(7)
+with φt+1 the updated and φt the old parameters representing the agent’s belief. Natural candidates
+for parametrizing the agent’s dynamics model are Bayesian neural networks (BNNs) [19]  as they
+maintain a distribution over their weights. This allows us to view the BNN as an inﬁnite neural
+network ensemble by integrating out its parameters:
+
+(cid:90)
+
+(cid:90)
+
+p(y|x) =
+
+p(y|x; θ)q(θ; φ)dθ.
+
+(8)
+
+In particular  we utilize a BNN parametrized by a fully factorized Gaussian distribution [20]. Practical
+BNN implementation details are deferred to Section 2.5  while we give some intuition into the
+behavior of BNNs in the appendix.
+
+Θ
+
+2.4 Compression
+
+It is possible to derive an interesting relationship between compression improvement—an intrinsic
+reward objective deﬁned in [25]  and the information gain of Eq. (2). In [25]  the agent’s curiosity is
+
+3
+
+equated with compression improvement  measured through C(ξt; φt−1) − C(ξt; φt)  where C(ξ; φ)
+is the description length of ξ using φ as a model. Furthermore  it is known that the negative variational
+lower bound can be viewed as the description length [19]. Hence  we can write compression
+improvement as L[q(θ; φt)  ξt] − L[q(θ; φt−1)  ξt]. In addition  an alternative formulation of the
+variational lower bound in Eq. (6) is given by
+
+(cid:122)
+(cid:90)
+
+Θ
+
+L[q(θ;φ) D]
+
+(cid:125)(cid:124)
+
+(cid:123)
+
+p(θ D)
+q(θ; φ)
+
+log p(D) =
+
+q(θ; φ) log
+
+dθ +DKL[q(θ; φ)(cid:107) p(θ|D)].
+
+(9)
+
+Thus  compression improvement can now be written as
+
+(log p(ξt) − DKL[q(θ; φt)(cid:107) p(θ|ξt)]) − (log p(ξt) − DKL[q(θ; φt−1)(cid:107)p(θ|ξt)]) .
+
+(10)
+If we assume that φt perfectly optimizes the variational lower bound for the history ξt  then
+DKL[q(θ; φt)(cid:107) p(θ|ξt)] = 0  which occurs when the approximation equals the true posterior  i.e. 
+q(θ; φt) = p(θ|ξt). Hence  compression improvement becomes DKL[p(θ|ξt−1)(cid:107)p(θ|ξt)]. Therefore 
+optimizing for compression improvement comes down to optimizing the KL divergence from the
+posterior given the past history ξt−1 to the posterior given the total history ξt. As such  we arrive at
+an alternative way to encode curiosity than information gain  namely DKL[p(θ|ξt)(cid:107) p(θ|ξt  at  st+1)] 
+its reversed KL divergence. In experiments  we noticed no signiﬁcant difference between the two KL
+divergence variants. This can be explained as both variants are locally equal when introducing small
+changes to the parameter distributions. Investigation of how to combine both information gain and
+compression improvement is deferred to future work.
+
+2.5
+
+Implementation
+
+The complete method is summarized in Algorithm 1. We ﬁrst set forth implementation and
+parametrization details of the dynamics BNN. The BNN weight distribution q(θ; φ) is given by
+the fully factorized Gaussian distribution [20]:
+
+(11)
+Hence  φ = {µ  σ}  with µ the Gaussian’s mean vector and σ the covariance matrix diagonal. This is
+particularly convenient as it allows for a simple analytical formulation of the KL divergence. This
+is described later in this section. Because of the restriction σ > 0  the standard deviation of the
+Gaussian BNN parameter is parametrized as σ = log(1 + eρ)  with ρ ∈ R [20].
+
+i=1 N (θi|µi; σ2
+i ).
+
+q(θ; φ) =(cid:81)|Θ|
+
+(cid:80)N
+Now the training of the dynamics BNN through optimization of the variational lower bound is
+described. The second term in Eq. (6) is approximated through sampling Eθ∼q(·;φ) [log p(D|θ)] ≈
+i=1 log p(D|θi) with N samples drawn according to θ ∼ q(·; φ) [20]. Optimizing the variational
+1
+N
+lower bound in Eq. (6) in combination with the reparametrization trick is called stochastic gradient
+variational Bayes (SGVB) [26] or Bayes by Backprop [20]. Furthermore  we make use of the local
+reparametrization trick proposed in [26]  in which sampling at the weights is replaced by sampling the
+neuron pre-activations  which is more computationally efﬁcient and reduces gradient variance. The
+optimization of the variational lower bound is done at regular intervals during the RL training process 
+by sampling D from a FIFO replay pool that stores recent samples (st  at  st+1). This is to break up
+the strong intratrajectory sample correlation which destabilizes learning in favor of obtaining i.i.d.
+data [7]. Moreover  it diminishes the effect of compounding posterior approximation errors.
+
+The posterior distribution of the dynamics parameter  which is needed to compute the KL divergence
+in the total reward function r(cid:48) of Eq. (7)  can be computed through the following minimization
+
+(cid:104)
+
+(cid:122)
+(cid:124)
+
+φ(cid:48) = arg min
+
+φ
+
+(cid:96)(q(θ;φ) st)
+
+(cid:125)(cid:124)
+
+(cid:125)
+
+(cid:123)(cid:122)
+
+(cid:96)KL(q(θ;φ))
+
+DKL[q(θ; φ)(cid:107) q(θ; φt−1)]
+
+−Eθ∼q(·;φ) [log p(st|ξt  at; θ)]
+
+ 
+
+(12)
+
+(cid:123)
+
+(cid:105)
+
+where we replace the expectation over θ with samples θ ∼ q(·; φ). Because we only update the model
+periodically based on samples drawn from the replay pool  this optimization can be performed in
+parallel for each st  keeping φt−1 ﬁxed. Once φ(cid:48) has been obtained  we can use it to compute the
+intrinsic reward.
+
+4
+
+Algorithm 1: Variational Information Maximizing Exploration (VIME)
+for each epoch n do
+
+for each timestep t in each trajectory generated during n do
+
+Generate action at ∼ πα(st) and sample state st+1 ∼ P(·|ξt  at)  get r(st  at).
+Add triplet (st  at  st+1) to FIFO replay pool R.
+Compute DKL[q(θ; φ(cid:48)
+diagonal BNNs  or by optimizing Eq. (12) to obtain φ(cid:48)
+Divide DKL[q(θ; φ(cid:48)
+Construct r(cid:48)(st  at  st+1) ← r(st  at) + ηDKL[q(θ; φ(cid:48)
+
+n+1)(cid:107)q(θ; φn+1)] by approximation ∇(cid:62)H−1∇  following Eq. (16) for
+n+1 for general BNNs.
+n+1)(cid:107)q(θ; φn+1)] by median of previous KL divergences.
+n+1)(cid:107)q(θ; φn+1)]  following Eq. (7).
+Minimize DKL[q(θ; φn)(cid:107)p(θ)] − Eθ∼q(·;φn) [log p(D|θ)] following Eq. (6)  with D sampled
+randomly from R  leading to updated posterior q(θ; φn+1).
+Use rewards {r(cid:48)(st  at  st+1)} to update policy πα using any standard RL method.
+
+To optimize Eq. (12) efﬁciently  we only take a single second-order step. This way  the gradient
+is rescaled according to the curvature of the KL divergence at the origin. As such  we compute
+DKL[q(θ; φ + λ∆φ)(cid:107)q(θ; φ)]  with the update step ∆φ deﬁned as
+∆φ = H−1((cid:96))∇φ(cid:96)(q(θ; φ)  st) 
+
+(13)
+in which H((cid:96)) is the Hessian of (cid:96)(q(θ; φ)  st). Since we assume that the variational approximation is
+a fully factorized Gaussian  the KL divergence from posterior to prior has a particularly simple form:
+
+(cid:19)
+
+(cid:80)|Θ|
+
+i=1
+
+(cid:17)2
+
+(cid:18)(cid:16) σi
+
+σ(cid:48)
+
+i
+
+DKL[q(θ; φ)(cid:107)q(θ; φ(cid:48))] = 1
+
+2
+
++ 2 log σ(cid:48)
+
+i − 2 log σi + (µ(cid:48)
+
+i−µi)2
+σ(cid:48)2
+
+i
+
+− |Θ|
+2 .
+
+(14)
+
+Because this KL divergence is approximately quadratic in its parameters and the log-likelihood term
+can be seen as locally linear compared to this highly curved KL term  we approximate H by only
+calculating it for the term KL term (cid:96)KL(q(θ; φ)). This can be computed very efﬁciently in case of a
+fully factorized Gaussian distribution  as this approximation becomes a diagonal matrix. Looking at
+Eq. (14)  we can calculate the following Hessian at the origin. The µ and ρ entries are deﬁned as
+
+2e2ρi
+
+1
+
+ 
+
+(15)
+
+∂2(cid:96)KL
+∂µ2
+i
+
+=
+
+1
+
+log2(1 + eρi)
+
+and
+
+∂2(cid:96)KL
+∂ρ2
+i
+
+=
+
+(1 + eρi)2
+
+(cid:0)H−1∇(cid:1)(cid:62)
+
+log2(1 + eρi)
+
+H(cid:0)H−1∇(cid:1)  since both the
+
+while all other entries are zero. Furthermore  it is also possible to approximate the KL divergence
+through a second-order Taylor expansion as 1
+value and gradient of the KL divergence are zero at the origin. This gives us
+
+2 ∆φH∆φ = 1
+
+DKL[q(θ; φ + λ∆φ)(cid:107) q(θ; φ)] ≈ 1
+
+(16)
+Note that H−1((cid:96)KL) is diagonal  so this expression can be computed efﬁciently. Instead of using the
+KL divergence DKL[q(θ; φt+1)(cid:107)q(θ; φt)] directly as an intrinsic reward in Eq. (7)  we normalize it
+by division through the average of the median KL divergences taken over a ﬁxed number of previous
+trajectories. Rather than focusing on its absolute value  we emphasize relative difference in KL
+divergence between samples. This accomplishes the same effect since the variance of KL divergence
+converges to zero  once the model is fully learned.
+
+2 λ2∇φ(cid:96)(cid:62)H−1((cid:96)KL)∇φ(cid:96).
+
+2
+
+3 Experiments
+
+In this section  we investigate (i) whether VIME can succeed in domains that have extremely sparse
+rewards  (ii) whether VIME improves learning when the reward is shaped to guide the agent towards
+its goal  and (iii) how η  as used in in Eq. (3)  trades off exploration and exploitation behavior. All
+experiments make use of the rllab [15] benchmark code base and the complementary continuous
+control tasks suite. The following tasks are part of the experimental setup: CartPole (S ⊆ R4 
+A ⊆ R1)  CartPoleSwingup (S ⊆ R4  A ⊆ R1)  DoublePendulum (S ⊆ R6  A ⊆ R1)  MountainCar
+(S ⊆ R3  A ⊆ R1)  locomotion tasks HalfCheetah (S ⊆ R20  A ⊆ R6)  Walker2D (S ⊆ R20 
+A ⊆ R6)  and the hierarchical task SwimmerGather (S ⊆ R33  A ⊆ R2).
+
+5
+
+Performance is measured through the average return (not including the intrinsic rewards) over the
+trajectories generated (y-axis) at each iteration (x-axis). More speciﬁcally  the darker-colored lines in
+each plot represent the median performance over a ﬁxed set of 10 random seeds while the shaded
+areas show the interquartile range at each iteration. Moreover  the number in each legend shows this
+performance measure  averaged over all iterations. The exact setup is described in the Appendix.
+
+(a) MountainCar
+
+(b) CartPoleSwingup
+
+(c) HalfCheetah
+
+(d) state space
+
+Figure 1: (a b c) TRPO+VIME versus TRPO on tasks with sparse rewards; (d) comparison of
+TRPO+VIME (red) and TRPO (blue) on MountainCar: visited states until convergence
+
+Domains with sparse rewards are difﬁcult to solve through naïve exploration behavior because  before
+the agent obtains any reward  it lacks a feedback signal on how to improve its policy. This allows
+us to test whether an exploration strategy is truly capable of systematic exploration  rather than
+improving existing RL algorithms by adding more hyperparameters. Therefore  VIME is compared
+with heuristic exploration strategies on the following tasks with sparse rewards. A reward of +1 is
+given when the car escapes the valley on the right side in MountainCar; when the pole is pointed
+upwards in CartPoleSwingup; and when the cheetah moves forward over ﬁve units in HalfCheetah.
+We compare VIME with the following baselines: only using Gaussian control noise [15] and using
+the (cid:96)2 BNN prediction error as an intrinsic reward  a continuous extension of [10]. TRPO [8] is
+used as the RL algorithm  as it performs very well compared to other methods [15]. Figure 1 shows
+the performance results. We notice that using a naïve exploration performs very poorly  as it is
+almost never able to reach the goal in any of the tasks. Similarly  using (cid:96)2 errors does not perform
+well. In contrast  VIME performs much better  achieving the goal in most cases. This experiment
+demonstrates that curiosity drives the agent to explore  even in the absence of any initial reward 
+where naïve exploration completely breaks down.
+
+To further strengthen this point  we have evaluated VIME on the highly difﬁcult hierarchical task
+SwimmerGather in Figure 5 whose reward signal is naturally sparse. In this task  a two-link robot
+needs to reach “apples” while avoiding “bombs” that are perceived through a laser scanner. However 
+before it can make any forward progress  it has to learn complex locomotion primitives in the absence
+of any reward. None of the RL methods tested previously in [15] were able to make progress with
+naïve exploration. Remarkably  VIME leads the agent to acquire coherent motion primitives without
+any reward guidance  achieving promising results on this challenging task.
+
+Next  we investigate whether VIME is widely applicable by (i) testing it on environments where the
+reward is well shaped  and (ii) pairing it with different RL methods. In addition to TRPO  we choose
+to equip REINFORCE [27] and ERWR [28] with VIME because these two algorithms usually suffer
+from premature convergence to suboptimal policies [15  29]  which can potentially be alleviated by
+better exploration. Their performance is shown in Figure 2 on several well-established continuous
+control tasks. Furthermore  Figure 3 shows the same comparison for the Walker2D locomotion task.
+In the majority of cases  VIME leads to a signiﬁcant performance gain over heuristic exploration.
+Our exploration method allows the RL algorithms to converge faster  and notably helps REINFORCE
+and ERWR avoid converging to a locally optimal solution on DoublePendulum and MountainCar.
+We note that in environments such as CartPole  a better exploration strategy is redundant as following
+the policy gradient direction leads to the globally optimal solution. Additionally  we tested adding
+Gaussian noise to the rewards as a baseline  which did not improve performance.
+
+To give an intuitive understanding of VIME’s exploration behavior  the distribution of visited states
+for both naïve exploration and VIME after convergence is investigated. Figure 1d shows that using
+Gaussian control noise exhibits random walk behavior: the state visitation plot is more condensed
+and ball-shaped around the center. In comparison  VIME leads to a more diffused visitation pattern 
+exploring the states more efﬁciently  and hence reaching the goal more quickly.
+
+6
+
+(a) CartPole
+
+(b) CartPoleSwingup
+
+(c) DoublePendulum
+
+(d) MountainCar
+
+Figure 2: Performance of TRPO (top row)  ERWR (middle row)  and REINFORCE (bottom row)
+with (+VIME) and without exploration for different continuous control tasks.
+
+Figure 3: Performance of TRPO
+with and without VIME on the
+high-dimensional Walker2D lo-
+comotion task.
+
+the ﬁrst
+
+Figure 4: VIME: performance
+over
+few iterations
+for TRPO  REINFORCE  and
+ERWR i.f.o. η on MountainCar.
+
+Figure 5:
+Performance of
+TRPO with and without VIME
+on the challenging hierarchical
+task SwimmerGather.
+
+Finally  we investigate how η  as used in in Eq. (3)  trades off exploration and exploitation behavior.
+On the one hand  higher η values should lead to a higher curiosity drive  causing more exploration.
+On the other hand  very low η values should reduce VIME to traditional Gaussian control noise.
+Figure 4 shows the performance on MountainCar for different η values. Setting η too high clearly
+results in prioritizing exploration over getting additional external reward. Too low of an η value
+reduces the method to the baseline algorithm  as the intrinsic reward contribution to the total reward
+r(cid:48) becomes negligible. Most importantly  this ﬁgure highlights that there is a wide η range for which
+the task is best solved  across different algorithms.
+
+4 Related Work
+
+A body of theoretically oriented work demonstrates exploration strategies that are able to learn online
+in a previously unknown MDP and incur a polynomial amount of regret—as a result  these algorithms
+ﬁnd a near-optimal policy in a polynomial amount of time. Some of these algorithms are based on the
+principle of optimism under uncertainty: E3 [3]  R-Max [4]  UCRL [30]. An alternative approach is
+Bayesian reinforcement learning methods  which maintain a distribution over possible MDPs [1  17 
+23  31]. The optimism-based exploration strategies have been extended to continuous state spaces 
+for example  [6  9]  however these methods do not accommodate nonlinear function approximators.
+
+Practical RL algorithms often rely on simple exploration heuristics  such as -greedy and Boltzmann
+exploration [32]. However  these heuristics exhibit random walk exploratory behavior  which can lead
+
+7
+
+to exponential regret even in case of small MDPs [9]. Our proposed method of utilizing information
+gain can be traced back to [22]  and has been further explored in [17  33  34]. Other metrics for
+curiosity have also been proposed  including prediction error [10  35]  prediction error improvement
+[36]  leverage [14]  neuro-correlates [37]  and predictive information [38]. These methods have not
+been applied directly to high-dimensional continuous control tasks without discretization. We refer
+the reader to [21  39] for an extensive review on curiosity and intrinsic rewards.
+
+Recently  there have been various exploration strategies proposed in the context of deep RL. [10]
+proposes to use the (cid:96)2 prediction error as the intrinsic reward. [12] performs approximate visitation
+counting in a learned state embedding using Gaussian kernels. [11] proposes a form of Thompson
+sampling  training multiple value functions using bootstrapping. Although these approaches can scale
+up to high-dimensional state spaces  they generally assume discrete action spaces. [40] make use
+of mutual information for gait stabilization in continuous control  but rely on state discretization.
+Finally  [41] proposes a variational method for information maximization in the context of optimizing
+empowerment  which  as noted by [42]  does not explicitly favor exploration.
+
+5 Conclusions
+
+We have proposed Variational Information Maximizing Exploration (VIME)  a curiosity-driven
+exploration strategy for continuous control tasks. Variational inference is used to approximate the
+posterior distribution of a Bayesian neural network that represents the environment dynamics. Using
+information gain in this learned dynamics model as intrinsic rewards allows the agent to optimize
+for both external reward and intrinsic surprise simultaneously. Empirical results show that VIME
+performs signiﬁcantly better than heuristic exploration methods across various continuous control
+tasks and algorithms. As future work  we would like to investigate measuring surprise in the value
+function and using the learned dynamics model for planning.
+
+Acknowledgments
+
+This work was supported in part by DARPA  the Berkeley Vision and Learning Center (BVLC)  the Berkeley
+Artiﬁcial Intelligence Research (BAIR) laboratory  Berkeley Deep Drive (BDD)  and ONR through a PECASE
+award. Rein Houthooft is supported by a Ph.D. Fellowship of the Research Foundation - Flanders (FWO).
+Xi Chen was also supported by a Berkeley AI Research lab Fellowship. Yan Duan was also supported by a
+Berkeley AI Research lab Fellowship and a Huawei Fellowship.
+
+References
+
+[1] M. Ghavamzadeh  S. Mannor  J. Pineau  and A. Tamar  “Bayesian reinforcement learning: A survey” 
+
+Found. Trends. Mach. Learn.  vol. 8  no. 5-6  pp. 359–483  2015.
+
+[2] S. Kakade  M. Kearns  and J. Langford  “Exploration in metric state spaces”  in ICML  vol. 3  2003 
+
+pp. 306–312.
+
+[3] M. Kearns and S. Singh  “Near-optimal reinforcement learning in polynomial time”  Mach. Learn.  vol.
+
+49  no. 2-3  pp. 209–232  2002.
+
+[4] R. I. Brafman and M. Tennenholtz  “R-Max - a general polynomial time algorithm for near-optimal
+
+[5]
+
+[6]
+
+reinforcement learning”  J. Mach. Learn. Res.  vol. 3  pp. 213–231  2003.
+P. Auer  “Using conﬁdence bounds for exploitation-exploration trade-offs”  J. Mach. Learn. Res.  vol. 3 
+pp. 397–422  2003.
+J. Pazis and R. Parr  “PAC optimal exploration in continuous space Markov decision processes”  in AAAI 
+2013.
+
+[8]
+
+[7] V. Mnih  K. Kavukcuoglu  D. Silver  A. A. Rusu  J. Veness  M. G. Bellemare  A. Graves  M. Riedmiller 
+A. K. Fidjeland  G. Ostrovski  et al.  “Human-level control through deep reinforcement learning”  Nature 
+vol. 518  no. 7540  pp. 529–533  2015.
+J. Schulman  S. Levine  P. Moritz  M. I. Jordan  and P. Abbeel  “Trust region policy optimization”  in
+ICML  2015.
+I. Osband  B. Van Roy  and Z. Wen  “Generalization and exploration via randomized value functions” 
+ArXiv preprint arXiv:1402.0635  2014.
+
+[9]
+
+8
+
+[10] B. C. Stadie  S. Levine  and P. Abbeel  “Incentivizing exploration in reinforcement learning with deep
+
+[11]
+
+[12]
+
+predictive models”  ArXiv preprint arXiv:1507.00814  2015.
+I. Osband  C. Blundell  A. Pritzel  and B. Van Roy  “Deep exploration via bootstrapped DQN”  in ICML 
+2016.
+J. Oh  X. Guo  H. Lee  R. L. Lewis  and S. Singh  “Action-conditional video prediction using deep
+networks in Atari games”  in NIPS  2015  pp. 2845–2853.
+
+[13] T. Hester and P. Stone  “Intrinsically motivated model learning for developing curious robots”  Artiﬁcial
+
+Intelligence  2015.
+
+[14] K. Subramanian  C. L. Isbell Jr  and A. L. Thomaz  “Exploration from demonstration for interactive
+
+reinforcement learning”  in AAMAS  2016.
+
+[15] Y. Duan  X. Chen  R. Houthooft  J. Schulman  and P. Abbeel  “Benchmarking deep reinforcement
+
+learning for continous control”  in ICML  2016.
+J. Schmidhuber  “Curious model-building control systems”  in IJCNN  1991  pp. 1458–1463.
+
+[16]
+[17] Y. Sun  F. Gomez  and J. Schmidhuber  “Planning to be surprised: Optimal Bayesian exploration in
+
+dynamic environments”  in Artiﬁcial General Intelligence  2011  pp. 41–51.
+
+[21]
+
+[18] L. Itti and P. F. Baldi  “Bayesian surprise attracts human attention”  in NIPS  2005  pp. 547–554.
+[19] A. Graves  “Practical variational inference for neural networks”  in NIPS  2011  pp. 2348–2356.
+[20] C. Blundell  J. Cornebise  K. Kavukcuoglu  and D. Wierstra  “Weight uncertainty in neural networks”  in
+
+ICML  2015.
+J. Schmidhuber  “Formal theory of creativity  fun  and intrinsic motivation (1990–2010)”  IEEE Trans.
+Auton. Mental Develop.  vol. 2  no. 3  pp. 230–247  2010.
+J. Storck  S. Hochreiter  and J. Schmidhuber  “Reinforcement driven information acquisition in non-
+deterministic environments”  in ICANN  vol. 2  1995  pp. 159–164.
+J. Z. Kolter and A. Y. Ng  “Near-Bayesian exploration in polynomial time”  in ICML  2009  pp. 513–520.
+[23]
+[24] G. E. Hinton and D. Van Camp  “Keeping the neural networks simple by minimizing the description
+
+[22]
+
+length of the weights”  in COLT  1993  pp. 5–13.
+J. Schmidhuber  “Simple algorithmic principles of discovery  subjective beauty  selective attention 
+curiosity & creativity”  in Intl. Conf. on Discovery Science  2007  pp. 26–38.
+
+[25]
+
+[26] D. P. Kingma  T. Salimans  and M. Welling  “Variational dropout and the local reparameterization trick” 
+
+in NIPS  2015  pp. 2575–2583.
+
+[27] R. J. Williams  “Simple statistical gradient-following algorithms for connectionist reinforcement learn-
+
+ing”  Mach. Learn.  vol. 8  no. 3-4  pp. 229–256  1992.
+J. Kober and J. R. Peters  “Policy search for motor primitives in robotics”  in NIPS  2009  pp. 849–856.
+J. Peters and S. Schaal  “Reinforcement learning by reward-weighted regression for operational space
+control”  in ICML  2007  pp. 745–750.
+
+[28]
+[29]
+
+[30] P. Auer  T. Jaksch  and R. Ortner  “Near-optimal regret bounds for reinforcement learning”  in NIPS 
+
+2009  pp. 89–96.
+
+[31] A. Guez  N. Heess  D. Silver  and P. Dayan  “Bayes-adaptive simulation-based search with value function
+
+approximation”  in NIPS  2014  pp. 451–459.
+
+[32] R. S. Sutton  Introduction to reinforcement learning.
+[33] S. Still and D. Precup  “An information-theoretic approach to curiosity-driven reinforcement learning” 
+
+Theory Biosci.  vol. 131  no. 3  pp. 139–148  2012.
+
+[34] D. Y. Little and F. T. Sommer  “Learning and exploration in action-perception loops”  Closing the Loop
+
+Around Neural Systems  p. 295  2014.
+
+[35] S. B. Thrun  “Efﬁcient exploration in reinforcement learning”  Tech. Rep.  1992.
+[36] M. Lopes  T. Lang  M. Toussaint  and P.-Y. Oudeyer  “Exploration in model-based reinforcement learning
+
+by empirically estimating learning progress”  in NIPS  2012  pp. 206–214.
+J. Schossau  C. Adami  and A. Hintze  “Information-theoretic neuro-correlates boost evolution of
+cognitive systems”  Entropy  vol. 18  no. 1  p. 6  2015.
+
+[37]
+
+[38] K. Zahedi  G. Martius  and N. Ay  “Linear combination of one-step predictive information with an
+external reward in an episodic policy gradient setting: A critical analysis”  Front. Psychol.  vol. 4  2013.
+[39] P.-Y. Oudeyer and F. Kaplan  “What is intrinsic motivation? a typology of computational approaches” 
+
+Front Neurorobot.  vol. 1  p. 6  2007.
+
+[40] G. Montufar  K. Ghazi-Zahedi  and N. Ay  “Information theoretically aided reinforcement learning for
+
+embodied agents”  ArXiv preprint arXiv:1605.09735  2016.
+
+[41] S. Mohamed and D. J. Rezende  “Variational information maximisation for intrinsically motivated
+
+reinforcement learning”  in NIPS  2015  pp. 2116–2124.
+
+[42] C. Salge  C. Glackin  and D. Polani  “Guided self-organization: Inception”  in. 2014  ch. Empowerment–
+
+An Introduction  pp. 67–114.
+
+9
+
+,Rein Houthooft
+Xi Chen
+Yan Duan
+John Schulman
+Filip De Turck
+Pieter Abbeel

@@ -1,0 +1,1184 @@
+2019,Universal Boosting Variational Inference,Boosting variational inference (BVI) approximates an intractable probability density by iteratively building up a mixture of simple component distributions one at a time  using techniques from sparse convex optimization to provide both computational scalability and approximation error guarantees. But the guarantees have strong conditions that do not often hold in practice  resulting in degenerate component optimization problems; and we show that the ad-hoc regularization used to prevent degeneracy in practice can cause BVI to fail in unintuitive ways.  We thus develop universal boosting variational inference (UBVI)  a BVI scheme that exploits the simple geometry of probability densities under the Hellinger metric to prevent the degeneracy of other gradient-based BVI methods  avoid difficult joint optimizations of both component and weight  and simplify fully-corrective weight optimizations.  We show that for any target density and any mixture component family  the output of UBVI converges to the best possible approximation in the mixture family  even when the mixture family is misspecified.  We develop a scalable implementation based on exponential family mixture components and standard stochastic optimization techniques.  Finally  we discuss statistical benefits of the Hellinger distance as a variational objective through bounds on posterior probability  moment  and importance sampling errors. Experiments on multiple datasets and models show that UBVI provides reliable  accurate posterior approximations.,Universal Boosting Variational Inference
+
+Trevor Campbell
+
+Department of Statistics
+
+University of British Columbia
+
+Vancouver  BC V6T 1Z4
+trevor@stat.ubc.ca
+
+Xinglong Li
+
+Department of Statistics
+
+University of British Columbia
+
+Vancouver  BC V6T 1Z4
+
+xinglong.li@stat.ubc.ca
+
+Abstract
+
+Boosting variational inference (BVI) approximates an intractable probability den-
+sity by iteratively building up a mixture of simple component distributions one at a
+time  using techniques from sparse convex optimization to provide both compu-
+tational scalability and approximation error guarantees. But the guarantees have
+strong conditions that do not often hold in practice  resulting in degenerate com-
+ponent optimization problems; and we show that the ad-hoc regularization used
+to prevent degeneracy in practice can cause BVI to fail in unintuitive ways. We
+thus develop universal boosting variational inference (UBVI)  a BVI scheme that
+exploits the simple geometry of probability densities under the Hellinger metric to
+prevent the degeneracy of other gradient-based BVI methods  avoid difﬁcult joint
+optimizations of both component and weight  and simplify fully-corrective weight
+optimizations. We show that for any target density and any mixture component
+family  the output of UBVI converges to the best possible approximation in the mix-
+ture family  even when the mixture family is misspeciﬁed. We develop a scalable
+implementation based on exponential family mixture components and standard
+stochastic optimization techniques. Finally  we discuss statistical beneﬁts of the
+Hellinger distance as a variational objective through bounds on posterior probabil-
+ity  moment  and importance sampling errors. Experiments on multiple datasets
+and models show that UBVI provides reliable  accurate posterior approximations.
+
+1
+
+Introduction
+
+Bayesian statistical models provide a powerful framework for learning from data  with the ability to
+encode complex hierarchical dependence structures and prior domain expertise  as well as coherently
+capture uncertainty in latent parameters. The two predominant methods for Bayesian inference
+are Markov chain Monte Carlo (MCMC) [1  2]—which obtains approximate posterior samples by
+simulating a Markov chain—and variational inference (VI) [3  4]—which obtains an approximate
+distribution by minimizing some divergence to the posterior within a tractable family. The key
+strengths of MCMC are its generality and the ability to perform a computation-quality tradeoff: one
+can obtain a higher quality approximation by simulating the chain for a longer period [5  Theorem
+4 & Fact 5]. However  the resulting Monte Carlo estimators have an unknown bias or random
+computation time [6]  and statistical distances between the discrete sample posterior approximation
+and a diffuse true posterior are vacuous  ill-deﬁned  or hard to bound without restrictive assumptions
+or a choice of kernel [7–9]. Designing correct MCMC schemes in the large-scale data setting
+is also a challenging task [10–12]. VI  on the other hand  is both computationally scalable and
+widely applicable due to advances from stochastic optimization and automatic differentiation [13–
+17]. However  the major disadvantage of the approach—and the fundamental reason that MCMC
+remains the preferred method in statistics—is that the variational family typically does not contain the
+posterior  fundamentally limiting the achievable approximation quality. And despite recent results in
+the asymptotic theory of variational methods [18–22]  it is difﬁcult to assess the effect of the chosen
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+family on the approximation for ﬁnite data; a poor choice can result in severe underestimation of
+posterior uncertainty [23  Ch. 21].
+Boosting variational inference (BVI) [24–26] is an exciting new approach that addresses this funda-
+mental limitation by using a nonparametric mixture variational family. By adding and reweighting
+only a single mixture component at a time  the approximation may be iteratively reﬁned  achieving
+the computation/quality tradeoff of MCMC and the scalability of VI. Theoretical guarantees on the
+convergence rate of Kullback-Leibler (KL) divergence [24  27  28] are much stronger than those
+available for standard Monte Carlo  which degrade as the number of estimands increases  enabling
+the practitioner to conﬁdently reuse the same approximation for multiple tasks. However  the bounds
+require the KL divergence to be sufﬁciently smooth over the class of mixtures—an assumption that
+does not hold for many standard mixture families  e.g. Gaussians  resulting in a degenerate procedure
+in practice. To overcome this  an ad-hoc entropy regularization is typically added to each component
+optimization; but this regularization invalidates convergence guarantees  and—depending on the
+regularization weight—sometimes does not actually prevent degeneracy.
+In this paper  we develop universal boosting variational inference (UBVI)  a variational scheme
+based on the Hellinger distance rather than the KL divergence. The primary advantage of using
+the Hellinger distance is that it endows the space of probability densities with a particularly simple
+unit-spherical geometry in a Hilbert space. We exploit this geometry to prevent the degeneracy of
+other gradient-based BVI methods  avoid difﬁcult joint optimizations of both component and weight 
+simplify fully-corrective weight optimizations  and provide a procedure in which the normalization
+constant of f does not need to be known  a crucial property in most VI settings. It also leads to the
+universality of UBVI: we show that for any target density and any mixture component family  the
+output of UBVI converges to the best possible approximation in the mixture family  even when the
+mixture family is misspeciﬁed. We develop a scalable implementation based on exponential family
+mixture components and standard stochastic optimization techniques. Finally  we discuss other
+statistical beneﬁts of the Hellinger distance as a variational objective through bounds on posterior
+probability  moment  and importance sampling errors. Experiments on multiple datasets and models
+show that UBVI provides reliable  accurate posterior approximations.
+
+2 Background: variational inference and boosting
+
+Variational inference  in its most general form  involves approximating a probability density p by
+minimizing some divergence D (·||·) from ξ to p over densities ξ in a family Q 
+
+q = arg min
+
+ξ∈Q
+
+D (ξ||p) .
+
+Past work has almost exclusively involved parametric families Q  such as mean-ﬁeld exponential
+families [4]  ﬁnite mixtures [29–31]  normalizing ﬂows [32]  and neural nets [16]. The issue with
+these families is that typically minξ∈Q D (ξ||p) > 0—meaning the practitioner cannot achieve
+arbitrary approximation quality with more computational effort—and a priori  there is no way to tell
+how poor the best approximation is. To address this  boosting variational inference (BVI) [24–26]
+proposes the use of the nonparametric family of all ﬁnite mixtures of a component density family C 
+
+(cid:41)
+
+Q = conv C :=
+
+wkξk : K ∈ N  w ∈ ∆K−1  ∀k ∈ N ξk ∈ C
+
+.
+
+Given a judicious choice of C  we have that inf ξ∈Q D (ξ||p) = 0; in other words  we can approximate
+any continuous density p with arbitrarily low divergence [33]. As optimizing directly over the
+nonparametric Q is intractable  BVI instead adds one component at a time to iteratively reﬁne the
+approximation. There are two general formulations of BVI; Miller et al. [26] propose minimizing KL
+divergence over both the weight and component simultaneously 
+
+(cid:40) K(cid:88)
+
+k=1
+
+qn =
+
+wnkξk
+
+ξn+1  ω = arg min
+ξ∈C ρ∈[0 1]
+
+while Guo et al. and Wang [24  25] argue that optimizing both simultaneously is too difﬁcult  and use
+a gradient boosting [34] formulation instead 
+
+DKL (ρξ + (1 − ρ)qn||p) wn+1 = [(1 − ω)wn ω]T 
+(cid:33)
+
+(cid:69)
+
+(cid:68)
+
+ξn+1 = arg min
+
+ξ∈C
+
+ξ  ∇DKL (·||p)|qn
+
+(cid:32)n+1(cid:88)
+
+k=1
+
+ωkξk||p
+
+.
+
+wn+1 =
+
+arg min
+
+ω=[(1−ρ)wn ρ]T  ρ∈[0 1]
+
+DKL
+
+2
+
+n(cid:88)
+
+k=1
+
+(a)
+
+(b)
+
+Figure 1: (1a): Greedy component selection  with target f  current iterate ¯gn  candidate components h 
+optimal component gn+1  the closest point g(cid:63) to f on the ¯gn → gn+1 geodesic  and arrows for initial
+geodesic directions. The quality of gn+1 is determined by the distance from f to g(cid:63)  or equivalently 
+by the alignment of the initial directions ¯gn → gn+1 and ¯gn → f. (1b): BVI can fail even when p is
+2N (25  5)  and UBVI ﬁnds the correct mixture in 2
+in the mixture family. Here p = 1
+iterations. BVI (with regularization weight in {1  10  30}) does not converge. For example  when
+the regularization weight is 1 the ﬁrst component will have variance < 5  and the second component
+optimization diverges since the target N (25  5) component has a heavier tail. Upon reweighting the
+second component is removed  and the approximation will never improve.
+
+2N (0  1) + 1
+
+Both algorithms attain DKL (qN||p) = O(1/N )1— the former by appealing to results from convex
+functional analysis [35  Theorem II.1]  and the latter by viewing BVI as functional Frank-Wolfe
+optimization [27  36  37]. This requires that DKL (q||p) is strongly smooth or has bounded curvature
+over q ∈ Q  for which it is sufﬁcient that densities in Q are bounded away from 0  bounded above 
+and have compact support [27]  or have a bounded parameter space [28]. However  these assumptions
+do not hold in practice for many simple (and common) cases  e.g.  where C is the class of multivariate
+normal distributions. Indeed  gradient boosting-based BVI methods all require some ad-hoc entropy
+regularization in the component optimizations to avoid degeneracy [24  25  28]. In particular  given a
+sequence of regularization weights rn > 0  BVI solves the following component optimization [28]:
+
+(cid:28)
+
+(cid:29)
+
+ξn+1 = arg min
+
+ξ∈C
+
+ξ  log
+
+ξrn+1qn
+
+p
+
+.
+
+(1)
+
+This addition of regularization has an adverse effect on performance in practice as demonstrated in
+Fig. 1b  and can lead to unintuitive behaviour and nonconvergence—even when p ∈ Q (Proposition 1)
+or when the distributions in C have lighter tails than p (Proposition 2).
+Proposition 1. Suppose C is the set of univariate Gaussians with mean 0 parametrized by variance 
+let p = N (0  1)  and let the initial approximation be q1 = N (0  τ 2). Then BVI in Eq. (1) with
+regularization r2 > 0 returns a degenerate next component ξ2 if τ 2 ≤ 1  and iterates inﬁnitely
+without improving the approximation if τ 2 > 1 and r2 > τ 2 − 1.
+Proposition 2. Suppose C is the set of univariate Gaussians with mean 0 parametrized by variance 
+and let p = Cauchy(0  1). Then BVI in Eq. (1) with regularization r1 > 0 returns a degenerate ﬁrst
+component ξ1 if r1 ≥ 2.
+
+3 Universal boosting variational inference (UBVI)
+
+3.1 Algorithm and convergence guarantee
+
+To design a BVI procedure without the need for ad-hoc regularization  we use a variational objective
+based on the Hellinger distance  which for any probability space (X   Σ  µ) and densities p  q is
+
+(cid:90) (cid:16)(cid:112)p(x) −(cid:112)q(x)
+
+(cid:17)2
+
+µ(dx).
+
+D2
+
+H (p  q) :=
+
+1
+2
+
+1We assume throughout that nonconvex optimization problems can be solved reliably.
+
+3
+
+Algorithm 1 The universal boosting variational inference (UBVI) algorithm.
+1: procedure UBVI(p  H  N)
+2:
+3:
+4:
+
+∝← √
+f
+p
+¯g0 ← 0
+for n = 1  . . .   N do
+
+(cid:46) Find the next component to add to the approximation using Eq. (5)
+
+1 − (cid:104)h  ¯gn−1(cid:105)2
+
+5:
+
+6:
+7:
+8:
+
+9:
+10:
+11:
+
+gn ← arg maxh∈H (cid:104)f − (cid:104)f  ¯gn−1(cid:105) ¯gn−1  h(cid:105)(cid:30)(cid:113)
+
+(cid:46) Compute pairwise normalizations using Eq. (2)
+for i = 1  . . .   n do
+
+Zn i = Zi n ← (cid:104)gn  gi(cid:105)
+
+end for
+(cid:46) Update weights using Eq. (7)
+d = ((cid:104)f  g1(cid:105)   . . .  (cid:104)f  gn(cid:105))T
+β = arg minb∈Rn b≥0 bT Z−1b + 2bT Z−1d
+(λn 1  . . .   λn n) =
+(cid:46) Update boosting approximation
+
+(β+d)T Z−1(β+d)
+
+Z−1(β+d)
+
+√
+
+¯gn ←(cid:80)n
+
+i=1 λnigi
+
+12:
+13:
+14:
+15: end procedure
+
+end for
+return q = ¯g2
+N
+
+Our general approach relies on two facts about the Hellinger distance. First  the metric DH (· ·)
+endows the set of µ-densities with a simple geometry corresponding to the nonnegative functions
+on the unit sphere in L2(µ). In particular  if f  g ∈ L2(µ) satisfy (cid:107)f(cid:107)2 = (cid:107)g(cid:107)2 = 1  f  g ≥ 0  then
+p = f 2 and q = g2 are probability densities and
+
+D2
+
+H (p  q) =
+
+(cid:107)f − g(cid:107)2
+2 .
+
+1
+2
+
+N(cid:88)
+
+(cid:18) gigj
+
+(cid:19)
+
+Zij
+
+One can thus perform Hellinger distance boosting by iteratively ﬁnding components that minimize
+geodesic distance to f on the unit sphere in L2(µ). Like the Miller et al. approach [26]  the boosting
+step directly minimizes a statistical distance  leading to a nondegenerate method; but like the Guo et
+al. and Wang approach [24  25]  this avoids the joint optimization of both component and weight; see
+i=0 λigi  λi ≥ 0  (cid:107)gi(cid:107)2 = 1  gi ≥ 0 in
+L2(µ) satisfying (cid:107)g(cid:107)2 = 1 corresponds to the mixture model density
+
+Section 3.2 for details. Second  a conic combination g =(cid:80)N
+
+q = g2 =
+
+Zijλiλj
+
+Zij := (cid:104)gi  gj(cid:105) ≥ 0.
+
+(2)
+
+i j=1
+
+Therefore  if we can ﬁnd a conic combination satisfying (cid:107)f − g(cid:107)2 ≤ √
+2  for p = f 2  we can
+guarantee that the corresponding mixture density q satisﬁes DH (p  q) ≤ . The mixture will be built
+from a family H ⊂ L2(µ) of component functions for which ∀h ∈ H  (cid:107)h(cid:107)2 = 1 and h ≥ 0. We
+assume that the target function f ∈ L2(µ)  (cid:107)f(cid:107)2 = 1  f ≥ 0 is known up to proportionality. We
+also assume that f is not orthogonal to spanH for expositional brevity  although the algorithms and
+theoretical results presented here apply equally well in this case. We make no other assumptions; in
+particular  we do not assume f is in cl spanH.
+The universal boosting variational inference (UBVI) procedure is shown in Algorithm 1. In each
+iteration  the algorithm ﬁnds a new mixture component from H (line 5; see Section 3.2 and Fig. 1a).
+Once the new component is found  the algorithm solves a convex quadratic optimization problem
+to update the weights (lines 9–11). The primary requirement to run Algorithm 1 is the ability to
+compute or estimate (cid:104)h  f(cid:105) and (cid:104)h  h(cid:48)(cid:105) for h  h(cid:48) ∈ H. For this purpose we employ an exponential
+component family H such that Zij is available in closed-form  and use samples from h2 to obtain
+estimates of (cid:104)h  f(cid:105); see Appendix A for further implementation details.
+The major beneﬁt of UBVI is that it comes with a computation/quality tradeoff akin to MCMC: for any
+target p and component family H  (1) there is a unique mixture ˆp = ˆf 2 minimizing DH (ˆp  p) over the
+closure of ﬁnite mixtures clQ; and (2) the output q of UBVI(p H  N ) satisﬁes DH (q  ˆp) = O(1/N )
+with a dimension-independent constant. No matter how coarse the family H is  the output of UBVI
+will converge to the best possible mixture approximation. Theorem 3 provides the precise result.
+
+4
+
+Theorem 3. For any density p there is a unique density ˆp = ˆf 2 satisfying ˆp =
+arg minξ∈cl Q DH (ξ  p).
+If each component optimization Eq. (5) is solved with a relative sub-
+optimality of at most (1 − δ)  then the variational mixture approximation q returned by UBVI(p  H 
+N) satisﬁes
+
+J1 := 1 −(cid:68) ˆf   g1
+
+(cid:69)2 ∈ [0  1)
+
+τ := Eq. (3) < ∞.
+
+DH (ˆp  q)2 ≤
+
+1 +(cid:0) 1−δ
+
+τ
+
+(cid:1)2
+
+J1
+J1(N − 1)
+
+i=1
+
+s.t.
+
+(cid:107) ˆf −
+
+(cid:107)hi(cid:107)2
+
+τ := inf
+
+∞(cid:88)
+
+(1 − x)−1
+
+hi∈cone H
+x∈[0 1)
+
+hi(cid:107)2 ≤ x 
+
+The proof of Theorem 3 may be found in Appendix B.3  and consists of three primary steps. First 
+Lemma 9 guarantees the existence and uniqueness of the convergence target ˆf under possible
+misspeciﬁcation of the component family H. Then the difﬁculty of approximating ˆf with conic
+combinations of functions in H is captured by the basis pursuit denoising problem [38]
+
+∞(cid:88)
+Lemma 10 guarantees that τ is ﬁnite  and in particular τ ≤ √
+1−J1
+1−√
+  which can be estimated in
+J1
+practice using Eq. (9). Finally  Lemma 11 develops an objective function recursion  which is then
+solved to yield Theorem 3. Although UBVI and Theorem 3 is reminiscent of past work on greedy
+approximation in a Hilbert space [34  39–46]  it provides the crucial advantage that the greedy steps
+do not require knowledge of the normalization of p. UBVI is inspired by a previous greedy method
+[46]  but provides guarantees with an arbitrary  potentially misspeciﬁed inﬁnite dictionary in a Hilbert
+space  and uses quadratic optimization to perform weight updates. Note that both the theoretical and
+practical cost of UBVI is dominated by ﬁnding the next component (line 5)  which is a nonconvex
+optimization problem. The other expensive step is inverting Z; however  incremental methods using
+block matrix inversion [47  p. 46] reduce the cost at iteration n to O(n2) and overall cost to O(N 3) 
+which is not a concern for practical mixtures with (cid:28) 103 components. The weight optimization (line
+10) is a nonnegative least squares problem  which can be solved efﬁciently [48  Ch. 23].
+
+∀i  hi ≥ 0.
+
+(3)
+
+i=1
+
+3.2 Greedy boosting along density manifold geodesics
+
+This section provides the technical derivation of UBVI (Algorithm 1) by expoiting the geometry
+of square-root densities under the Hellinger metric. Let the conic combination in L2(µ) after
+initialization followed by N − 1 steps of greedy construction be denoted
+
+n(cid:88)
+
+i=1
+
+¯gn :=
+
+λnigi 
+
+(cid:107)¯gn(cid:107)2 = 1 
+
+where λni ≥ 0 is the weight for component i at step n  and gi is the component added at step i. To
+ﬁnd the next component  we minimize the distance between ¯gn+1 and f over choices of h ∈ H and
+position x ∈ [0  1] along the ¯gn → h geodesic 2
+
+(cid:18)
+
+(cid:13)(cid:13)(cid:13)(cid:13)f −
+(cid:28)
+
+h − (cid:104)h  ¯gn(cid:105) ¯gn
+(cid:107)h − (cid:104)h  ¯gn(cid:105) ¯gn(cid:107)2
+x
+h − (cid:104)h  ¯gn(cid:105) ¯gn
+(cid:107)h − (cid:104)h  ¯gn(cid:105) ¯gn(cid:107)2
+
+(cid:29)
+
+(cid:112)
+(cid:112)
+
++
+
+(cid:19)(cid:13)(cid:13)(cid:13)(cid:13)2
+
+1 − x2 ¯gn
+
+(4)
+
++
+
+1 − x2 (cid:104)f  ¯gn(cid:105) .
+
+= arg max
+h∈H x∈[0 1]
+
+x
+
+f 
+
+¯g0 = 0
+
+gn+1  x(cid:63) = arg min
+h∈H x∈[0 1]
+
+Noting that h − (cid:104)h  ¯gn(cid:105) ¯gn is orthogonal to ¯gn  the second term does not depend on h  and x ≥ 0  we
+avoid optimizing the weight and component simultaneously and ﬁnd that
+
+(cid:29)
+
+h − (cid:104)h  ¯gn(cid:105) ¯gn
+(cid:107)h − (cid:104)h  ¯gn(cid:105) ¯gn(cid:107)2
+
+= arg max
+
+h∈H
+
+(cid:113)
+
+(cid:104)f − (cid:104)f  ¯gn(cid:105) ¯gn  h(cid:105)
+
+1 − (cid:104)h  ¯gn(cid:105)2
+
+.
+
+(5)
+
+(cid:28) f − (cid:104)f  ¯gn(cid:105) ¯gn
+
+gn+1 = arg max
+
+h∈H
+
+(cid:107)f − (cid:104)f  ¯gn(cid:105) ¯gn(cid:107)2
+
+ 
+
+Intuitively  Eq. (5) attempts to maximize alignment of gn+1 with the residual f − (cid:104)f  ¯gn(cid:105) ¯gn (the
+numerator) resulting in a ring of possible solutions  and among these  Eq. (5) minimizes alignment
+2Note that the arg max may not be unique  and when H is inﬁnite it may not exist; Theorem 3 still holds
+
+and UBVI works as intended in this case. For simplicity  we use (. . . ) = arg max(. . . ) throughout.
+
+5
+
+(a)
+
+(b)
+
+Figure 2: Forward KL divergence—which controls worst-case downstream importance sampling
+error—and importance-sampling-based covariance estimation error on a task of approximating
+i.i.d.∼ N (0  1) with N (0  σ2I) by minimizing Hellinger  forward KL  and reverse
+N (0  AT A)  Aij
+KL  plotted as a function of condition number κ(AT A). Minimizing Hellinger distance provides
+signiﬁcantly lower forward KL divergence and estimation error than minimizing reverse KL.
+
+with the current iterate ¯gn (the denominator). The ﬁrst form in Eq. (5) provides an alternative intuition:
+gn+1 achieves the maximal alignment of the initial geodesic directions ¯gn → f and ¯gn → h on the
+sphere. See Fig. 1a for a depiction. After selecting the next component gn+1  one option to obtain
+¯gn+1 is to use the optimal weighting x(cid:63) from Eq. (4); in practice  however  it is typically the case that
+solving Eq. (5) is expensive enough that ﬁnding the optimal set of coefﬁcients for {g1  . . .   gn+1} is
+worthwhile. This is accomplished by maximizing alignment with f subject to a nonnegativity and
+unit-norm constraint:
+
+(λ(n+1)1  . . .   λ(n+1)(n+1)) = arg max
+x∈Rn+1
+
+(6)
+where Z ∈ RN +1×N +1 is the matrix with entries Zij from Eq. (2). Since projection onto the feasible
+set of Eq. (6) may be difﬁcult  the problem may instead be solved using the dual via
+
+xigi
+
+f 
+
+s.t. x ≥ 0 
+
+xT Zx ≤ 1 
+
+(cid:43)
+
+(cid:42)
+
+n+1(cid:88)
+
+i=1
+
+(cid:112)(β + d)T Z−1(β + d)
+
+Z−1(β + d)
+
+(λ(n+1)1  . . .   λ(n+1)(n+1)) =
+d = ((cid:104)f  g1(cid:105)   . . .  (cid:104)f  gn+1(cid:105))T
+
+β = arg min
+b∈Rn+1 b≥0
+
+bT Z−1b + 2bT Z−1d.
+
+(7)
+
+Eq. (7) is a nonnegative linear least-squares problem—for which very efﬁcient algorithms are available
+[48  Ch. 23]—in contrast to prior variational boosting methods  where a fully-corrective weight update
+is a general constrained convex optimization problem. Note that  crucially  none of the above steps
+rely on knowledge of the normalization constant of f.
+
+4 Hellinger distance as a variational objective
+
+While the Hellinger distance has most frequently been applied in asymptotic analyses (e.g.  [49]) 
+it has seen recent use as a variational objective [50] and possesses a number of particularly useful
+properties that make it a natural ﬁt for this purpose. First  DH (· ·) applies to any arbitrary pair
+of densities  unlike DKL (p||q)  which requires that p (cid:28) q. Minimizing DH (· ·) also implicitly
+minimizes error in posterior probabilities and moments—two quantities of primary importance to
+practitioners—via its control on total variation and (cid:96)-Wasserstein by Propositions 4 and 5. Note
+that the upper bound in Proposition 4 is typically tighter than that provided by the usual DKL (q||p)
+variational objective via Pinsker’s inequality (and at the very least is always in [0  1])  and the bound
+in Proposition 5 shows that convergence in DH (· ·) implies convergence in up to (cid:96)th moments [51 
+Theorem 6.9] under relatively weak conditions.
+Proposition 4 (e.g. [52  p. 61]). The Hellinger distance bounds total variation via
+
+(cid:113)
+
+2 − D2
+
+H (p  q) .
+
+H (p  q) ≤ DTV (p  q) :=
+D2
+
+(cid:107)p − q(cid:107)1 ≤ DH (p  q)
+
+1
+2
+
+6
+
+Proposition 5. Suppose X is a Polish space with metric d(· ·)  (cid:96) ≥ 1  and p  q are densities with
+respect to a common measure µ. Then for any x0 
+
+W(cid:96)(p  q) ≤ 2DH (p  q)1/(cid:96)(cid:0)E(cid:2)d(x0  X)2(cid:96)(cid:3) + E(cid:2)d(x0  Y )2(cid:96)(cid:3)(cid:1)1/2(cid:96)  
+
+where Y ∼ p(y)µ(dy) and X ∼ q(x)µ(dx).
+uniformly bounded 2(cid:96)th moments  DH (p  qN ) → 0 =⇒ W(cid:96)(p  qN ) → 0 as N → ∞.
+Once a variational approximation q is obtained  it will typically be used to estimate expectations of
+some function of interest φ(x) ∈ L2(µ) via Monte Carlo. Unless q is trusted entirely  this involves
+importance sampling—using In(φ) or Jn(φ) in Eq. (8) depending on whether the normalization of p
+is known—to account for the error in q compared with the target distribution p [53] 
+
+In particular  if densities (qN )N∈N and p have
+
+In(φ) :=
+
+1
+N
+
+p(Xi)
+q(Xi)
+
+φ(Xi)
+
+Jn(φ) :=
+
+In(φ)
+In(1)
+
+i.i.d.∼ q(x)µ(dx).
+
+Xi
+
+(8)
+
+N(cid:88)
+
+n=1
+
+Recent work has shown that the error of importance sampling is controlled by the intractable forward
+KL-divergence DKL (p||q) [54]. This is where the Hellinger distance shines; Proposition 6 shows
+that it penalizes both positive and negative values of log p(x)/q(x) and thus provides moderate
+control on DKL (p||q)—unlike DKL (q||p)  which only penalizes negative values. See Fig. 2 for a
+demonstration of this effect on the classical correlated Gaussian example [23  Ch. 21]. While the
+takeaway from this setup is typically that minimizing DKL (q||p) may cause severe underestimation
+of variance  a reasonable practitioner should attempt to use importance sampling to correct for this
+anyway. But Fig. 2 shows that minimizing DKL (q||p) doesn’t minimize DKL (p||q) well  leading to
+poor estimates from importance sampling. Even though minimizing DH (p  q) also underestimates
+variance  it provides enough control on DKL (p||q) so that importance sampling can correct the errors.
+Direct bounds on the error of importance sampling estimates are also provided in Proposition 7.
+Proposition 6. Deﬁne R := log p(X)
+
+q(X) where X ∼ p(x)µ(dx). Then
+
+DH (p  q) ≥ 1
+2
+
+Proposition 7. Deﬁne α :=(cid:0)N−1/4 + 2(cid:112)DH (p  q)(cid:1)2. Then the importance sampling error with
+
+1 + R
+
+R2
+
+.
+
+2(cid:112)1 + E [1 [R > 0] (1 + R)2]
+
+DKL (p||q)
+
+≥
+
+(cid:34)
+
+(cid:118)(cid:117)(cid:117)(cid:116)E
+
+(cid:18) 1 + 1 [R ≤ 0] R
+
+(cid:19)2(cid:35)
+
+known normalization is bounded by
+
+E [|In(φ) − I(φ)|] ≤ (cid:107)√
+
+and with unknown normalization by
+
+∀t > 0
+
+P(|Jn(φ) − I(φ)| > (cid:107)√
+
+p φ(cid:107)2α 
+
+p φ(cid:107)2t) ≤(cid:0)1 + 4t−1
+
+1 + t(cid:1) α.
+
+√
+
+D2
+
+(cid:115)
+
+Next  the Hellinger distance between densities q  p can be estimated with high relative accuracy given
+samples from q  enabling the use of the above bounds in practice. This involves computing either
+H (p  q) or (cid:94)
+(cid:92)
+H (p  q) below  depending on whether the normalization of p is known. The expected
+D2
+(cid:80)N
+N(cid:88)
+error of both of these estimates relative to DH (p  q) is bounded via Proposition 8.
+(cid:113) 1
+(cid:80)N
+(cid:92)
+H (p  q) := 1− 1
+D2
+N
+(cid:113)
+H (p  q) − DH (p  q)2(cid:12)(cid:12)(cid:12)(cid:105) ≤ DH (p  q)
+E(cid:104)(cid:12)(cid:12)(cid:12) (cid:92)
+E(cid:104)(cid:12)(cid:12)(cid:12) (cid:94)
+H (p  q) − DH (p  q)2(cid:12)(cid:12)(cid:12)(cid:105) ≤
+(cid:16)
+N −1(cid:17)
+
+Proposition 8. The mean absolute difference between the Hellinger squared estimates is
+
+2 − DH (p  q)2
+√
+N
+√
+
+(cid:94)
+H (p  q) := 1−
+D2
+
+(cid:113) p(Xn)
+
+i.i.d.∼ q(x)µ(dx).
+
+p(Xn)
+q(Xn)
+
+DH (p  q) .
+
+p(Xn)
+q(Xn)
+
+2
+
+1 +
+
+N
+
+n=1
+
+n=1
+
+q(Xn)
+
+  Xn
+
+D2
+
+D2
+
+√
+
+(9)
+
+n=1
+
+1
+N
+
+ 
+
+It is worth pointing out that although the above statistical properties of the Hellinger distance make
+it well-suited as a variational objective  it does pose computational issues during optimization.
+In particular  to avoid numerically unstable gradient estimation  one must transform Hellinger-
+based objectives such as Eq. (5). This typically produces biased and occasionally higher-variance
+Monte Carlo gradient estimates than the corresponding KL gradient estimates. We detail these
+transformations and other computational considerations in Appendix A.
+
+7
+
+(a) Cauchy density
+
+(b) Cauchy log density
+
+(c) Cauchy KL divergence
+
+(d) Banana density
+
+(e) Banana log marginal densities
+
+(f) Banana KL divergence
+
+Figure 3: Results on the Cauchy and banana distributions; all subﬁgures use the legend from Fig. 3a.
+(Figs. 3a and 3d): Density approximation with 30 components for Cauchy (3a) and banana (3d). BVI
+has degenerate component optimizations after the ﬁrst  while UBVI and BVI+ are able to reﬁne the
+approximation. (Figs. 3b and 3e): Log density approximations for Cauchy (3b) and banana marginals
+(3e). UBVI provides more accurate approximation of distribution tails than the KL-based BVI(+)
+algorithms. (Figs. 3c and 3f): The forward KL divergence vs. the number of boosting components
+and computation time. UBVI consistently improves its approximation as more components are added 
+while the KL-based BVI(+) methods improve either slowly or not at all due to degeneracy. Solid
+lines / dots indicate median  and dashed lines / whiskers indicate 25th and 75th percentile.
+
+5 Experiments
+
+In this section  we compare UBVI  KL divergence boosting variational inference (BVI) [28]  BVI
+with an ad-hoc stabilization in which qn in Eq. (1) is replaced by qn +10−3 to help prevent degeneracy
+√
+(BVI+)  and standard VI. For all experiments  we used a regularization schedule of rn = 1/
+n
+for BVI(+) in Eq. (1). We used the multivariate Gaussian family for H parametrized by mean
+√
+and log-transformed diagonal covariance matrix. We used 10 000 iterations of ADAM [55] for
+optimization  with decaying step size 1/
+1 + i and Monte Carlo gradients based on 1 000 samples.
+Fully-corrective weight optimization was conducted via simplex-projected SGD for BVI(+) and
+nonnegative least squares for UBVI. Monte Carlo estimates of (cid:104)f  gn(cid:105) in UBVI were based on 10 000
+samples. Each component optimization was initialized from the best of 10 000 trials of sampling
+a component (with mean m and covariance Σ) from the current mixture  sampling the initialized
+component mean from N (m  16Σ)  and setting the initialized component covariance to exp(Z)Σ 
+Z ∼ N (0  1). Each experiment was run 20 times with an Intel i7 8700K processor and 32GB of
+memory. Code is available at www.github.com/trevorcampbell/ubvi.
+
+5.1 Cauchy and banana distributions
+
+Fig. 3 shows the results of running UBVI  BVI  and BVI+ for 30 boosting iterations on the standard
+univariate Cauchy distribution and the banana distribution [56] with curvature b = 0.1. These
+distributions were selected for their heavy tails and complex structure (shown in Figs. 3b and 3e) 
+two features that standard variational inference does not often address but boosting methods should
+
+8
+
+(a) Synthetic
+
+(b) Chemical Reactivity
+
+(c) Phishing
+
+Figure 4: Results from Bayesian logistic regression posterior inference on the synthetic (4a)  chemical
+(4b)  and phishing (4c) datasets  showing the energy distance [57] to the posterior (via NUTS [58])
+vs. the number of components and CPU time. Energy distance and time are normalized by the VI
+median. Solid lines / dots indicate median  and dashed lines / whiskers indicate 25th / 75th percentile.
+
+handle. However  BVI particularly struggles with heavy-tailed distributions  where its component
+optimization objective after the ﬁrst is degenerate. BVI+ is able to reﬁne its approximation  but still
+cannot capture heavy tails well  leading to large forward KL divergence (which controls downstream
+importance sampling error). We also found that the behaviour of BVI(+) is very sensitive to the choice
+of regularization tuning schedule rn  and is difﬁcult to tune well. UBVI  in contrast  approximates
+both heavy-tailed and complex distributions well with few components  and involves no tuning effort
+beyond the component optimization step size.
+
+5.2 Logistic regression with a heavy-tailed prior
+
+Fig. 4 shows the results of running 10 boosting iterations of UBVI  BVI+  and standard VI for
+posterior inference in Bayesian logistic regression. We used a multivariate T2(µ  Σ) prior  where
+i.i.d.∼ N (0  1). We ran
+in each trial  the prior parameters were set via µ = 0 and Σ = AT A for Aij
+this experiment on a 2-dimensional synthetic dataset generated from the model  a 10-dimensional
+chemical reactivity dataset  and a 10-dimensional phishing websites dataset  each with 20 subsampled
+datapoints.3 The small dataset size and heavy-tailed prior were chosen to create a complex posterior
+structure better-suited to evaluating boosting variational methods. The results in Fig. 4 are similar to
+those in the synthetic test from Section 5.1; UBVI is able to reﬁne its posterior approximation as it
+adds components without tuning effort  while the KL-based BVI+ method is difﬁcult to tune well and
+does not reliably provide better posterior approximations than standard VI. BVI (no stabilization) is
+not shown  as its component optimizations after the ﬁrst are degenerate and it reduces to standard VI.
+
+6 Conclusion
+
+This paper developed universal boosting variational inference (UBVI). UBVI optimizes the Hellinger
+metric  avoiding the degeneracy  tuning  and difﬁcult joint component/weight optimizations of other
+gradient-based BVI methods  while simplifying fully-corrective weight optimizations. Theoretical
+guarantees on the convergence of Hellinger distance provide an MCMC-like computation/quality
+tradeoff  and experimental results demonstrate the advantages over previous variational methods.
+
+7 Acknowledgments
+
+T. Campbell and X. Li are supported by a National Sciences and Engineering Research Council of
+Canada (NSERC) Discovery Grant and an NSERC Discovery Launch Supplement.
+
+3Real datasets available online at http://komarix.org/ac/ds/ and https://www.csie.ntu.edu.tw/
+
+~cjlin/libsvmtools/datasets/binary.html.
+
+9
+
+References
+[1] Steve Brooks  Andrew Gelman  Galin Jones  and Xiao-Li Meng. Handbook of Markov chain Monte Carlo.
+
+CRC Press  2011.
+
+[2] Andrew Gelman  John Carlin  Hal Stern  David Dunson  Aki Vehtari  and Donald Rubin. Bayesian data
+
+analysis. CRC Press  3rd edition  2013.
+
+[3] Michael Jordan  Zoubin Ghahramani  Tommi Jaakkola  and Lawrence Saul. An introduction to variational
+
+methods for graphical models. Machine Learning  37:183–233  1999.
+
+[4] Martin Wainwright and Michael Jordan. Graphical models  exponential families  and variational inference.
+
+Foundations and Trends in Machine Learning  1(1–2):1–305  2008.
+
+[5] Gareth Roberts and Jeffrey Rosenthal. General state space Markov chains and MCMC algorithms.
+
+Probability Surveys  1:20–71  2004.
+
+[6] Pierre Jacob  John O’Leary  and Yves Atchadé. Unbiased Markov chain Monte Carlo with couplings.
+
+arXiv:1708.03625  2017.
+
+[7] Jackson Gorham and Lester Mackey. Measuring sample quality with Stein’s method. In Advances in
+
+Neural Information Processing Systems  2015.
+
+[8] Qiang Liu  Jason Lee  and Michael Jordan. A kernelized Stein discrepancy for goodness-of-ﬁt tests and
+
+model evaluation. In International Conference on Machine Learning  2016.
+
+[9] Kacper Chwialkowski  Heiko Strathmann  and Arthur Gretton. A kernel test of goodness of ﬁt.
+
+International Conference on Machine Learning  2016.
+
+In
+
+[10] Rémi Bardenet  Arnaud Doucet  and Chris Holmes. On Markov chain Monte Carlo methods for tall data.
+
+Journal of Machine Learning Research  18:1–43  2017.
+
+[11] Steven Scott  Alexander Blocker  Fernando Bonassi  Hugh Chipman  Edward George  and Robert McCul-
+loch. Bayes and big data: the consensus Monte Carlo algorithm. International Journal of Management
+Science and Engineering Management  11:78–88  2016.
+
+[12] Michael Betancourt. The fundamental incompatibility of scalable Hamiltonian Monte Carlo and naive data
+
+subsampling. In International Conference on Machine Learning  2015.
+
+[13] Matthew Hoffman  David Blei  Chong Wang  and John Paisley. Stochastic variational inference. The
+
+Journal of Machine Learning Research  14:1303–1347  2013.
+
+[14] Alp Kucukelbir  Dustin Tran  Rajesh Ranganath  Andrew Gelman  and David Blei. Automatic differentia-
+
+tion variational inference. Journal of Machine Learning Research  18:1–45  2017.
+
+[15] Rajesh Ranganath  Sean Gerrish  and David Blei. Black box variational inference. In International
+
+Conference on Artiﬁcial Intelligence and Statistics  2014.
+
+[16] Diedrik Kingma and Max Welling. Auto-encoding variational Bayes. In International Conference on
+
+Learning Representations  2014.
+
+[17] Aılım Güne¸s Baydin  Barak Pearlmutter  Alexey Radul  and Jeffrey Siskind. Automatic differentiation in
+
+machine learning: a survey. Journal of Machine Learning Research  18:1–43  2018.
+
+[18] Pierre Alquier and James Ridgway. Concentration of tempered posteriors and of their variational approxi-
+
+mations. The Annals of Statistics  2018 (to appear).
+
+[19] Yixin Wang and David Blei. Frequentist consistency of variational Bayes. Journal of the American
+
+Statistical Association  0(0):1–15  2018.
+
+[20] Yun Yang  Debdeep Pati  and Anirban Bhattacharya. α-variational inference with statistical guarantees.
+
+The Annals of Statistics  2018 (to appear).
+
+[21] Badr-Eddine Chérief-Abdellatif and Pierre Alquier. Consistency of variational Bayes inference for
+
+estimation and model selection in mixtures. Electronic Journal of Statistics  12:2995–3035  2018.
+
+[22] Guillaume Dehaene and Simon Barthelmé. Expectation propagation in the large data limit. Journal of the
+
+Royal Statistical Society  Series B  80(1):199–217  2018.
+
+[23] Kevin Murphy. Machine learning: a probabilistic perspective. The MIT Press  2012.
+[24] Fangjian Guo  Xiangyu Wang  Kai Fan  Tamara Broderick  and David Dunson. Boosting variational
+
+inference. In Advances in Neural Information Processing Systems  2016.
+
+[25] Xiangyu Wang. Boosting variational inference: theory and examples. Master’s thesis  Duke University 
+
+2016.
+
+[26] Andrew Miller  Nicholas Foti  and Ryan Adams. Variational boosting: iteratively reﬁning posterior
+
+approximations. In International Conference on Machine Learning  2017.
+
+10
+
+[27] Francesco Locatello  Rajiv Khanna  Joydeep Ghosh  and Gunnar Rätsch. Boosting variational inference:
+
+an optimization perspective. In International Conference on Artiﬁcial Intelligence and Statistics  2018.
+
+[28] Francesco Locatello  Gideon Dresdner  Rajiv Khanna  Isabel Valera  and Gunnar Rätsch. Boosting black
+
+box variational inference. In Advances in Neural Information Processing Systems  2018.
+
+[29] Tommi Jaakkola and Michael Jordan. Improving the mean ﬁeld approximation via the use of mixture
+
+distributions. In Learning in graphical models  pages 163–173. Springer  1998.
+
+[30] O. Zobay. Variational Bayesian inference with Gaussian-mixture approximations. Electronic Journal of
+
+Statistics  8:355–389  2014.
+
+[31] Samuel Gershman  Matthew Hoffman  and David Blei. Nonparametric variational inference. In Interna-
+
+tional Conference on Machine Learning  2012.
+
+[32] Danilo Rezende and Shakir Mohamed. Variational inference with normalizing ﬂows. In International
+
+Conference on Machine Learning  2015.
+
+[33] Emanuel Parzen. On estimation of a probability density function and mode. The Annals of Mathematical
+
+Statistics  33(3):1065–1076  1962.
+
+[34] Robert Schapire. The strength of weak learnability. Machine Learning  5(2):197–227  1990.
+[35] Tong Zhang. Sequential greedy approximation for certain convex optimization problems. IEEE Transac-
+
+tions on Information Theory  49(3):682–691  2003.
+
+[36] Marguerite Frank and Philip Wolfe. An algorithm for quadratic programming. Naval Research Logistics
+
+Quarterly  3:95–110  1956.
+
+[37] Martin Jaggi. Revisiting Frank-Wolfe: projection-free sparse convex optimization. In International
+
+Conference on Machine Learning  2013.
+
+[38] Scott Chen  David Donoho  and Michael Saunders. Atomic decomposition by basis pursuit. SIAM Review 
+
+43(1):129–159  2001.
+
+[39] Yoav Freund and Robert Schapire. A decision-theoretic generalization of on-line learning and an application
+
+to boosting. Journal of Computer and System Sciences  55:119–139  1997.
+
+[40] Andrew Barron  Albert Cohen  Wolfgang Dahmen  and Ronald DeVore. Approximation and learning by
+
+greedy algorithms. The Annals of Statistics  36(1):64–94  2008.
+
+[41] Yutian Chen  Max Welling  and Alex Smola. Super-samples from kernel herding. In Uncertainty in
+
+Artiﬁcial Intelligence  2010.
+
+[42] Stéphane Mallat and Zhifeng Zhang. Matching pursuits with time-frequency dictionaries. IEEE Transac-
+
+tions on Signal Processing  41(12):3397–3415  1993.
+
+[43] Sheng Chen  Stephen Billings  and Wan Luo. Orthogonal least squares methods and their application to
+
+non-linear system identiﬁcation. International Journal of Control  50(5):1873–1896  1989.
+
+[44] Scott Chen  David Donoho  and Michael Saunders. Atomic decomposition by basis pursuit. SIAM Review 
+
+43(1):129–159  1999.
+
+[45] Joel Tropp. Greed is good: algorithmic results for sparse approximation. IEEE Transactions on Information
+
+Theory  50(10):2231–2242  2004.
+
+[46] Trevor Campbell and Tamara Broderick. Bayesian coreset construction via greedy iterative geodesic ascent.
+
+In International Conference on Machine Learning  2018.
+
+[47] Kaare
+
+Petersen
+
+and Michael
+
+Pedersen.
+
+The Matrix Cookbook.
+
+Online:
+
+https://www.math.uwaterloo.ca/ hwolkowi/matrixcookbook.pdf  2012.
+
+[48] Charles Lawson and Richard Hanson. Solving least squares problems. Society for Industrial and Applied
+
+Mathematics  1995.
+
+[49] Subhashis Ghosal  Jayanta Ghosh  and Aad van der Vaart. Convergence rates of posterior distributions.
+
+Annals of Statistics  28(2):500–531  2000.
+
+[50] Yingzhen Li and Richard Turner. Rényi divergence variational inference. In Advances in Neural Information
+
+Processing Systems  2016.
+
+[51] Cédric Villani. Optimal transport: old and new. Springer  2009.
+[52] David Pollard. A user’s guide to probability theory. Cambridge series in statistical and probabilistic
+
+mathematics. Cambridge University Press  7th edition  2002.
+
+[53] Yuling Yao  Aki Vehtari  Daniel Simpson  and Andrew Gelman. Yes  but did it work? Evaluating variational
+
+inference. In International Conference on Machine Learning  2018.
+
+[54] Sourav Chatterjee and Persi Diaconis. The sample size required in importance sampling. The Annals of
+
+Applied Probability  28(2):1099–1135  2018.
+
+11
+
+[55] Diederik Kingma and Jimmy Ba. ADAM: a method for stochastic optimization. In International Conference
+
+on Learning Representations  2015.
+
+[56] Heikki Haario  Eero Saksman  and Johanna Tamminen. An adaptive Metropolis algorithm. Bernoulli 
+
+pages 223–242  2001.
+
+[57] Gábor Szekely and Maria Rizzo. Energy statistics: statistics based on distances. Journal of Statistical
+
+Planning and Inference  143(8):1249–1272  2013.
+
+[58] Matthew Hoffman and Andrew Gelman. The No-U-Turn Sampler: adaptively setting path lengths in
+
+Hamiltonian Monte Carlo. Journal of Machine Learning Research  15:1351–1381  2014.
+
+[59] Trevor Campbell and Tamara Broderick. Automated scalable Bayesian inference via Hilbert coresets.
+
+Journal of Machine Learning Research  20(15):1–38  2019.
+
+12
+
+,Scott Linderman
+Matthew Johnson
+Ryan Adams
+Trevor Campbell
+Xinglong Li

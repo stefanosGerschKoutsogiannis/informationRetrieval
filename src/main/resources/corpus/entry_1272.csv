@@ -1,0 +1,923 @@
+2014,DFacTo: Distributed Factorization of Tensors,We present a technique for significantly speeding up Alternating Least Squares (ALS) and Gradient Descent (GD)  two widely used algorithms for tensor factorization. By exploiting properties of the Khatri-Rao product  we show how to efficiently address a computationally challenging sub-step of both algorithms. Our algorithm  DFacTo  only requires two matrix-vector products and is easy to parallelize. DFacTo is not only scalable but also on average 4 to 10 times faster than competing algorithms on a variety of datasets. For instance  DFacTo only takes 480 seconds on 4 machines to perform one iteration of the ALS algorithm and 1 143 seconds to perform one iteration of the GD algorithm on a 6.5 million x 2.5 million x 1.5 million dimensional tensor with 1.2 billion non-zero entries.,DFacTo: Distributed Factorization of Tensors
+
+Joon Hee Choi
+
+Electrical and Computer Engineering
+
+Purdue University
+
+West Lafayette  IN 47907
+choi240@purdue.edu
+
+S. V. N. Vishwanathan
+
+Computer Science
+
+University of California Santa Cruz
+
+Santa Cruz  CA 95064
+vishy@ucsc.edu
+
+Abstract
+
+We present a technique for signiﬁcantly speeding up Alternating Least Squares
+(ALS) and Gradient Descent (GD)  two widely used algorithms for tensor fac-
+torization. By exploiting properties of the Khatri-Rao product  we show how to
+efﬁciently address a computationally challenging sub-step of both algorithms. Our
+algorithm  DFacTo  only requires two sparse matrix-vector products and is easy
+to parallelize. DFacTo is not only scalable but also on average 4 to 10 times faster
+than competing algorithms on a variety of datasets. For instance  DFacTo only
+takes 480 seconds on 4 machines to perform one iteration of the ALS algorithm
+and 1 143 seconds to perform one iteration of the GD algorithm on a 6.5 million
+× 2.5 million × 1.5 million dimensional tensor with 1.2 billion non-zero entries.
+
+1
+
+Introduction
+
+Tensor data appears naturally in a number of applications [1  2]. For instance  consider a social
+network evolving over time. One can form a users × users × time tensor which contains snapshots
+of interactions between members of the social network [3]. As another example consider an online
+store such as Amazon.com where users routinely review various products. One can form a users ×
+items × words tensor from the review text [4]. Similarly a tensor can be formed by considering the
+various contexts in which a user has interacted with an item [5]. Finally  consider data collected by
+the Never Ending Language Learner from the Read the Web project which contains triples of noun
+phrases and the context in which they occur  such as  (“George Harrison”  “plays”  “guitars”) [6].
+While matrix factorization and matrix completion have become standard tools that are routinely used
+by practitioners  unfortunately  the same cannot be said about tensor factorization. The reasons are
+not very hard to see: There are two popular algorithms for tensor factorization namely Alternating
+Least Squares (ALS) (Appendix B)  and Gradient Descent (GD) (Appendix C). The key step in
+both algorithms is to multiply a matricized tensor and a Khatri-Rao product of two matrices (line 4
+of Algorithm 2 and line 4 of Algorithm 3). However  this process leads to a computationally-
+challenging  intermediate data explosion problem. This problem is exacerbated when the dimensions
+of tensor we need to factorize are very large (of the order of hundreds of thousands or millions)  or
+when sparse tensors contain millions to billions of non-zero entries. For instance  a tensor we formed
+using review text from Amazon.com has dimensions of 6.5 million × 2.5 million × 1.5 million and
+contains approximately 1.2 billion non-zero entries.
+Some studies have identiﬁed this intermediate data explosion problem and have suggested ways of
+addressing it. First  the Tensor Toolbox [7] uses the method of reducing indices of the tensor for
+sparse datasets and entrywise multiplication of vectors and matrices for dense datasets. However  it
+is not clear how to store data or how to distribute the tensor factorization computation to multiple
+machines (see Appendix D). That is  there is a lack of distributable algorithms in existing studies.
+Another possible strategy to solve the data explosion problem is to use GigaTensor [8]. Unfortu-
+nately  while GigaTensor does address the problem of parallel computation  it is relatively slow. To
+
+1
+
+summarize  existing algorithms for tensor factorization such as the excellent Tensor Toolbox of [7] 
+or the Map-Reduce based GigaTensor algorithm of [8] often do not scale to large problems.
+In this paper  we introduce an efﬁcient  scalable and distributed algorithm  DFacTo  that addresses
+the data explosion problem. Since most large-scale real datasets are sparse  we will focus exclu-
+sively on sparse tensors. This is well justiﬁed because previous studies have shown that designing
+specialized algorithms for sparse tensors can yield signiﬁcant speedups [7]. We show that DFacTo
+can be applied to both ALS and GD  and naturally lends itself to a distributed implementation.
+Therefore  it can be applied to massive real datasets which cannot be stored and manipulated on a
+single machine. For ALS  DFacTo is on average around 5 times faster than GigaTensor and around
+10 times faster than the Tensor Toolbox on a variety of datasets. In the case of GD  DFacTo is
+on average around 4 times faster than CP-OPT [9] from the Tensor Toolbox. On the Amazon.com
+review dataset  DFacTo only takes 480 seconds on 4 machines to perform one iteration of ALS and
+1 143 seconds to perform one iteration of GD.
+As with any algorithm  there is a trade-off: DFacTo uses 3 times more memory than the Tensor
+Toolbox  since it needs to store 3 ﬂattened matrices as opposed to a single tensor. However  in
+return  our algorithm only requires two sparse matrix-vector multiplications  making DFacTo easy to
+implement using any standard sparse linear algebra library. Therefore  there are two merits of using
+our algorithm: 1) computations are distributed in a natural way; and 2) only standard operations are
+required.
+
+2 Notation and Preliminaries
+
+Our notation is standard  and closely follows [2]. Also see [1]. Lower case letters such as x denote
+scalars  bold lower case letters such as x denote vectors  bold upper case letters such as X represent
+matrices  and calligraphic letters such as X denote three-dimensional tensors.
+The i-th element of a vector x is written as xi. In a similar vein  the (i  j)-th entry of a matrix
+X is denoted as xi j and the (i  j  k)-th entry of a tensor X is written as xi j k. Furthermore  xi :
+(resp. x: i) denotes the i-th row (resp. column) of X. We will use XΩ : (resp. X: Ω) to denote the
+sub-matrix of X which contains the rows (resp. columns) indexed by the set Ω. For instance  if
+Ω = {2  4}  then XΩ : is a matrix which contains the second and fourth rows of X. Extending the
+above notation to tensors  we will write Xi : :  X: j : and X: : k to respectively denote the horizontal 
+lateral and frontal slices of a third-order tensor X. The column  row  and tube ﬁbers of X are given
+by x: j k  xi : k  and xi j : respectively.
+Sometimes a matrix or tensor may not be fully observed. We will use ΩX or ΩX respectively to
+denote the set of indices corresponding to the observed (or equivalently non-zero) entries in a matrix
+X or a tensor X. Extending this notation  ΩX
+: j) denotes the set of column (resp. row)
+indices corresponding to the observed entries in the i-th row (resp. j-th column) of X. We deﬁne
+ΩX
+: : k analogously as the set of indices corresponding to the observed entries of the
+i-th horizontal  j-th lateral  or k-th frontal slices of X. Also  nnzr(X) (resp. nnzc(X)) denotes the
+number of rows (resp. columns) of X which contain at least one non-zero element.
+X(cid:62) denotes the transpose  X† denotes the Moore-Penrose pseudo-inverse  and (cid:107)X(cid:107) (resp. (cid:107)X(cid:107))
+denotes the Frobenius norm of a matrix X (resp. tensor X) [10]. Given a matrix A ∈ Rn×m  the
+linear operator vec(A) yields a vector x ∈ Rnm  which is obtained by stacking the columns of A.
+On the other hand  given a vector x ∈ Rnm  the operator unvec(n m)(x) yields a matrix A ∈ Rn×m.
+A ⊗ B denotes the Kronecker product  A (cid:12) B the Khatri-Rao product  and A ∗ B the Hadamard
+product of matrices A and B. The outer product of vectors a and b is written as a ◦ b (see e.g. 
+[11]). Deﬁnitions of these standard matrix products can be found in Appendix A.
+
+i : (resp. ΩX
+
+i : :  ΩX
+
+: j :  and ΩX
+
+2.1 Flattening Tensors
+Just like the vec(·) operator ﬂattens a matrix  a tensor X may also be unfolded or ﬂattened into a
+matrix in three ways namely by stacking the horizontal  lateral  and frontal slices. We use Xn to
+denote the n-mode ﬂattening of a third-order tensor X ∈ RI×J×K; X1 is of size I × JK  X2 is of
+size J × KI  and X3 is of size K × IJ. The following relationships hold between the entries of X
+
+2
+
+and its unfolded versions (see Appendix A.1 for an illustrative example):
+
+xi j k = x1
+
+(1)
+We can view X1 as consisting of K stacked frontal slices of X  each of size I × J. Similarly  X2
+consists of I slices of size J × K and X3 is made up of J slices of size K × I. If we use Xn m to
+denote the m-th slice in the n-mode ﬂattening of X  then observe that the following holds:
+
+j k+(i−1)K = x3
+
+i j+(k−1)J = x2
+
+k i+(j−1)I .
+
+k i+(j−1)I = x3 j
+x3
+k i.
+
+i j+(k−1)J = x1 k
+x1
+i j  
+
+j k+(i−1)K = x2 i
+x2
+j k 
+
+(2)
+One can state a relationship between the rows and columns of various ﬂattenings of a tensor  which
+will be used to derive our distributed tensor factorization algorithm in Section 3. The proof of the
+below lemma is in Appendix A.2.
+Lemma 1 Let (n  n(cid:48)) ∈ {(2  1)  (3  2)  (1  3)}  and let Xn and Xn(cid:48)
+respectively of a tensor X. Moreover  let Xn m be the m-th slice in Xn  and xn(cid:48)
+of Xn(cid:48)
+
+be the n and n(cid:48)-mode ﬂattening
+m : be the m-th row
+
+. Then  vec(Xn m) = xn(cid:48)
+m :.
+
+3 DFacTo
+
+Recall that the main challenge of implementing ALS or GD for solving tensor factorization lies in
+multiplying a matricized tensor and a Khatri-Rao product of two matrices: X1 (C (cid:12) B)1 . If B is
+of size J × R and C is of size K × R  explicitly forming (C (cid:12) B) requires O(JKR) memory and
+is infeasible when J and K are large. This is called the intermediate data explosion problem in the
+literature [8]. The lemma below will be used to derive our efﬁcient algorithm  which avoids this
+problem. Although the proof can be inferred using results in [2]  we give an elementary proof for
+completeness.
+Lemma 2 The r-th column of X1 (C (cid:12) B) can be computed as
+
+b: r
+
+c: r
+
+(3)
+
+b: r
+
+c: r
+
+=
+
+...
+
+: r =
+
+unvec(K I)
+
+: r =
+
+unvec(K I)
+
+: r X2 1 c: r
+
+b(cid:62)
+: r X2 I c: r
+
+(cid:17)(cid:105)(cid:62)
+(cid:17)(cid:105)(cid:62)
+
+Proof We need to show that
+
+(cid:2)X1 (C (cid:12) B)(cid:3)
+(cid:2)X1 (C (cid:12) B)(cid:3)
+
+(cid:16)(cid:0)X2(cid:1)(cid:62)
+(cid:104)
+(cid:16)(cid:0)X2(cid:1)(cid:62)
+(cid:104)
+ .
+ b(cid:62)
+Or equivalently it sufﬁces to show that(cid:2)X1 (C (cid:12) B)(cid:3)
+(cid:1) vec(cid:0)X2 i(cid:1) .
+(cid:1) =(cid:0)c(cid:62)
+(cid:1)(cid:62)
+(c: r ⊗ b: r) =(cid:2)X1 (C (cid:12) B)(cid:3)
+Unfortunately  a naive computation of(cid:2)X1 (C (cid:12) B)(cid:3)
+data explosion problem. This is because(cid:0)X2(cid:1)(cid:62)
+asserts  only a small number of entries of(cid:0)X2(cid:1)(cid:62)
+(cid:2)unvec(K I)(v: r)(cid:3)(cid:62)
+
+vec(cid:0)b(cid:62)
+: r X2 i c: r =(cid:0)x1
+
+Observe that b(cid:62)
+This allows us to rewrite the above equation as
+
+which completes the proof.
+
+b: r are non-zero.
+
+For convenience 
+
+i r = b(cid:62)
+
+b(cid:62)
+
+i :
+
+i r  
+
+: r X2 i c: r is a scalar. Moreover  using Lemma 1 we can write vec(cid:0)X2 i(cid:1) = x1
+
+: r ⊗ b(cid:62)
+
+: r X2 i c: r
+
+: r
+
+(4)
+i :.
+
+: r X2 i c: r. Using (13)
+
+: r by using (3) does not solve the intermediate
+b: r produces a KI dimensional vector  which is
+then reshaped by the unvec(K I)(·) operator into a K × I matrix. However  as the next lemma
+
+let a vector produced by (X2)(cid:62)b: r be v: r and a matrix produced by
+be Mr.
+
+1We mainly concentrate on the update to A since the updates to B and C are analogous.
+
+3
+
+Lemma 3 The number of non-zeros in v: r is at most nnzr((X2)(cid:62)) and nnzc(X2).
+Proof Multiplying an all-zero row in (X2)(cid:62) and b: r produces zero. Therefore  the number of non-
+zeros in v: r is equal to the number of rows in (X2)(cid:62) that contain at least one non-zero element.
+Also  by deﬁnition  nnzr((X2)(cid:62)) is equal to nnzc(X2).
+As a consequence of the above lemma  we only need to explicitly compute the non-zero entries of
+operator still remains. The
+
+v: r. However  the problem of reshaping v: r via the(cid:2)unvec(K I)(·)(cid:3)(cid:62)
+
+of v: r. And  this element is the (i  k)-th entry of Mr by deﬁnition of(cid:2)unvec(K I)(·)(cid:3)(cid:62)
+
+next lemma shows how to overcome this difﬁculty.
+Lemma 4 The location of the non-zero entries of Mr depends on (X2)(cid:62) and is independent of b: r.
+Proof The product of the (k + (i− 1)K)-th row of (X2)(cid:62) and b: r is the (k + (i− 1)K)-th element
+. Therefore 
+if all the entries in the (k + (i − 1)K)-th row of (X2)(cid:62) are zero  then the (i  k)-th entry of Mr is
+zero regardless of b: r. Consequently  the location of the non-zero entries of Mr is independent of
+b: r  and is only determined by (X2)(cid:62).
+Given X one can compute (X2)(cid:62) to know the locations of the non-zero entries of Mr. In other
+words  we can infer the non-zero pattern and therefore preallocate memory for Mr. We will show
+
+below how this allows us to perform the(cid:2)unvec(K I)(·)(cid:3)(cid:62)
+
+operation for free.
+
+Recall the Compressed Sparse Row (CSR) Format  which stores a sparse matrix as three arrays
+namely values  columns  and rows. Here  values represents the non-zero values of the matrix; while
+columns stores the column indices of the non-zero values. Also  rows stores the indices of the
+columns array where each row starts. For example  if a sparse matrix Mr is
+
+then the CSR of Mr is
+
+Mr =
+
+(cid:20) 1
+
+0
+
+0
+3
+
+2
+4
+
+(cid:21)
+
+ 
+
+value(Mr) = [ 1
+col(Mr) = [ 0
+row(Mr) = [ 0
+
+2
+
+2
+
+2
+
+3
+
+1
+
+4 ]
+2 ]
+
+4 ] .
+
+Different matrices with the same sparsity pattern can be represented by simply changing the entries
+of the value array. For our particular case  what this means is that we can pre-compute col(Mr) and
+row(Mr) and pre-allocate value(Mr). By writing the non-zero entries of v: r into value(Mr) we
+can “reshape” v: r into Mr.
+Let the matrix with all-zero rows in (X2)(cid:62) removed be ( ˆX2)(cid:62). Then  Algorithm 1 shows the
+DFacTo algorithm for computing N := X1 (C (cid:12) B). Here  the input values are ( ˆX2)(cid:62)  B  C  and
+Mr preallocated in CSR format. By storing the results of the product of ( ˆX2)(cid:62) and b: r directly
+into value(Mr)  we can obtain Mr because Mr was preallocated in the CSR format. Then  the
+product of Mr and c: r yields the r-th column of N. We obtain the output N by repeating these two
+sparse matrix-vector products R times.
+
+Algorithm 1: DFacTo algorithm for Tensor Factorization
+Input: ( ˆX2)(cid:62)  B  C  value(Mr) col(Mr)  row(Mr)
+Output: N
+while r=1  2 . . .   R do
+
+value(Mr) ← ( ˆX2)(cid:62) b: r
+n: r ← Mr c: r
+
+1
+2
+3
+4
+5
+6
+
+end
+
+other than storing Mr  which contains at most nnzc(X2) ≤(cid:12)(cid:12)ΩX(cid:12)(cid:12) non-zero entries. Therefore  we
+
+It is immediately obvious that using the above lemmas to compute N requires no extra memory
+
+4
+
+completely avoid the intermediate data explosion problem. Moreover  the same subroutine can be
+used for both ALS and GD (see Appendix E for detailed pseudo-code).
+
+3.1 Distributed Memory Implementation
+
+Our algorithm is easy to parallelize using a master-slave architecture of MPI(Message Passing Inter-
+face). At every iteration  the master transmits A  B  and C to the slaves. The slaves hold a fraction
+of the rows of X2 using which a fraction of the rows of N is computed. By performing a synchro-
+nization step  the slaves can exchange rows of N. In ALS  this N is used to compute A which is
+transmitted back to the master. Then  the master updates A  and the iteration proceeds. In GD  the
+slaves transmit N back to the master  which computes ∇A. Then  the master computes the step size
+by a line search algorithm  updates A  and the iteration proceeds.
+
+3.2 Complexity Analysis
+
+A naive computation of N requires(cid:0)JK +(cid:12)(cid:12)ΩX(cid:12)(cid:12)(cid:1) R ﬂops; forming C (cid:12) B requires JKR ﬂops
+and performing the matrix-matrix multiplication X1 (C (cid:12) B) requires(cid:12)(cid:12)ΩX(cid:12)(cid:12) R ﬂops. Our algorithm
+requires only(cid:0)nnzc(X2) +(cid:12)(cid:12)ΩX(cid:12)(cid:12)(cid:1) R ﬂops;(cid:12)(cid:12)ΩX(cid:12)(cid:12) R ﬂops for computing v: r and nnzc(X2)R ﬂops
+for computing Mrc: r. Note that  typically  nnzc(X2) (cid:28) both JK and(cid:12)(cid:12)ΩX(cid:12)(cid:12) (see Table 1). In terms
+
+of memory  the naive algorithm requires O(JKR) extra memory  while our algorithm only requires
+nnzc(X2) extra space to store Mr.
+
+4 Related Work
+
+(cid:62)(cid:17)
+
+and N2 := bin(cid:0)X1(cid:1) ∗(cid:16)
+
+1I (cid:12) (c: r ⊗ 1J )
+
+(cid:62)(cid:17)
+
+Two papers that are most closely related to our work are the GigaTensor algorithm proposed by [8]
+and the Sparse Tensor Toolbox of [7]. As discussed above  both algorithms attack the problem of
+computing N efﬁciently. In order to compute n: r  GigaTensor computes two intermediate matrices
+. Next  N3 :=
+N1 ∗ N2 is computed  and n: r is obtained by computing N3 1JK. As reported in [8]  GigaTensor
+
+N1 := X1 ∗(cid:16)
+uses 2(cid:12)(cid:12)ΩX(cid:12)(cid:12) extra storage and 5(cid:12)(cid:12)ΩX(cid:12)(cid:12) ﬂops to compute one column of N. The Sparse Tensor Toolbox
+are summed to form columns of N. The algorithm uses 2(cid:12)(cid:12)ΩX(cid:12)(cid:12) extra storage and 5(cid:12)(cid:12)ΩX(cid:12)(cid:12) ﬂops to
+
+stores a tensor as a vector of non-zero values and a matrix of corresponding indices. Entries of B
+and C are replicated appropriately to create intermediate vectors. A Hadamard product is computed
+between the non-zero entries of the matrix and intermediate vectors  and a selected set of entries
+
+1I (cid:12) (1K ⊗ b: r)
+
+compute one column of N. See Appendix D for a detailed illustrative example which shows all the
+intermediate calculations performed by our algorithm as well as the algorithm of [8] and [7].
+Also  [9] suggests the gradient-based optimization of CANDECOMP/PARAFAC (CP) using the
+same method as [7] to compute X1 (C (cid:12) B). [9] refers to this gradient-based optimization algorithm
+as CPOPT and the ALS algorithm of CP using the method of [7] as CPALS. Following [9]  we use
+these names  CPALS and CPOPT.
+
+5 Experimental Evaluation
+
+Our experiments are designed to study the scaling behavior of DFacTo on both publicly available
+real-world datasets as well as synthetically generated data. We contrast the performance of DFacTo
+(ALS) with GigaTensor [8] as well as with CPALS [7]  while the performance of DFacTo (GD) is
+compared with CPOPT [9]. We also present results to show the scaling behavior of DFacTo when
+data is distributed across multiple machines.
+
+Datasets See Table 1 for a summary of the real-world datasets we used in our experiments. The
+NELL-1 and NELL-2 datasets are from [8] and consists of (noun phrase 1  context  noun phrase 2)
+triples from the “Read the Web” project [6]. NELL-2 is a version of NELL-1  which is obtained by
+removing entries whose values are below a threshold.
+
+5
+
+The Yelp Phoenix dataset is from the Yelp Data Challenge 2  while Cellartracker  Ratebeer  Beerad-
+vocate and Amazon.com are from the Stanford Network Analysis Project (SNAP) home page. All
+these datasets consist of product or business reviews. We converted them into a users × items ×
+words tensor by ﬁrst splitting the text into words  removing stop words  using Porter stemming [12] 
+and then removing user-item pairs which did not have any words associated with them. In addition 
+for the Amazon.com dataset we ﬁltered words that appeard less than 5 times or in fewer than 5
+documents. Note that the number of dimensions as well as the number of non-zero entries reported
+in Table 1 differ from those reported in [4] because of our pre-processing.
+
+(cid:12)(cid:12)(cid:12)Ω ˆX(cid:12)(cid:12)(cid:12) nnzc(X1) nnzc(X2) nnzc(X3)
+
+229.83K
+1.32M
+337.37K
+1.57M
+2.85M
+17.37M
+29.91M
+
+Dataset
+Yelp
+
+Cellartracker
+
+NELL-2
+
+Beeradvocate
+
+Ratebeer
+NELL-1
+Amazon
+
+J
+11.54K
+
+K
+I
+45.97K
+84.52K
+36.54K 412.36K 163.46K
+12.09K
+28.82K
+9.18K
+33.37K
+66.06K 204.08K
+29.07K 110.30K 294.04K
+2.90M
+6.64M
+
+6.11M
+5.88M
+21.48M
+12.05M
+7.84M
+2.14M 25.50M 143.68M 113.30M 119.13M
+2.44M
+525.25M 389.64M
+
+9.85M
+25.02M
+76.88M
+78.77M
+77.13M
+
+4.32M
+19.23M
+16.56M
+18.98M
+22.40M
+
+1.68M
+
+1.22B
+
+Table 1: Summary statistics of the datasets used in our experiments.
+
+We also generated the following two kinds of synthetic data for our experiments:
+
+• the number of non-zero entries in the tensor is held ﬁxed but we vary I  J  and K.
+• the dimensions I  J  and K are held ﬁxed but the number of non-zeros entries varies.
+
+To simulate power law behavior  both the above datasets were generated using the following prefer-
+ential attachment model [13]: the probability that a non-zero entry is added at index (i  j  k) is given
+by pi × pj × pk  where pi (resp. pj and pk) is proportional to the number of non-zero entries at index
+i (resp. j and k).
+
+Implementation and Hardware All experiments were conducted on a computing cluster where
+each node has two 2.1 GHz 12-core AMD 6172 processors with 48 GB physical memory per node.
+Our algorithms are implemented in C++ using the Eigen library3 and compiled with the Intel Com-
+piler. We downloaded Version 2.5 of the Tensor Toolbox  which is implemented in MATLAB4.
+Since open source code for GigaTensor is not freely available  we developed our own version in
+C++ following the description in [8]. Also  we used MPICH25 in order to distribute the tensor fac-
+torization computation to multiple machines. All our codes are available for download under an
+open source license from http://www.joonheechoi.com/research.
+
+Scaling on Real-World Datasets Both CPALS and our implementation of GigaTensor are uni-
+processor codes. Therefore  for this experiment we restricted ourselves to datasets which can ﬁt on a
+single machine. When initialized with the same starting point  DFacTo and its competing algorithms
+will converge to the same solution. Therefore  we only compare the CPU time per iteration of the
+different algorithms. The results are summarized in Table 2. On many datasets DFacTo (ALS) is
+around 5 times faster than GigaTensor and 10 times faster than CPALS; the differences are more
+pronounced on the larger datasets. Also  DFacTo (GD) is around 4 times faster than CPOPT.
+The differences in performance between DFacTo (ALS) and CPALS and between DFacTo (GD)
+and CPOPT can partially be explained by the fact that DFacTo (ALS  GD) is implemented in C++
+while CPALS and CPOPT use MATLAB. However  it must be borne in mind that both MATLAB
+and our implementation use an optimized BLAS library to perform their computationally intensive
+numerical linear algebra operations.
+Compared to the Map-Reduce version implemented in Java and used for the experiments reported
+in [8]  our C++ implementation of GigaTensor is signiﬁcantly faster and more optimized. As per [8] 
+
+2https://www.yelp.com/dataset challenge/dataset
+3http://eigen.tuxfamily.org
+4http://www.sandia.gov/˜tgkolda/TensorToolbox/
+5http://www.mpich.org/static/downloads/
+
+6
+
+Dataset
+
+Yelp Phoenix
+Cellartracker
+
+NELL-2
+
+Beeradvocate
+
+Ratebeer
+NELL-1
+
+DFacTo (ALS) GigaTensor CPALS DFacTo (GD) CPOPT
+45.9
+130.32
+386.25
+481.06
+349.18
+-
+
+26.82
+80.65
+186.30
+224.29
+240.80
+772.24
+
+46.52
+118.25
+376.10
+364.98
+396.63
+-
+
+13.57
+35.82
+80.79
+94.85
+87.36
+742.67
+
+9.52
+23.89
+32.59
+43.84
+44.20
+322.45
+
+Table 2: Times per iteration (in seconds) of DFacTo (ALS)  GigaTensor  CPALS  DFacTo (GD)  and
+CPOPT on datasets which can ﬁt in a single machine (R=10).
+
+DFacTo (ALS)
+
+NELL-1
+Iter.
+322.45
+205.07
+141.02
+86.09
+81.24
+90.31
+
+CPU
+322.45
+167.29
+101.58
+62.19
+46.25
+34.54
+
+Amazon
+Iter.
+-
+-
+480.21
+292.34
+179.23
+142.69
+
+CPU
+-
+-
+376.71
+204.41
+98.07
+54.60
+
+Machines
+
+1
+2
+4
+8
+16
+32
+
+DFacTo (GD)
+
+NELL-1
+Iter.
+742.67
+492.38
+322.65
+232.41
+178.92
+209.39
+
+CPU
+104.23
+55.11
+28.55
+16.24
+9.70
+7.45
+
+Amazon
+Iter.
+-
+-
+1143.7
+727.79
+560.47
+471.91
+
+CPU
+-
+-
+127.57
+62.61
+28.61
+15.78
+
+Table 3: Total Time and CPU time per iteration (in seconds) as a function of number of machines
+for the NELL-1 and Amazon datasets (R=10).
+
+the Java implementation took approximately 10 000 seconds per iteration to handle a tensor with
+around 109 non-zero entries  when using 35 machines. In contrast  the C++ version was able to
+handle one iteration of the ALS algorithm on the NELL-1 dataset on a single machine in 772 sec-
+onds. However  because DFacto (ALS) uses a better algorithm  it is able to handsomely outperform
+GigaTensor and only takes 322 seconds per iteration.
+Also  the execution time of DFacTo (GD) is longer than that of DFacTo (ALS) because DFacTo
+(GD) spends more time on the line search algorithm to obtain an appropriate step size.
+
+Scaling across Machines Our goal is to study scaling behavior of the time per iteration as datasets
+are distributed across different machines. Towards this end we worked with two datasets. NELL-1
+is a moderate-size dataset which our algorithm can handle on a single machine  while Amazon is a
+large dataset which does not ﬁt on a single machine. Table 3 shows that the iteration time decreases
+as the number of machines increases on the NELL-1 and Amazon datasets. While the decrease in
+iteration time is not completely linear  the computation time excluding both synchronization and
+line search time decreases linearly. The Y-axis in Figure 1 indicates T4/Tn where Tn is the single
+iteration time with n machines on the Amazon dataset.
+
+(a) DFacTo(ALS)
+
+(b) DFacTo(GD)
+
+Figure 1: The scalability of DFacTo with respect to the number of machines on the Amazon dataset
+
+7
+
+Synthetic Data Experiments We perform two experiments with synthetically generated tensor
+data. In the ﬁrst experiment we ﬁx the number of non-zero entries to be 106 and let I = J = K
+and vary the dimensions of the tensor. For the second experiment we ﬁx the dimensions and let
+I = J = K and the number of non-zero entries is set to be 2I. The scaling behavior of the three
+algorithms on these two datasets is summarized in Table 4. Since we used a preferential attachment
+model to generate the datasets  the non-zero indices exhibit a power law behavior. Consequently 
+the number of columns with non-zero elements (nnzc(·)) for X1  X2 and X3 is very close to the
+total number of non-zero entries in the tensor. Therefore  as predicted by theory  DFacTo (ALS  GD)
+does not enjoy signiﬁcant speedups when compared to GigaTensor  CPALS and CPOPT. However 
+it must be noted that DFacto (ALS) is faster than either GigaTensor or CPALS in all but one case and
+DFacTo (GD) is faster than CPOPT in all cases. We attribute this to better memory locality which
+arises as a consequence of reusing the memory for N as discussed in Section 3.
+
+I = J = K Non-zeros DFacTo (ALS) GigaTensor CPALS DFacTo (GD) CPOPT
+5.21
+11.70
+29.13
+202.71
+0.57
+2.98
+26.04
+324.2
+
+106
+106
+106
+106
+2 × 104
+2 × 105
+2 × 106
+2 × 107
+
+1.14
+2.72
+7.26
+41.64
+0.05
+0.92
+12.06
+144.48
+
+104
+105
+106
+107
+104
+105
+106
+107
+
+2.80
+6.71
+11.86
+38.19
+0.09
+1.61
+22.08
+251.89
+
+5.10
+6.11
+16.54
+175.57
+0.52
+1.50
+15.84
+214.37
+
+2.32
+5.87
+16.51
+121.30
+0.09
+1.81
+21.74
+275.19
+
+Table 4: Time per iteration (in seconds) on synthetic datasets (non-zeros = 106 or 2I  R=10)
+
+Rank Variation Experiments Table 5 shows the time per iteration on various ranks (R) with the
+NELL-2 dataset. We see that the computation time of our algorithm increases lineraly in R like the
+time complexity analyzed in Section 3.2.
+
+R
+
+NELL-2
+
+5
+
+15.84
+
+10
+
+31.92
+
+20
+
+58.71
+
+50
+
+141.43
+
+100
+
+298.89
+
+200
+
+574.63
+
+500
+
+1498.68
+
+Table 5: Time per iteration (in seconds) on various R
+
+6 Discussion and Conclusion
+
+We presented a technique for signiﬁcantly speeding up the Alternating Least Squares (ALS) and the
+Gradient Descent (GD) algorithm for tensor factorization by exploiting properties of the Khatri-Rao
+product. Not only is our algorithm  DFacto  computationally attractive  but it is also more memory
+efﬁcient compared to existing algorithms. Furthermore  we presented a strategy for distributing the
+computations across multiple machines.
+We hope that the availability of a scalable tensor factorization algorithm will enable practitioners
+to work on more challenging tensor datasets  and therefore lead to advances in the analysis and
+understanding of tensor data. Towards this end we intend to make our code freely available for
+download under a permissive open source license.
+Although we mainly focused on tensor factorization using ALS and GD  it is worth noting that one
+can extend the basic ideas behind DFacTo to other related problems such as joint matrix completion
+and tensor factorization. We present such a model in Appendix F. In fact  we believe that this joint
+matrix completion and tensor factorization model by itself is somewhat new and interesting in its
+own right  despite its resemblance to other joint models including tensor factorization such as [14].
+In our joint model  we are given a user × item ratings matrix Y  and some side information such as
+a user × item × words tensor X. Preliminary experimental results suggest that jointly factorizing
+Y and X outperforms vanilla matrix completion. Please see Appendix F for details of the algorithm
+and some experimental results.
+
+8
+
+References
+[1] Age Smilde  Rasmus Bro  and Paul Geladi. Multi-way Analysis with Applications in the Chem-
+
+ical Sciences. John Wiley and Sons  Ltd  2004.
+
+[2] Tamara G. Kolda and Brett W. Bader. Tensor decompositions and applications. SIAM Review 
+
+51(3):455–500  2009.
+
+[3] Jure Leskovec  Jon M. Kleinberg  and Christos Faloutsos. Graphs over time: densiﬁcation
+
+laws  shrinking diameters and possible explanations. In KDD  pages 177–187  2005.
+
+[4] J. McAuley and J. Leskovec. Hidden Factors and Hidden Topics: Understanding Rating Di-
+In Proceedings of the 7th ACM Conference on Recommender
+
+mensions with Review Text.
+Systems  pages 165–172  2013.
+
+[5] Alexandros Karatzoglou  Xavier Amatriain  Linas Baltrunas  and Nuria Oliver. Multiverse
+recommendation: N-dimensional tensor factorization for context-aware collaborative ﬁltering.
+In Proceeedings of the 4th ACM Conference on Recommender Systems (RecSys)  2010.
+
+[6] A. Carlson  J. Betteridge  B. Kisiel  B. Settles  E.R. Hruschka Jr.  and T.M. Mitchell. Toward
+an architecture for never-ending language learning. In In Proceedings of the Conference on
+Artiﬁcial Intelligence (AAAI)  2010.
+
+[7] Brett W. Bader and Tamara G. Kolda. Efﬁcient matlab computations with sparse and factored
+
+tensors. SIAM Journal on Scientiﬁc Computing  30(1):205–231  2007.
+
+[8] U. Kang  Evangelos E. Papalexakis  Abhay Harpale  and Christos Faloutsos. Gigatensor: scal-
+ing tensor analysis up by 100 times - algorithms and discoveries. In Conference on Knowledge
+Discovery and Data Mining  pages 316–324  2012.
+
+[9] Evrim Acar  Daniel M. Dunlavy  and Tamara G. Kolda. A scalable optimization approach
+for ﬁtting canonical tensor decompositions. Journal of Chemometrics  25(2):67–86  February
+2011.
+
+[10] R. A. Horn and C. R. Johnson. Matrix analysis. Cambridge Univ Press  1990.
+
+[11] Dennis S. Bernstein. Matrix Mathematics. Princeton University Press  2005.
+
+[12] M. Porter. An algorithm for sufﬁx stripping. Program  14(3):130–137  1980.
+
+[13] A. Barabasi and R. Albert. Emergence of scaling in random networks. Science  286:509–512 
+
+1999.
+
+[14] Evrim Acar  Tamara G. Kolda  and Daniel M. Dunlavy. All-at-once optimization for cou-
+pled matrix and tensor factorizations. In MLG’11: Proceedings of Mining and Learning with
+Graphs  August 2011.
+
+9
+
+,Joon Hee Choi
+S. Vishwanathan

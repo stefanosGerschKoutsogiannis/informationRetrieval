@@ -1,0 +1,1098 @@
+2018,Large Scale computation of Means and Clusters for Persistence Diagrams using Optimal Transport,Persistence diagrams (PDs) are now routinely used to summarize the underlying topology of complex data. Despite several appealing properties  incorporating PDs in learning pipelines can be challenging because their natural geometry is not Hilbertian. Indeed  this was recently exemplified in a string of papers which show that the simple task of averaging a few PDs can be computationally prohibitive. We propose in this article a tractable framework to carry out standard tasks on PDs at scale  notably evaluating distances  estimating barycenters and performing clustering. This framework builds upon a reformulation of PD metrics as optimal transport (OT) problems. Doing so  we can exploit recent computational advances: the OT problem on a planar grid  when regularized with entropy  is convex can be solved in linear time using the Sinkhorn algorithm and convolutions. This results in scalable computations that can stream on GPUs. We demonstrate the efficiency of our approach by carrying out clustering with diagrams metrics on several thousands of PDs  a scale never seen before in the literature.,Large Scale computation of Means and Clusters for
+
+Persistence Diagrams using Optimal Transport
+
+Théo Lacombe
+
+Datashape
+Inria Saclay
+
+theo.lacombe@inria.fr
+
+Marco Cuturi
+
+Google Brain  and
+CREST  ENSAE
+
+cuturi@google.com
+
+Steve Oudot
+Datashape
+Inria Saclay
+
+steve.oudot@inria.fr
+
+Abstract
+
+Persistence diagrams (PDs) are now routinely used to summarize the underlying
+topology of complex data. Despite several appealing properties  incorporating
+PDs in learning pipelines can be challenging because their natural geometry is not
+Hilbertian. Indeed  this was recently exempliﬁed in a string of papers which show
+that the simple task of averaging a few PDs can be computationally prohibitive.
+We propose in this article a tractable framework to carry out standard tasks on
+PDs at scale  notably evaluating distances  estimating barycenters and performing
+clustering. This framework builds upon a reformulation of PD metrics as optimal
+transport (OT) problems. Doing so  we can exploit recent computational advances:
+the OT problem on a planar grid  when regularized with entropy  is convex can be
+solved in linear time using the Sinkhorn algorithm and convolutions. This results in
+scalable computations that can stream on GPUs. We demonstrate the efﬁciency of
+our approach by carrying out clustering with diagrams metrics on several thousands
+of PDs  a scale never seen before in the literature.
+
+Introduction
+
+1
+Topological data analysis (TDA) has been used successfully in a wide array of applications  for
+instance in medical (Nicolau et al.  2011) or material (Hiraoka et al.  2016) sciences  computer
+vision (Li et al.  2014) or to classify NBA players (Lum et al.  2013). The goal of TDA is to
+exploit and account for the complex topology (connectivity  loops  holes  etc.) seen in modern data.
+The tools developed in TDA are built upon persistent homology theory (Edelsbrunner et al.  2000;
+Zomorodian & Carlsson  2005; Edelsbrunner & Harer  2010) whose main output is a descriptor called
+a persistence diagram (PD) which encodes in a compact form—roughly speaking  a point cloud in
+the upper triangle of the square [0  1]2—the topology of a given space or object at all scales.
+Statistics on PDs. Persistence diagrams have appealing properties: in particular they have been
+shown to be stable with respect to perturbations of the input data (Cohen-Steiner et al.  2007;
+Chazal et al.  2009  2014). This stability is measured either in the so called bottleneck metric or
+in the p-th diagram distance  which are both distances that compute optimal partial matchings.
+While theoretically motivated and intuitive  these metrics are by deﬁnition very costly to compute.
+Furthermore  these metrics are not Hilbertian  preventing a faithful application of a large class of
+standard machine learning tools (k-means  PCA  SVM) on PDs.
+Related work. To circumvent the non-Hilbertian nature of the space of PDs  one can of course map
+diagrams onto simple feature vectors. Such features can be either ﬁnite dimensional (Carrière et al. 
+2015; Adams et al.  2017)  or inﬁnite through kernel functions (Reininghaus et al.  2015; Bubenik 
+2015; Carrière et al.  2017). A known drawback of kernel approaches on a rich geometric space such
+as that formed by PDs is that once PDs are mapped as feature vectors  any ensuing analysis remains in
+the space of such features (the “inverse image” problem inherent to kernelization). They are therefore
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+Figure 1: Illustration of differences between Fréchet means with Wasserstein and Euclidean geometry. The
+top row represents input data  namely persistence diagrams (left)  vectorization of PDs as persistence images
+in R100×100 (middle  (Adams et al.  2017))  and discretization of PDs as histograms (right). The bottom row
+represents the estimated barycenters (orange scale) with input data (shaded)  using the approach of Turner et al.
+(2014) (left)  the arithmetic mean of persistence images (middle) and our optimal tranport based approach (right).
+not helpful to carry out simple tasks in the space of PDs  such as that of averaging PDs  namely
+computing the Fréchet mean of a family of PDs. Such problems call for algorithms that are able to
+optimize directly in the space of PDs  and were ﬁrst addressed by Mileyko et al. (2011) and Turner
+(2013). Turner et al. (2014) provides an algorithm that converges to a local minimum of the Fréchet
+function by successive iterations of the Hungarian algorithm. However  the Hungarian algorithm
+does not scale well with the size of diagrams  and non-convexity yields potentially convergence to
+bad local minima.
+Contributions. We reformulate the computation of diagram metrics as an optimal transport (OT)
+problem  opening several perspectives  among them the ability to beneﬁt from entropic regulariza-
+tion (Cuturi  2013). We provide a new numerical scheme to bound OT metrics  and therefore diagram
+metrics  with additive guarantees. Unlike previous approximations of diagram metrics  ours can be
+parallelized and implemented efﬁciently on GPUs. These approximations are also differentiable 
+leading to a scalable method to compute barycenters of persistence diagrams. In exchange for a
+discretized approximation of PDs  we recover a convex problem  unlike previous formulations of
+the barycenter problem for PDs. We demonstrate the scalability of these two advances (accurate
+approximation of the diagram metric at scale and barycenter computation) by providing the ﬁrst
+tractable implementation of the k-means algorithm in the space of PDs.
+Notations for matrix and vector manipulations. When applied to matrices or vectors  operators
+exp  log  division  are always meant element-wise. u (cid:12) v denotes element-wise multiplication
+(Hadamard product) while Ku denotes the matrix-vector product of K ∈ Rd×d and u ∈ Rd.
+2 Background on OT and TDA
+OT. Optimal transport is now widely seen as a central tool to compare probability measures (Villani 
+i=1 aiδxi   ν =(cid:80)m
+combinations of diracs  µ =(cid:80)n
+2003  2008; Santambrogio  2015). Given a space X endowed with a cost function c : X × X → R+ 
+satisfying(cid:80)
+we consider two discrete measures µ and ν on X   namely measures that can be written as positive
++  b ∈ Rm
+j=1 bjδyj with weight vectors a ∈ Rn
+j bj and all xi  yj in X . The n × m cost matrix C = (c(xi  yj))ij and the
+transportation polytope Π(a  b) := {P ∈ Rn×m
+|P 1m = a  P T 1n = b} deﬁne an optimal transport
+problem whose optimum LC can be computed using either of two linear programs  dual to each other 
+
+i ai =(cid:80)
+
++
+
++
+
+LC(µ  ν) := min
+
+P∈Π(a b)(cid:104)P  C(cid:105) = max
+
+(1)
+where (cid:104)· ·(cid:105) is the Frobenius dot product and ΨC is the set of pairs of vectors (α  β) in Rn × Rm such
+that their tensor sum α ⊕ β is smaller than C  namely ∀i  j  αi + βj ≤ Cij. Note that when n = m
+and all weights a and b are uniform and equal  the problem above reduces to the computation of an
+optimal matching  that is a permutation σ ∈ Sn (with a resulting optimal plan P taking the form
+Pij = 1σ(i)=j). That problem has clear connections with diagram distances  as shown in §3.
+
+(α β)∈ΨC (cid:104)α  a(cid:105) + (cid:104)β  b(cid:105)
+
+2
+
+InputsPDs d2PImages k·k2Histograms LγCBarycentersFigure 2: Sketch of persistent homology. X = R3 and f (x) = minp∈P (cid:107)x − p(cid:107) so that sublevel sets of f are
+unions of balls centered at the points of P . First (resp second) coordinate of points in the persistence diagram
+encodes appearance scale (resp disappearance) of cavities in the sublevel sets of f. The isolated red point
+accounts for the presence of a persistent hole in the sublevel sets  inferring the underlying spherical geometry of
+the input point cloud.
+
+Entropic Regularization. Solving the optimal transport problem is intractable for large data. Cuturi
+proposes to consider a regularized formulation of that problem using entropy  namely:
+
+Lγ
+
+= max
+
+where γ > 0 and h(P ) := −
+that problem has a unique solution P γ which takes the form  using ﬁrst order conditions 
+
+αi+βj−Ci j
+
+C(a  b) := min
+
+P∈Π(a b)(cid:104)P  C(cid:105) − γh(P )
+(cid:80)
+α∈Rn β∈Rm (cid:104)α  a(cid:105) + (cid:104)β  b(cid:105) − γ
+ij Pij(log Pij − 1). Because the negentropy is 1-strongly convex 
+P γ = diag(uγ)Kdiag(vγ) ∈ Rn×m 
+(4)
+γ (term-wise exponentiation)  and (uγ  vγ) ∈ Rn × Rm is a ﬁxed point of the
+
+where K = e− C
+Sinkhorn map (term-wise divisions):
+
+e
+
+γ
+
+ 
+
+(2)
+
+(3)
+
+(cid:88)
+
+i j
+
+(cid:18) a
+
+(cid:19)
+
+S : (u  v) (cid:55)→
+
+ 
+
+b
+
+K T u
+
+Kv
+
+.
+
+(5)
+
+Note that this ﬁxed point is the limit of any sequence (ut+1  vi+1) = S(ut  vt)  yielding a straightfor-
+ward algorithm to estimate P γ. Cuturi considers the transport cost of the optimal regularized plan 
+Sγ
+C(a  b) := (cid:104)P γ  C(cid:105) = (uγ)T (K (cid:12) C)vγ  to deﬁne a Sinkhorn divergence between a  b (here (cid:12) is
+the term-wise multiplication). One has that Sγ
+C(a  b) → LC(a  b) as γ → 0  and more precisely P γ
+converges to the optimal transport plan solution of (1) with maximal entropy. That approximation can
+be readily applied to any problem that involves terms in LC  notably barycenters (Cuturi & Doucet 
+2014; Solomon et al.  2015; Benamou et al.  2015).
+Eulerian setting. When the set X is ﬁnite with cardinality d  µ and ν are entirely characterized
+by their probability weights a  b ∈ Rd
++ and are often called histograms in a Eulerian setting. When
+X is not discrete  as when considering the plane [0  1]2  we therefore have a choice of representing
+measures as sums of diracs  encoding their information through locations  or as discretized histograms
+on a planar grid of arbitrary granularity. Because the latter setting is more effective for entropic
+regularization (Solomon et al.  2015)  this is the approach we will favor in our computations.
+Persistent homology and Persistence Diagrams. Given a topological space X and a real-valued
+(cid:0)f−1((−∞  t])(cid:1)
+function f : X → R  persistent homology provides—under mild assumptions on f  taken for
+of the form Dgm(f ) =(cid:80)n
+granted in the remaining of this article—a topological signature of f built on its sublevel sets
+t∈R  and called a persistence diagram (PD)  denoted as Dgm(f ). In practice  it is
+> :=
+{(s  t) ∈ R2|s < t}. Each point (s  t) in Dgm(f ) can be understood as a topological feature
+(connected component  loop  hole...) which appears at scale s and disappears at scale t in the sublevel
+sets of f. Comparing the persistence diagrams of two functions f  g measures their difference from a
+topological perspective: presence of some topological features  difference in appearance scales  etc.
+The space of PDs is naturally endowed with a partial matching metric deﬁned as (p ≥ 1):
+
+i=1 δxi  namely a point measure with ﬁnite support included in R2
+
+dp(D1  D2) :=
+
+ζ∈Γ(D1 D2)
+
+(x y)∈ζ
+
+s∈D1∪D2\ζ
+
+(cid:107)s − π∆(s)(cid:107)p
+
+p
+
+ 
+
+(6)
+
+ min
+
+(cid:88)
+
+(cid:88)
+
+(cid:107)x − y(cid:107)p
+
+p +
+
+3
+
+ 1
+
+p
+
+PersistencediagramSublevelssetsoff=distPInputdata:pointcloudPwhere Γ(D1  D2) is the set of all partial matchings between points in D1 and points in D2 and π∆(s)
+denotes the orthogonal projection of an (unmatched) point s to the diagonal {(x  x) ∈ R2  x ∈ R}.
+The mathematics of OT and diagram distances share a key idea  that of matching  but differ on an
+important aspect: diagram metrics can cope  using the diagonal as a sink  with measures that have a
+varying total number of points. We solve this gap by leveraging an unbalanced formulation for OT.
+
+3 Fast estimation of diagram metrics using Optimal Transport
+In the following  we start by explicitly formulating (6) as an optimal transport problem. Entropic
+smoothing provides us a way to approximate (6) with controllable error. In order to beneﬁt mostly
+from that regularization (matrix parallel execution  convolution  GPU—as showcased in (Solomon
+et al.  2015))  implementation requires speciﬁc attention  as described in propositions 2  3  4.
+PD metrics as Optimal Transport. The main differences between (6) and (1) are that PDs do not
+generally have the same mass  i.e. number of points (counted with multiplicity)  and that the diagonal
+plays a special role by allowing to match any point x in a given diagram with its orthogonal projection
+π∆(x) onto the diagonal. Guittet’s formulation for partial transport (2002) can be used to account for
+this by creating a “sink” bin corresponding to that diagonal and allowing for different total masses.
+The idea of representing the diagonal as a single point already appears in the bipartite graph problem
+of Edelsbrunner & Harer (2010) (Ch.VIII). The important aspect of the following proposition is the
+clariﬁcation of the partial matching problem (6) as a standard OT problem (1).
+Let R2
+the linear operator R which  to a ﬁnite non-negative measure µ supported on R2
+on ∆ with mass equal to the total mass of µ  namely R : µ (cid:55)→ |µ|δ∆.
+tively n1 points x1 . . . xn1 and n2 points y1 . . . yn2. Let p ≥ 1. Then:
+
+> extended with a unique virtual point {∆} encoding the diagonal. We introduce
+>  associates a dirac
+
+Proposition 1. Let D1 =(cid:80)n1
+
+j=1 δyj be two persistence diagrams with respec-
+
+> ∪ {∆} be R2
+
+dp(D1  D2)p = LC(D1 + RD2  D2 + RD1) 
+
+where C is the cost matrix with block structure
+
+i=1 δxi and D2 =(cid:80)n2
+(cid:18) (cid:98)C u
+(cid:19)
+
+C =
+
+vT
+
+0
+
+∈ R(n1+1)×(n2+1) 
+p (cid:98)Cij = (cid:107)xi − yj(cid:107)p
+
+(7)
+
+(8)
+
+(9)
+
+t = diag(uγ
+
+t ) where (uγ
+
+t   vγ
+
+|dp(D1  D2)p − (cid:104)P γ
+
+p  for i ≤ n1  j ≤ n2.
+
+p  vj = (cid:107)yj − π∆(yj)(cid:107)p
+
+where ui = (cid:107)xi − π∆(xi)(cid:107)p
+The proof seamlessly relies on the fact that  when transporting point measures with the same mass
+(number of points counted with multiplicity)  the optimal transport problem is equivalent to an
+optimal matching problem (see §2). Details are left to the supplementary material.
+Entropic approximation of diagram distances. Following the correspondance established in
+Proposition 1  entropic regularization can be used to approximate the diagram distance dp(· ·).
+Given two persistence diagrams D1  D2 with respective masses n1 and n2  let n := n1 + n2 
+a = (1n1   n2) ∈ Rn1+1  b = (1n2   n1) ∈ Rn2+1  and P γ
+t ) is
+the output after t iterations of the Sinkhorn map (5). Adapting the bounds provided by Altschuler
+et al. (2017)  we can bound the error of approximating dp(D1  D2)p by (cid:104)P γ
+
+t )Kdiag(vγ
+t   C(cid:105):
+t   Π(a  b))(cid:107)C(cid:107)∞
+where dist(P  Π(a  b)) := (cid:107)P 1 − a(cid:107)1 + (cid:107)P T 1 − b(cid:107)1 (that is  error on marginals).
+Dvurechensky et al. (2018) prove that iterating the Sinkhorn map (5) gives a plan P γ
+(cid:17)
+dist(P γ
+
+t satisfying
+iterations. Given (9)  a natural choice is thus to take
+
+t   Π(a  b)) < ε in O
+n ln(n) for a desired precision ε  which lead to a total of O
+
+iterations in the
+γ =
+Sinkhorn loop. These results can be used to pre-tune parameters t and γ to control the approximation
+error due to smoothing. However  these are worst-case bounds  controlled by max-norms  and are
+often too pessimistic in practice. To overcome this phenomenon  we propose on-the-ﬂy error control 
+using approximate solutions to the smoothed primal (2) and dual (3) optimal transport problems 
+which provide upper and lower bounds on the optimal transport cost.
+Upper and Lower Bounds. The Sinkhorn algorithm  after at least one iteration (t ≥ 1)  produces
+feasible dual variables (αγ
+t )) ∈ ΨC (see below (1) for a deﬁnition).
+
+t   C(cid:105)| ≤2γn log (n) + dist(P γ
+
+(cid:16) n ln(n)(cid:107)C(cid:107)2∞
+
+t   βγ
+
+t ) = (γ log(uγ
+
+t )  γ log(vγ
+
+(cid:107)C(cid:107)2∞
+γε + ln(n)
+
+(cid:16)
+
+(cid:17)
+
+ε2
+
+ε
+
+4
+
+:= (cid:104)Rγ
+
+t := (cid:104)αc¯c
+
+t   C(cid:105) (red) and mγ
+
+t   b(cid:105) (green) as a function of t  the number
+Figure 3: (Left) M γ
+of iterations of the Sinkhorn map (t ranges from 1 to 500  with ﬁxed γ = 10−3). (Middle) Final M γ (red)
+t
+and mγ (green) provided by Alg.1  computed for decreasing γs  ranging from 10−1 to 5.10−4. For each value
+t   Π(a  b)) < 10−3. Note that the γ-axis is ﬂipped. (Right) Inﬂuence
+of γ  Sinkhorn loop is run until d(P γ
+of c¯c-transform for the Sinkhorn dual cost. (orange) The dual cost (cid:104)αγ
+t   b(cid:105)  where (αγ
+t ) are
+Sinkhorn dual variables (before the C-transform). (green) Dual cost after C-transform  i.e. with ((αγ
+t )c).
+Experiment run with γ = 10−3 and 500 iterations.
+
+t   βγ
+t )c¯c  (αγ
+
+t   a(cid:105) + (cid:104)αc
+
+t   a(cid:105) + (cid:104)βγ
+
+Their objective value  as measured by (cid:104)αγ
+t   b(cid:105)  performs poorly as a lower bound of the
+true optimal transport cost (see Fig. 3 and §5 below) in most of our experiments. To improve on this 
+we compute the so called C-transform (αγ
+t (Santambrogio  2015  §1.6)  deﬁned as:
+
+t   a(cid:105) + (cid:104)βγ
+t )c of αγ
+i {Cij − αi}  j ≤ n2 + 1.
+
+∀j  (αγ
+t )c
+
+j = max
+
+t )c¯c ∈ Rn1+1  (αγ
+Applying a C T -transform on (αγ
+can show that for any feasible α  β  we have that (Peyré & Cuturi  2018  Prop 3.1)
+
+t )c  we recover two vectors (αγ
+
+t )c ∈ Rn2+1. One
+
+(cid:104)α  a(cid:105) + (cid:104)β  b(cid:105) ≤ (cid:104)αc¯c  a(cid:105) + (cid:104)αc  b(cid:105) .
+
+When C’s top-left block is the squared Euclidean metric  this problem can be cast as that of computing
+the Moreau envelope of α. In a Eulerian setting and when X is a ﬁnite regular grid which we
+will consider  we can use either the linear-time Legendre transform or the Parabolic Envelope
+algorithm (Lucet  2010  §2.2.1 §2.2.2) to compute the C-transform in linear time with respect to the
+grid resolution d.
+Unlike dual iterations  the primal iterate P γ
+t does not belong to the transport polytope Π(a  b) after a
+ﬁnite number t of iterations. We use the rounding_to_feasible algorithm provided by Altschuler
+et al. (2017) to compute efﬁciently a feasible approximation Rγ
+t that does belong to Π(a  b).
+Putting these two elements together  we obtain
+
+t of P γ
+
+(cid:124)
+(cid:104)(αγ
+
+t )c¯c  a(cid:105) + (cid:104)(αγ
+
+(cid:123)(cid:122)
+
+mγ
+t
+
+(cid:125)
+t )c  b(cid:105)
+
+(cid:124) (cid:123)(cid:122) (cid:125)
+≤ LC(a  b) ≤ (cid:104)Rγ
+
+t   C(cid:105)
+M γ
+t
+
+.
+
+(10)
+
+t − mγ
+
+t − mγ
+
+t . Note that mγ
+
+t might be negative but can always be replaced by max(mγ
+
+Therefore  after iterating the Sinkhorn map (5) t times  we have that if M γ
+t is below a certain
+criterion ε  then we can guarantee that (cid:104)Rγ
+t   C(cid:105) is a fortiori an ε-approximation of LC(a  b). Observe
+t   then (1 − ε)M γ
+that one can also have a relative error control: if one has M γ
+t ≤ εM γ
+t ≤
+LC(a  b) ≤ M γ
+t   0) since
+we know C has non-negative entries (and therefore LC(a  b) ≥ 0)  while M γ
+t is always non-negative.
+Discretization. For simplicity  we assume in the remaining that our diagrams have their support in
+[0  1]2 ∩ R2
+>. From a numerical perspective  encoding persistence diagrams as histograms on the
+square offers numerous advantages. Given a uniform grid of size d × d on [0  1]2  we associate to a
+given diagram D a matrix-shaped histogram a ∈ Rd×d such that aij is the number of points in D
+belonging to the cell located at position (i  j) in the grid (we transition to bold-faced small letters to
+insist on the fact that these histograms must be stored as square matrices). To account for the total
+mass  we add an extra dimension encoding mass on {∆}. We extend the operator R to histograms 
+associating to a histogram a ∈ Rd×d its total mass on the (d2 + 1)-th coordinate. One can show that
+the approximation error resulting from that discretization is bounded above by 1
+p + |D2|
+p )
+(see the supplementary material).
+Convolutions. In the Eulerian setting  where diagrams are matrix-shaped histograms of size d × d =
+d2  the cost matrix C has size d2 × d2. Since we will use large values of d to have low discretization
+error (typically d = 100)  instantiating C is usually intractable. However  Solomon et al. (2015)
+
+d (|D1|
+
+1
+
+1
+
+5
+
+0100200300400500Nbiterationst012345Transportcost(centered)uppercost(primal)lowercost(dual)truecost0.000.020.040.060.080.10Parameterγ−20246Transportcost(centered)uppercost(primal)lowercost(dual)truecost0100200300400500Nbiterationst−1.75−1.50−1.25−1.00−0.75−0.50−0.250.00Transportcost(centered)sinkhorn(dual)costlowercost(dual)truecostC =
+
+−→c∆
+
+T
+
+(cid:19)
+
+−→c∆
+0
+
+showed that for regular grids endowed with a separable cost  each Sinkhorn iteration (as well as
+other key operations such as evaluating Sinkhorn’s divergence Sγ
+C) can be performed using Gaussian
+convolutions  which amounts to performing matrix multiplications of size d × d  without having
+to manipulate d2 × d2 matrices. Our framework is slightly different due to the extra dimension
+{∆}  but we show that equivalent computational properties hold. This observation is crucial from a
+numerical perspective. Our ultimate goal being to efﬁciently evaluate (11)  (12) and (14)  we provide
+implementation details.
+Let (u  u∆) be a pair where u ∈ Rd×d is a matrix-shaped histogram and u∆ ∈ R+ is a real number
+accounting for the mass located on the virtual point {∆}. We denote by −→u the d2 × 1 column vector
+obtained when reshaping u. The (d2 + 1) × (d2 + 1) cost matrix C and corresponding kernel K are
+given by
+
+(cid:18) (cid:98)C
+where (cid:98)C = ((cid:107)(i  i(cid:48)) − (j  j(cid:48))(cid:107)p
+p)ii(cid:48). C and K as deﬁned above
+will never be instantiated  because we can rely instead on c ∈ Rd×d deﬁned as cij = |i − j|p and
+k = e− c
+γ .
+Proposition 2 (Iteration of Sinkhorn map). The application of K to (u  u∆) can be performed as:
+(11)
+
+(cid:0)k(kuT )T + u∆k∆ (cid:104)u  k∆(cid:105) + u∆
+
+p)ii(cid:48) jj(cid:48)  c∆ = ((cid:107)(i  i(cid:48)) − π∆((i  i(cid:48)))(cid:107)p
+
+(cid:32)(cid:98)K := e−
+
+(cid:98)C
+γ −→k∆ := e−
+
+where (cid:104)· ·(cid:105) denotes the Froebenius dot-product in Rd×d.
+We now introduce m := k (cid:12) c and m∆ := k∆ (cid:12) c∆ ((cid:12) denotes term-wise multiplication).
+Proposition 3 (Computation of Sγ
+diag(−→u   u∆)Kdiag(−→v   v∆) can be computed as:
+
+C). Let (u  u∆)  (v  v∆) ∈ Rd×d+1. The transport cost of P :=
+(cid:104)diag(−→u   u∆)Kdiag(−→v   v∆)  C(cid:105) = (cid:104)diag(−→u )(cid:98)Kdiag(−→v ) (cid:98)C(cid:105)+u∆ (cid:104)v  m∆(cid:105)+v∆ (cid:104)u  m∆(cid:105)   (12)
+
+(u  u∆) (cid:55)→
+
+  K =
+
+−→k∆
+
+T
+
+(cid:33)
+
+−→c∆
+
+γ
+
+ 
+
+(cid:1)
+
+1
+
+where the ﬁrst term can be computed as:
+
+(cid:104)diag(−→u )(cid:98)Kdiag(−→v ) (cid:98)C(cid:105) = (cid:107)u (cid:12)
+
+(13)
+Finally  consider two histograms (a  a∆)  (b  b∆) ∈ Rd×d × R  let R ∈ Π((a  a∆)  (b  b∆)) be the
+rounded matrix of P (see the supplementary material or (Altschuler et al.  2017)). Let r(P )  c(P ) ∈
+Rd×d × R denote the ﬁrst and second marginal of P respectively. We introduce (using term-wise
+min and divisions):
+
+(cid:107)1.
+
+(cid:0)m(kvT )T + k(mvT )T(cid:1)
+
+(cid:19)
+
+(cid:18) (a  a∆)
+
+r(P )
+
+(cid:18) (b  b∆)
+
+c(diag(X)P )
+
+(cid:19)
+
+  1
+
+ 
+
+X = min
+
+  1
+
+ 
+
+Y = min
+
+along with P (cid:48) = diag(X)P diag(Y ) and the marginal errors:
+
+(er  (er)∆) = (a  a∆) − r(P (cid:48)) 
+
+(ec  (ec)∆) = (b  b∆) − c(P (cid:48)) 
+
+Proposition 4 (Computation of upper bound (cid:104)R  C(cid:105)). The transport cost induced by R can be
+computed as:
+
+(cid:104)R  C(cid:105) =(cid:104)diag(X (cid:12) (u  u∆))Kdiag(Y (cid:12) (v  v∆))  C(cid:105)
+
+1
+
++
+
+r cec(cid:107)1 + (cid:107)erceT
+Note that the ﬁrst term can be computed using (12)
+
+(cid:107)ec(cid:107)1 + (ec)∆
+
+(cid:107)eT
+
+(cid:0)
+
+c (cid:107)1 + (ec)∆ (cid:104)er  c∆(cid:105) + (er)∆ (cid:104)ec  c∆(cid:105)
+
+(cid:1).
+
+(14)
+
+Parallelization and GPU. Using a Eulerian representation is particularly beneﬁcial when ap-
+plying Sinkhorn’s algorithm  as shown by Cuturi (2013).
+Indeed  the Sinkhorn map (5) only
+involves matrix-vector operations. When dealing with a large number of histograms  concate-
+nating these histograms and running Sinkhorn’s iterations in parallel as matrix-matrix product
+results in signiﬁcant speedup that can exploit GPGPU to compare a large number of pairs simul-
+taneously. This makes our approach especially well-suited for large sets of persistence diagrams.
+
+6
+
+Figure 4: Barycenter estimation for different γs with a simple set of 3 PDs (red  blue and green). The smaller
+the γ  the better the estimation (E decreases  note the γ-axis is ﬂipped on the right plot)  at the cost of more
+iterations in Alg. 2. The mass appearing along the diagonal is a consequence of entropic smoothing: it does not
+cost much to delete while it increases the entropy of transport plans.
+
+We can now estimate distances be-
+tween persistence diagrams with
+Alg. 1 in parallel by performing only
+(d × d)-sized matrix multiplications 
+leading to a computational scaling in
+d3 where d is the grid resolution pa-
+rameter. Note that a standard stopping
+threshold in Sinkhorn iteration pro-
+cess is to check the error to marginals
+dist(P  Π(a  b))  as motivated by (9).
+
+Algorithm 1 Sinkhorn divergence for persistence diagrams
+Input: Pairs of PDs (Di  D(cid:48)i)i  smoothing parameter γ >
+0  grid step d ∈ N  stopping criterion  initial (u  v).
+Output: Approximation of all (dp(Di  D(cid:48)i)p)i  upper and
+lower bounds if wanted.
+init Cast Di  D(cid:48)i as histograms ai  bi on a d × d grid
+while stopping criterion not reached do
+Iterate in parallel (5) (u  v) (cid:55)→ S(u  v) using (11)
+
+end while
+Compute all Sγ
+if Want a upper bound then
+
+C(ai + Rbi  bi + Rai) using (12)
+
+end if
+if Want a lower bound then
+
+Compute (cid:104)Ri  C(cid:105) in parallel using (14)
+
+4 Smoothed barycenters
+for persistence diagrams
+OT formulation for barycenters.
+We show in this section that the bene-
+ﬁts of entropic regularization also ap-
+ply to the computation of barycenters of PDs. As the space of PD is not Hilbertian but only a metric
+space  the natural deﬁnition of barycenters is to formulate them as Fréchet means for the dp metric 
+as ﬁrst introduced (for PDs) in (Mileyko et al.  2011).
+Deﬁnition. Given a set of persistence diagrams D1  . . .   DN   a barycenter of D1 . . . DN is any
+solution of the following minimization problem:
+
+t )c  bi(cid:105) using (Lucet  2010)
+
+t )c¯c  ai(cid:105)+(cid:104)(αγ
+
+Compute (cid:104)(αγ
+
+end if
+
+N(cid:88)
+
+i=1
+
+minimize
+µ∈M+(R2
+
+>)E(µ) :=
+
+LC(µ + RDi  Di + Rµ)
+
+(15)
+
+>) denotes the set of non-negative ﬁnite measures supported on R2
+
+et al. (2014) proved the existence of minimizers of ˆE and proposed an algorithm that converges to a
+local minimum of the functional  using the Hungarian algorithm as a subroutine. Their algorithm
+
+where C is deﬁned as in (8) with p = 2 (but our approach adapts easily to any ﬁnite p ≥ 1)  and
+M+(R2
+Let (cid:98)E denotes the restriction of E to the space of persistence diagrams (ﬁnite point measures). Turner
+>. E(µ) is the energy of µ.
+will be referred to as the B-Munkres Algorithm. The non-convexity of (cid:98)E can be a real limitation in
+practice since (cid:98)E can have arbitrarily bad local minima (see Lemma 1 in the supplementary material).
+Note that minimizing E instead of (cid:98)E will not give strictly better minimizers (see Proposition 6 in the
+
+supplementary material). We then apply entropic smoothing to this problem. This relaxation offers
+differentiability and circumvents both non-convexity and numerical scalability.
+Entropic smoothing for PD barycenters. In addition to numerical efﬁciency  an advantage of
+smoothed optimal transport is that a (cid:55)→ Lγ
+C(a  b) is differentiable. In the Eulerian setting  its gradient
+is given by centering the vector γ log(uγ) where uγ is a ﬁxed point of the Sinkhorn map (5)  see
+(cid:80)N
+(Cuturi & Doucet  2014). This result can be adapted to our framework  namely:
+Proposition 5. Let D1 . . . DN be PDs  and (ai)i the corresponding histograms on a d × d grid. The
+(cid:32) N(cid:88)
+gradient of the functional E γ : z (cid:55)→
+
+C(z + Rai  ai + Rz) is given by
+
+i=1 Lγ
+
+(cid:33)
+
+(16)
+
+∇zE γ = γ
+
+log(uγ
+
+i ) + RT log(vγ
+i )
+
+i=1
+
+7
+
+γ=0.02γ=0.01γ=0.0010.00250.00500.00750.01000.01250.01500.01750.0200Parameterγ0.00.20.40.60.81.01.21.4Energyreachedi   vγ
+
+∇ := γ((cid:80)
+
+end if
+Return z
+
+i ) + RT log(vγ
+
+i ))
+
+C(z + Rai  ai + Rz) using (12)
+
+i log(uγ
+z := z (cid:12) exp(−λ∇)
+
+end while
+if Want energy then
+i Sγ
+
+Compute 1
+N
+
+(cid:80)
+
+i ) is a ﬁxed point of the Sinkhorn map obtained
+
+Iterate S deﬁned in (5) in parallel between all the pairs
+(z + Rai)i and (ai + Rz)i  using (11).
+
+Algorithm 2 Smoothed approximation of PD barycenter
+Input: PDs D1  . . .   DN   learning rate λ  smoothing pa-
+rameter γ > 0  grid step d ∈ N.
+Output: Estimated barycenter z
+Init: z uniform measure above the diagonal.
+Cast each Di as an histogram ai on a d × d grid
+while z changes do
+
+where RT denotes the adjoint operator R and (uγ
+while transporting z + Rai onto ai + Rz.
+As in (Cuturi & Doucet  2014)  this
+result follows from the envelope the-
+orem  with the added subtlety that z
+appears in both terms depending on u
+and v. This formula can be exploited
+to compute barycenters via gradient
+descent  yielding Algorithm 2. Fol-
+lowing (Cuturi & Doucet  2014  §4.2) 
+we used a multiplicative update. This
+is a particular case of mirror descent
+(Beck & Teboulle  2003) and is equiv-
+alent to a (Bregman) projected gra-
+dient descent on the positive orthant 
+retaining positive coefﬁcients through-
+out iterations.
+As it can be seen in Fig. 4  the barycen-
+tric persistence diagrams are smeared.
+If one wishes to recover more spiked diagrams  quantization and/or entropic sharpening (Solomon
+et al.  2015  §6.1) can be applied  as well as smaller values for γ that impact computational speed or
+numerical stability. We will consider these extensions in future work.
+A comparison with linear representations. When doing statistical analysis with PDs  a standard
+approach is to transform a diagram into a ﬁnite dimensional vector—in a stable way—and then
+perform statistical analysis and learning with an Euclidean structure. This approach does not preserve
+the Wasserstein-like geometry of the diagram space and thus loses the algebraic interpretability of
+PDs. Fig. 1 gives a qualitative illustration of the difference between Wasserstein barycenters (Fréchet
+mean) of PDs and Euclidean barycenters (linear means) of persistence images (Adams et al.  2017)  a
+commonly used vectorization for PDs (Makarenko et al.  2016; Zeppelzauer et al.  2016; Obayashi
+et al.  2018).
+5 Experiments
+All experiments are run with p = 2  but would work with any ﬁnite p ≥ 1. This choice is consistent
+with the work of Turner et al. (2014) for barycenter estimation.
+A large scale approximation. Iterations of Sinkhorn map
+(5) yield a transport cost whose value converges to the true
+transport cost as γ → 0 and the number of iterations t →
+∞ (Cuturi  2013). We quantify in Fig. 3 this convergence
+experimentally using the upper and lower bounds provided
+in (10) through t and for decreasing γ. We consider a set
+of N = 100 pairs of diagrams randomly generated with
+100 to 150 points in each diagrams  and discretized on a
+100× 100 grid. We run Alg. 1 for different γ ranging from
+10−1 to 5.10−4 along with corresponding upper and lower
+bounds described in (10). For each pair of diagrams  we
+center our estimates by removing the true distance  so that
+the target cost is 0 across all pairs. We plot median  top
+90% and bottom 10% percentiles for both bounds. Using
+the C-transform provides a much better lower bound in our experiments. This is however inefﬁcient
+in practice: despite a theoretical complexity linear in the grid size  the sequential structure of the
+algorithms described in (Lucet  2010) makes them unsuited for GPGPU to our knowledge.
+We then compare the scalability of Alg. 1 with respect to the number of points in diagrams with that of
+Kerber et al. (2017) which provides a state-of-the-art algorithm with publicly available code—referred
+to as Hera—to estimate distances between diagrams. For both algorithms  we compute the average
+time tn to estimate a distance between two random diagrams having from n to 2n points where n
+ranges from 10 to 5000. In order to compare their scalability  we plot in Fig. 5 the ratio tn/t10 of
+both algorithms  with γn = 10−1/n in Alg. 1.
+
+Figure 5: Comparison of scalings of Hera and
+Sinkhorn (Alg. 1) as the number of points in
+diagram increases. log-log scale.
+
+8
+
+101102103Nbpointsindiag.n(log-scale)100101102103Scalingtn/t10(log-scale)HeraSinkhornFigure 7: Qualitative comparison of B-Munkres and our Alg 2. (a) Input set of N = 3 diagrams with n = 20
+points each. (b) Output of B-Munkres when initialized on the blue diagram (orange squares) and input data (grey
+scale). (c) Output of B-Munkres initialized on the green diagram. (d) Output of Alg. 2 on a 100 × 100 grid 
+γ = 5.10−4  learning-rate λ = 5  Sinkhorn stopping criterion (distance to marginals): 0.001  gradient descent
+performed until |E(zt+1)/E(zt) − 1| < 0.01.—As one can see  localization of masses is similar. Initialization
+of B-Munkres is made on one of the input diagram as indicated in (Turner et al.  2014  Alg. 1)  and leads to
+convergence to different local minima. Our convex approach (Alg. 2) performs better (lower energy). As a
+baseline  the energy of the naive arithmetic mean of the three diagrams is 0.72.
+
+Figure 8: Illustration of our k-means algorithm. From left to right: 20 diagrams extracted from horses and
+camels plot together (one color for each diagram); the centroid they are matched with provided by our algorithm;
+20 diagrams of head and faces; along with their centroid; decrease of the objective function. Running time
+depends on many parameters along with the random initialization of k-means. As an order of magnitude  it takes
+from 40 to 80 minutes with this 5000 PD dataset on a P100 GPU.
+Fast barycenters and k-means on large PD sets. We compare our Alg. 2 (referred to as Sinkhorn)
+to the combinatorial algorithm of Turner et al. (2014) (referred to as B-Munkres). We use the script
+munkres.py provided on the website of K.Turner for their implementation. We record in Fig. 6
+running times of both algorithms on a set of 10 diagrams having from n to 2n points  n ranging from
+1 to 500  on Intel Xeon 2.3 GHz (CPU) and P100 (GPU  Sinkhorn only). When running Alg. 2  the
+gradient descent is performed until |E(zt+1)/E(zt) − 1| < 0.01  with γ = 10−1/n and d = 50. Our
+experiment shows that Alg. 2 drastically outperforms B-Munkres as the number of points n increases.
+We interrupt B-Munkres at n = 30  after which computational time becomes an issue.
+Aside the computational efﬁciency  we highlight the bene-
+ﬁts of operating with a convex formulation in Fig. 7. Due
+to non-convexity  the B-Munkres algorithm is only guaran-
+teed to converge to a local minima  and its output depends
+on initialization. We illustrate on a toy set of N = 3 dia-
+grams how our algorithm avoids local minima thanks to
+the Eulerian approach we take.
+We now merge Alg. 1 and Alg. 2 in order to perform unsu-
+pervised clustering via k-means on PDs. We work with the
+3D-shape database provided by Sumner & Popovi´c and
+generate diagrams in the same way as in (Carrière et al. 
+2015)  working in practice with 5000 diagrams with 50 to
+100 points each. The database contains 6 classes: camel  cat  elephant  horse  head and face.
+In practice  this unsupervised clustering algorithm detects two main clusters: faces and heads on one
+hand  camels and horses on the other hand are systematically grouped together. Fig. 8 illustrates the
+convergence of our algorithm and the computed centroids for the aforementioned clusters.
+6 Conclusion
+In this work  we took advantage of a link between PD metrics and optimal transport to leverage and
+adapt entropic regularization for persistence diagrams. Our approach relies on matrix manipulations
+rather than combinatorial computations  providing parallelization and efﬁcient use of GPUs. We
+provide bounds to control approximation errors. We use these differentiable approximations to
+estimate barycenters of PDs signiﬁcantly faster than existing algorithm  and showcase their application
+by clustering thousand diagrams built from real data. We believe this ﬁrst step will open the way for
+new statistical tools for TDA and ambitious data analysis applications of persistence diagrams.
+
+Figure 6: Average running times for B-
+Munkres (blue) and Sinkhorn (red) algo-
+rithms (log-log scale) to average 10 PDs.
+
+9
+
+(a)Diagramset(b)B-Munkres(c)B-Munkres(d)Alg2FinalenergyB-Munkres(b)B-Munkres(c)Alg.2(d)0.5890.5550.54205101520NbIterationink-means0.1250.1300.1350.1400.1450.1500.1550.1600.165Energyofk-means100101102Nbpointsindiagramsn(log-scale)10−1100101102103Timetoconverge(s)(log-scale)Sinkhorn(cpu)Sinkhorn(gpu)B-MunkresAcknowledgments. We thank the anonymous reviewers for the fruitful discussion. TL was sup-
+ported by the AMX  École polytechnique. MC acknowledges the support of a Chaire d’Excellence
+de l’Idex Paris-Saclay.
+
+References
+Adams  H.  Emerson  T.  Kirby  M.  Neville  R.  Peterson  C.  Shipman  P.  Chepushtanova  S. 
+Hanson  E.  Motta  F.  and Ziegelmeier  L. Persistence images: a stable vector representation of
+persistent homology. Journal of Machine Learning Research  18(8):1–35  2017.
+
+Agueh  M. and Carlier  G. Barycenters in the wasserstein space. SIAM Journal on Mathematical
+
+Analysis  43(2):904–924  2011.
+
+Altschuler  J.  Weed  J.  and Rigollet  P. Near-linear time approximation algorithms for optimal
+In Advances in Neural Information Processing Systems  pp.
+
+transport via sinkhorn iteration.
+1961–1971  2017.
+
+Anderes  E.  Borgwardt  S.  and Miller  J. Discrete wasserstein barycenters: optimal transport for
+
+discrete data. Mathematical Methods of Operations Research  84(2):389–409  2016.
+
+Beck  A. and Teboulle  M. Mirror descent and nonlinear projected subgradient methods for convex
+
+optimization. Operations Research Letters  31(3):167–175  2003.
+
+Benamou  J.-D.  Carlier  G.  Cuturi  M.  Nenna  L.  and Peyré  G. Iterative bregman projections for
+regularized transportation problems. SIAM Journal on Scientiﬁc Computing  37(2):A1111–A1138 
+2015.
+
+Bubenik  P. Statistical topological data analysis using persistence landscapes. The Journal of Machine
+
+Learning Research  16(1):77–102  2015.
+
+Carlier  G.  Oberman  A.  and Oudet  E. Numerical methods for matching for teams and wasserstein
+barycenters. ESAIM: Mathematical Modelling and Numerical Analysis  49(6):1621–1642  2015.
+Carrière  M.  Oudot  S. Y.  and Ovsjanikov  M. Stable topological signatures for points on 3d shapes.
+
+In Computer Graphics Forum  volume 34  pp. 1–12. Wiley Online Library  2015.
+
+Carrière  M.  Cuturi  M.  and Oudot  S. Sliced wasserstein kernel for persistence diagrams. In 34th
+
+International Conference on Machine Learning  2017.
+
+Chazal  F.  Cohen-Steiner  D.  Glisse  M.  Guibas  L. J.  and Oudot  S. Y. Proximity of persistence
+modules and their diagrams. In Proceedings of the twenty-ﬁfth annual symposium on Computational
+geometry  pp. 237–246. ACM  2009.
+
+Chazal  F.  De Silva  V.  and Oudot  S. Persistence stability for geometric complexes. Geometriae
+
+Dedicata  173(1):193–214  2014.
+
+Cohen-Steiner  D.  Edelsbrunner  H.  and Harer  J. Stability of persistence diagrams. Discrete &
+
+Computational Geometry  37(1):103–120  2007.
+
+Cuturi  M. Sinkhorn distances: Lightspeed computation of optimal transport. In Advances in Neural
+
+Information Processing Systems  pp. 2292–2300  2013.
+
+Cuturi  M. and Doucet  A. Fast computation of wasserstein barycenters. In International Conference
+
+on Machine Learning  pp. 685–693  2014.
+
+Dvurechensky  P.  Gasnikov  A.  and Kroshnin  A. Computational optimal transport: Complexity by
+accelerated gradient descent is better than by sinkhorn’s algorithm. In Dy  J. and Krause  A. (eds.) 
+Proceedings of the 35th International Conference on Machine Learning  volume 80 of Proceedings
+of Machine Learning Research  pp. 1367–1376  Stockholmsmässan  Stockholm Sweden  10–15
+Jul 2018. PMLR. URL http://proceedings.mlr.press/v80/dvurechensky18a.html.
+
+Edelsbrunner  H. and Harer  J. Computational topology: an introduction. American Mathematical
+
+Soc.  2010.
+
+Edelsbrunner  H.  Letscher  D.  and Zomorodian  A. Topological persistence and simpliﬁcation. In
+Foundations of Computer Science  2000. Proceedings. 41st Annual Symposium on  pp. 454–463.
+IEEE  2000.
+
+Fréchet  M. Les éléments aléatoires de nature quelconque dans un espace distancié. In Annales de
+
+l’institut Henri Poincaré  volume 10  pp. 215–310. Presses universitaires de France  1948.
+
+10
+
+Guittet  K. Extended Kantorovich norms: a tool for optimization. PhD thesis  INRIA  2002.
+Hiraoka  Y.  Nakamura  T.  Hirata  A.  Escolar  E. G.  Matsue  K.  and Nishiura  Y. Hierarchical
+structures of amorphous solids characterized by persistent homology. Proceedings of the National
+Academy of Sciences  113(26):7035–7040  2016.
+
+Kerber  M.  Morozov  D.  and Nigmetov  A. Geometry helps to compare persistence diagrams.
+
+Journal of Experimental Algorithmics (JEA)  22(1):1–4  2017.
+
+Li  C.  Ovsjanikov  M.  and Chazal  F. Persistence-based structural recognition. In Proceedings of the
+
+IEEE Conference on Computer Vision and Pattern Recognition  pp. 1995–2002  2014.
+
+Lucet  Y. What shape is your conjugate? a survey of computational convex analysis and its
+
+applications. SIAM review  52(3):505–542  2010.
+
+Lum  P.  Singh  G.  Lehman  A.  Ishkanov  T.  Vejdemo-Johansson  M.  Alagappan  M.  Carlsson  J. 
+and Carlsson  G. Extracting insights from the shape of complex data using topology. Scientiﬁc
+reports  3:1236  2013.
+
+Makarenko  N.  Kalimoldayev  M.  Pak  I.  and Yessenaliyeva  A. Texture recognition by the methods
+
+of topological data analysis. Open Engineering  6(1)  2016.
+
+Mileyko  Y.  Mukherjee  S.  and Harer  J. Probability measures on the space of persistence diagrams.
+
+Inverse Problems  27(12):124007  2011.
+
+Moreau  J.-J. Proximité et dualité dans un espace hilbertien. Bull. Soc. Math. France  93(2):273–299 
+
+1965.
+
+Nicolau  M.  Levine  A. J.  and Carlsson  G. Topology based data analysis identiﬁes a subgroup of
+breast cancers with a unique mutational proﬁle and excellent survival. Proceedings of the National
+Academy of Sciences  108(17):7265–7270  2011.
+
+Obayashi  I.  Hiraoka  Y.  and Kimura  M. Persistence diagrams with linear machine learning models.
+
+Journal of Applied and Computational Topology  1(3-4):421–449  2018.
+
+Peyré  G. and Cuturi  M. Computational Optimal Transport  2018. URL http://arxiv.org/abs/
+
+1803.00567.
+
+Reininghaus  J.  Huber  S.  Bauer  U.  and Kwitt  R. A stable multi-scale kernel for topological ma-
+chine learning. In Proceedings of the IEEE conference on computer vision and pattern recognition 
+pp. 4741–4748  2015.
+
+Santambrogio  F. Optimal transport for applied mathematicians. Birkäuser  NY  2015.
+Schrijver  A. Theory of linear and integer programming. John Wiley & Sons  1998.
+Solomon  J.  De Goes  F.  Peyré  G.  Cuturi  M.  Butscher  A.  Nguyen  A.  Du  T.  and Guibas  L.
+Convolutional wasserstein distances: Efﬁcient optimal transportation on geometric domains. ACM
+Transactions on Graphics (TOG)  34(4):66  2015.
+
+Sumner  R. W. and Popovi´c  J. Deformation transfer for triangle meshes. In ACM Transactions on
+
+Graphics (TOG)  volume 23  pp. 399–405. ACM  2004.
+
+Turner  K. Means and medians of sets of persistence diagrams. arXiv preprint arXiv:1307.8300 
+
+2013.
+
+Turner  K.  Mileyko  Y.  Mukherjee  S.  and Harer  J. Fréchet means for distributions of persistence
+
+diagrams. Discrete & Computational Geometry  52(1):44–70  2014.
+
+Villani  C. Topics in optimal transportation. Number 58. American Mathematical Soc.  2003.
+Villani  C. Optimal transport: old and new  volume 338. Springer Science & Business Media  2008.
+Zeppelzauer  M.  Zieli´nski  B.  Juda  M.  and Seidl  M. Topological descriptors for 3d surface analysis.
+In International Workshop on Computational Topology in Image Context  pp. 77–87. Springer 
+2016.
+
+Zomorodian  A. and Carlsson  G. Computing persistent homology. Discrete & Computational
+
+Geometry  33(2):249–274  2005.
+
+11
+
+,Theo Lacombe
+Marco Cuturi
+Steve OUDOT

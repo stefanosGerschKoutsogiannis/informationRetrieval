@@ -1,0 +1,825 @@
+2018,A Retrieve-and-Edit Framework for Predicting Structured Outputs,For the task of generating complex outputs such as source code  editing existing outputs can be easier than generating complex outputs from scratch.
+With this motivation  we propose an approach that first retrieves a training example based on the input (e.g.  natural language description) and then edits it to the desired output (e.g.  code).
+Our contribution is a computationally efficient method for learning a retrieval model that embeds the input in a task-dependent way without relying on a hand-crafted metric or incurring the expense of jointly training the retriever with the editor.
+Our retrieve-and-edit framework can be applied on top of any base model.
+We show that on a new autocomplete task for GitHub Python code and the Hearthstone cards benchmark  retrieve-and-edit significantly boosts the performance of a vanilla sequence-to-sequence model on both tasks.,A Retrieve-and-Edit Framework for
+
+Predicting Structured Outputs
+
+Tatsunori B. Hashimoto
+
+Department of Computer Science
+
+Stanford University
+
+thashim@stanford.edu
+
+Kelvin Guu
+
+Department of Statistics
+
+Stanford University
+kguu@stanford.edu
+
+Yonatan Oren
+
+Department of Computer Science
+
+Stanford University
+
+yonatano@stanford.edu
+
+Percy Liang
+
+Department of Computer Science
+
+Stanford University
+
+pliang@cs.stanford.edu
+
+Abstract
+
+For the task of generating complex outputs such as source code  editing existing
+outputs can be easier than generating complex outputs from scratch. With this
+motivation  we propose an approach that ﬁrst retrieves a training example based on
+the input (e.g.  natural language description) and then edits it to the desired output
+(e.g.  code). Our contribution is a computationally efﬁcient method for learning
+a retrieval model that embeds the input in a task-dependent way without relying
+on a hand-crafted metric or incurring the expense of jointly training the retriever
+with the editor. Our retrieve-and-edit framework can be applied on top of any
+base model. We show that on a new autocomplete task for GitHub Python code
+and the Hearthstone cards benchmark  retrieve-and-edit signiﬁcantly boosts the
+performance of a vanilla sequence-to-sequence model on both tasks.
+
+1
+
+Introduction
+
+In prediction tasks with complex outputs  generating well-formed outputs is challenging  as is well-
+known in natural language generation [20  28]. However  the desired output might be a variation of
+another  previously-observed example [14  13  30  18  24]. Other tasks ranging from music generation
+to program synthesis exhibit the same phenomenon: many songs borrow chord structure from other
+songs  and software engineers routinely adapt code from Stack Overﬂow.
+Motivated by these observations  we adopt the following retrieve-and-edit framework (Figure 1):
+
+1. Retrieve: Given an input x  e.g.  a natural language description ‘Sum the ﬁrst two elements
+in tmp’  we use a retriever to choose a similar training example (x(cid:48)  y(cid:48))  such as ‘Sum the
+ﬁrst 5 items in Customers’.
+
+2. Edit: We then treat y(cid:48) from the retrieved example as a “prototype” and use an editor to edit
+
+it into the desired output y appropriate for the input x.
+
+While many existing methods combine retrieval and editing [13  30  18  24]  these approaches rely on
+a ﬁxed hand-crafted or generic retrieval mechanism. One drawback to this approach is that designing
+a task-speciﬁc retriever is time-consuming  and a generic retriever may not perform well on tasks
+where x is structured or complex [40]. Ideally  the retrieval metric would be learned from the data in
+a task-dependent way: we wish to consider x and x(cid:48) similar only if their corresponding outputs y and
+y(cid:48) differ by a small  easy-to-perform edit. However  the straightforward way of training a retriever
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+jointly with the editor would require summing over all possible x(cid:48) for each example  which would be
+prohibitively slow.
+In this paper  we propose a way to train a retrieval model that is optimized for the downstream edit
+task. We ﬁrst train a noisy encoder-decoder model  carefully selecting the noise and embedding space
+to ensure that inputs that receive similar embeddings can be easily edited by an oracle editor. We then
+train the editor by retrieving according to this learned metric. The main advantage of this approach is
+that it is computationally efﬁcient and requires no domain knowledge other than an encoder-decoder
+model with low reconstruction error.
+We evaluate our retrieve-and-edit approach on a new Python code autocomplete dataset of 76k
+functions  where the task is to predict the next token given partially written code and natural language
+description. We show that applying the retrieve-and-edit framework to a standard sequence-to-
+sequence model boosts its performance by 14 points in BLEU score [25]. Comparing retrieval
+methods  learned retrieval improves over a ﬁxed  bag-of-words baseline by 6 BLEU. We also evaluate
+on the Hearthstone cards benchmark [22]  where systems must predict a code snippet based on card
+properties and a natural language description. We show that augmenting a standard sequence-to-
+sequence model with the retrieve-and-edit approach improves the model by 7 BLEU and outperforms
+the best non-abstract syntax tree (AST) based model by 4 points.
+
+2 Problem statement
+Task. Our goal is to learn a model pmodel(y | x) that predicts an output y (e.g.  a 5–15 line code
+snippet) given an input x (e.g.  a natural language description) drawn from a distribution pdata. See
+Figure 1 for an illustrative example.
+
+Retrieve-and-edit. The retrieve-and-edit framework corresponds to the following generative pro-
+cess: given an input x  we ﬁrst retrieve an example (x(cid:48)  y(cid:48)) from the training set D by sampling using
+a retriever of the form pret((x(cid:48)  y(cid:48)) | x). We then generate an output y using an editor of the form
+pedit(y | x  (x(cid:48)  y(cid:48))). The overall likelihood of generating y given x is
+
+pmodel(y | x) =
+
+pedit(y | x  (x(cid:48)  y(cid:48)))pret((x(cid:48)  y(cid:48)) | x) 
+
+(1)
+
+(cid:88)
+
+(x(cid:48) y(cid:48))∈D
+and the objective that we seek to maximize is
+
+L(pedit  pret) := E(x y)∼pdata [log pmodel(y | x)] .
+
+(2)
+For simplicity  we focus on deterministic retrievers  where pret((x(cid:48)  y(cid:48)) | x) is a point mass on a
+particular example (x(cid:48)  y(cid:48)). This matches the typical approach for retrieve-and-edit methods  and we
+leave extensions to stochastic retrieval [14] and multiple retrievals [13] to future work.
+
+Learning task-dependent similarity. As mentioned earlier  we would like the retriever to incor-
+porate task-dependent similarity: two inputs x and x(cid:48) should be considered similar only if the editor
+has a high likelihood of editing y(cid:48) into y. The optimal retriever for a ﬁxed editor would be one that
+maximizes the standard maximum marginal likelihood objective in equation (1).
+An initial idea to learn the retriever might be to optimize for maximum marginal likelihood using
+standard approaches such as gradient descent or expectation maximization (EM). However  both of
+
+Figure 1. The retrieve-and-edit approach consists of the retriever  which identiﬁes a relevant example
+from the training set  and the editor  which predicts the output conditioned on the retrieved example.
+
+2
+
+Sum the first two elements in InputRetrieved inputtmpSum the first 5 items in xx’np.sum(Customers[:5])Customersnp.sum(tmp[:2])Editory’PrototypeGenerated outputthese approaches involve summing over all training examples D on each training iteration  which is
+computationally intractable.
+Instead  we break up the optimization problem into two parts. We ﬁrst train the retriever in isolation 
+replacing the edit model pedit with an oracle editor p∗
+edit and optimizing a lower bound for the marginal
+likelihood under this editor. Then  given this retriever  we train the editor using the standard maximum
+likelihood objective. This decomposition makes it possible to avoid the computational difﬁculties of
+learning a task-dependent retrieval metric  but importantly  we will still be able to learn a retriever
+that is task-dependent.
+
+3 Learning to retrieve and edit
+
+We ﬁrst describe the procedure for training our retriever (Section 3.1)  which consists of embedding
+the inputs x into a vector space (Section 3.1.1) and retrieving according to this embedding. We
+then describe the editor and its training procedure  which follows immediately from maximizing the
+marginal likelihood (Section 3.2).
+
+3.1 Retriever
+
+Sections 3.1.1–3.1.3 will justify our training procedure as maximization of a lower bound on the
+likelihood; one can skip to Section 3.1.4 for the actual training procedure if desired.
+We would like to train the retriever based on L (Equation 2)  but we do not yet know the behavior
+of the editor. We can avoid this problem by optimizing the retriever pret  assuming the editor is the
+true conditional distribution over the targets y given the retrieved example (x(cid:48)  y(cid:48)) under the joint
+(cid:80)
+distribution pret((x(cid:48)  y(cid:48)) | x)pdata(x  y). We call this the oracle editor for pret 
+(cid:80)
+x pret((x(cid:48)  y(cid:48)) | x)pdata(x  y)
+x y pret((x(cid:48)  y(cid:48)) | x)pdata(x  y)
+
+edit(y | (x(cid:48)  y(cid:48))) =
+p∗
+
+.
+
+The oracle editor gives rise to the following lower bound on suppedit L(pret  pedit)
+edit(y | (x(cid:48)  y(cid:48)))]] 
+
+L∗(pret) := E(x y)∼pdata[E(x(cid:48) y(cid:48))|x∼pret[log p∗
+
+(3)
+edit rather than the best possible
+edit does not condition on the input x to ensure that the bound
+
+which follows from Jensen’s inequality and using a particular editor p∗
+pedit.1 Unlike the real editor pedit  p∗
+represents the quality of the retrieved example alone.
+Next  we wish to ﬁnd a further lower bound that takes the form of a distance minimization problem:
+(4)
+where C is a constant independent of pret. The pret that maximizes this lower bound is the deterministic
+retriever which ﬁnds the nearest neighbor to x under the metric d.
+In order to obtain such a lower bound  we will learn an encoder pθ(v | x) and decoder pφ(y | v) and
+use the distance metric in the latent space of v as our distance d. When pθ(v | x) takes a particular
+form  we can show that this results in the desired lower bound (4).
+
+L∗(pret) ≥ C − Ex∼pdata[Ex(cid:48)|x∼pret[d(x(cid:48)  x)2]] 
+
+3.1.1 The latent space as a task-dependent metric
+Consider any encoder-decoder model with a probabilistic encoder pθ(v | x) and decoder pφ(y | v).
+We can show that there is a variational lower bound that takes a form similar to (4) and decouples pret
+from the rest of the objective.
+Proposition 1. For any densities pθ(v | x) and pφ(y | v) and random variables (x  y  x(cid:48)  y(cid:48)) ∼
+pret((x(cid:48)  y(cid:48)) | x)pdata(x  y) 
+(cid:125)
+L∗(pret) ≥ E(x y)∼pdata[Ev∼pθ(v|x)[log pφ(y | v)]]
+
+(cid:124)
+(cid:125)
+− Ex[Ex(cid:48)|x∼pret[KL(pθ(v | x)||pθ(v | x(cid:48)))]]
+
+(cid:123)(cid:122)
+
+(cid:123)(cid:122)
+
+.
+
+(5)
+
+(cid:124)
+
+:=Lreconstruct(θ φ)
+
+:=Ldiscrepancy(θ pret)
+
+1This expression is the conditional entropy H(y | x(cid:48)  y(cid:48)). An alternative interpretation of L∗ is that
+maximization with respect to pret is equivalent to maximizing the mutual information between y and (x(cid:48)  y(cid:48)).
+
+3
+
+Proof
+The inequality follows from standard arguments on variational approximations. Since
+edit(y | (x(cid:48)  y(cid:48))) is the conditional distribution implied by the joint distribution (x(cid:48)  y(cid:48)  x  y)  we
+p∗
+have:
+
+where(cid:82) pφ(y | v)pθ(v | x(cid:48))dv is just another distribution. Taking the expectation of both sides with
+
+pφ(y | v)pθ(v | x(cid:48))dv
+
+Ey|x(cid:48) y(cid:48)∼p∗
+
+[log p∗
+
+respect to (x  x(cid:48)  y(cid:48)) and applying law of total expectation yields:
+
+(cid:90)
+
+edit(y | (x(cid:48)  y(cid:48)))] ≥ Ey|x(cid:48) y(cid:48)∼p∗
+(cid:20)
+(cid:90)
+
+(cid:20)
+
+edit
+
+(cid:21)(cid:21)
+
+(cid:21)
+
+ 
+
+(cid:20)
+
+log
+
+edit
+
+L∗(pret) ≥ E(x y)∼pdata
+
+E(x(cid:48) y(cid:48))|x∼pret
+
+log
+
+pφ(y | v)pθ(v | x(cid:48))dv
+
+.
+
+(6)
+
+Next  we apply the standard evidence lower bound (ELBO) on the latent variable v with variational
+distribution pθ(v | x). This continues the lower bounds
+
+(cid:2)Ev|x∼pθ [log pφ(y | v)] − KL(pθ(v | x)||pθ(v | x(cid:48)))(cid:3)(cid:3)
+
+≥ E(x y)∼pdata
+≥ E(x y)∼pdata[Ev|x∼pθ [log pφ(y | v)]] − Ex∼pdata[Ex(cid:48)∼pret [KL(pθ(v | x)||pθ(v | x(cid:48)))]] 
+
+(cid:2)E(x(cid:48) y(cid:48))|x∼pret
+
+where the last inequality is just collapsing expectations.
+
+(cid:2)Ev|x∼pθ [log pφ(y | v)](cid:3) from a discrepancy term KL(pθ(v | x)||pθ(v | x(cid:48))). However 
+
+Proposition 1 takes the form of the desired lower bound (4)  since it decouples the reconstruction term
+E(x y)∼pdata
+there are two differences between the earlier lower bound (4) and our derived result. The KL-
+divergence may not represent a distance metric  and there is dependence on unknown parameters
+(θ  φ). We will resolve these problems next.
+
+3.1.2 The KL-divergence as a distance metric
+We will now show that for a particular choice of pθ  the KL divergence KL(pθ(v | x)||pθ(v | x(cid:48)))
+takes the form of a squared distance metric. In particular  choose pθ(v | x) to be a von Mises-Fisher
+distribution over unit vectors centered on the output of an encoder µθ(x):
+
+pθ(v | x) = vMF(v; µθ(x)  κ) = Cκ exp(cid:0)κµθ(x)(cid:62)v(cid:1)  
+
+Ldiscrepancy(θ  pret) = Cκ Ex∼pdata[Ex(cid:48)∼pret[(cid:107)µθ(x) − µθ(x(cid:48))(cid:107)2
+2]] 
+
+(7)
+where both v and µθ(x) are unit vectors  and Cκ is a normalization constant depending only on d
+and κ. The von Mises-Fisher distribution pθ turns the KL divergence term into a squared Euclidean
+distance on the unit sphere (see the Appendix A). This further simpliﬁes the discrepancy term (5) to
+(8)
+The KL divergence on other distributions such as the Gaussian can also be expressed as a distance
+metric  but we choose the von-Mises Fisher since the KL divergence is upper bounded by a constant 
+a property that we will use next.
+The retriever pret that minimizes (8) deterministically retrieves the x(cid:48) that is closest to x according
+to the embedding µθ. For efﬁciency  we implement this retriever using a cosine-LSH hash via the
+annoy Python library  which we found to be both accurate and scalable.
+
+3.1.3 Setting the encoder-decoder parameters (θ  φ)
+
+Any choice of (θ  φ) turns Proposition 1 into a lower bound of the form (4)  but the bound can
+potentially be very loose if these parameters are chosen poorly. Joint optimization over (θ  φ  pret)
+is computationally expensive  as it requires a sum over the potential retrieved examples. Instead 
+we will optimize θ  φ with respect to a conservative lower bound that is independent of pret. For the
+von-Mises Fisher distribution  KL(pθ(v | x)||pθ(v | x(cid:48))) ≤ 2Cκ  and thus
+
+E(x y)∼pdata[Ev|x∼pθ [log pφ(y | v)]] − Ex∼pdata[Ex(cid:48)∼pret[KL(pθ(v | x)||pθ(v | x(cid:48)))]]
+≥ E(x y)∼pdata[Ev|x∼pθ [log pφ(y | v)]] − 2Cκ.
+
+Therefore  we can optimize θ  φ with respect to this worst-case bound. This lower bound objective
+is analogous to the recently proposed hyperspherical variational autoencoder and is straightforward
+to train using reparametrization gradients [9  14  38]. Our training procedure consists of applying
+minibatch stochastic gradient descent on (θ  φ) where gradients involving v are computed with the
+reparametrization trick.
+
+4
+
+3.1.4 Overall procedure
+
+The overall retrieval training procedure consists of two steps:
+
+1. Train an encoder-decoder to map each input x into an embedding v that can reconstruct the
+
+output y:
+
+(ˆθ  ˆφ) := arg max
+θ φ
+
+E(x y)∼pdata[Ev|x∼pθ [log pφ(y | v)]].
+
+(9)
+
+2. Set the retriever to be the deterministic nearest neighbor input in the training set under the
+
+encoder:
+
+ˆpret(x(cid:48)  y(cid:48) | x) := 1[(x(cid:48)  y(cid:48)) = arg min
+(x(cid:48) y(cid:48))∈D
+
+(cid:107)µˆθ(x) − µˆθ(x(cid:48))(cid:107)2
+2].
+
+(10)
+
+3.2 Editor
+The procedure in Section 3.1.4 returns a retriever ˆpret that maximizes a lower bound on L∗  which is
+deﬁned in terms of the oracle editor p∗
+edit  we
+train the editor pedit to directly maximize L(pedit  ˆpret).
+Speciﬁcally  we solve the optimization problem:
+
+edit. Since we do not have access to the oracle editor p∗
+
+arg max
+pedit
+
+E(x y)∼pdata[E(x(cid:48) y(cid:48))∼ ˆpret [log pedit(y | x  (x(cid:48)  y(cid:48)))]].
+
+(11)
+
+In our experiments  we let pedit be a standard sequence-to-sequence model with attention and copying
+[12  36] (see Appendix B for details)  but any model architecture can be used for the editor.
+
+4 Experiments
+
+We evaluate our retrieve-and-edit framework on two tasks. First  we consider a code autocomplete
+task over Python functions taken from GitHub and show that retrieve-and-edit substantially outper-
+forms approaches based only on sequence-to-sequence models or retrieval. Then  we consider the
+Hearthstone cards benchmark and show that retrieve-and-edit can boost the accuracy of existing
+sequence-to-sequence models.
+For both experiments  the dataset is processed by standard space-and-punctuation tokenization  and
+we run the retrieve and edit model with randomly initialized word vectors and κ = 500  which we
+obtained by evaluating BLEU scores on the development set of both datasets. Both the retriever and
+editor were trained for 1000 iterations on Hearthstone and 3000 on GitHub via ADAM minibatch
+gradient descent  with batch size 16 and a learning rate of 0.001.
+
+4.1 Autocomplete on Python GitHub code
+
+Given a natural language description of a Python function and a partially written code fragment  the
+task is to return a candidate list of k = 1  5  10 next tokens (Figure 2). A model predicts correctly if
+the ground truth token is in the candidate list. The performance of a model is deﬁned in terms of the
+average or maximum number of successive tokens correctly predicted.
+
+Dataset. Our Python autocomplete dataset is a representative sample of Python code from GitHub 
+obtained from Google Bigquery by retrieving Python code containing at least one block comment
+with restructured text (reST) formatting (See Appendix C for details). We use this data to form a
+code prediction task where each example consists of four inputs: the block comment  function name 
+arguments  and a partially written function body. The output is the next token in the function body.
+To avoid the possibility that repository forks and duplicated library ﬁles result in a large number of
+duplicate functions  we explicitly deduplicated all ﬁles based on both the ﬁle contents and repository
+path name. We also removed any duplicate function/docstring pairs and split the train and test set at
+the repository level. We tokenized using space and punctuation and kept only functions with at most
+150 tokens  as the longer functions are nearly impossible to predict from the docstring. This resulted
+in a training set of 76k Python functions.
+
+5
+
+Retrieve-and-edit (Retrieve+Edit)
+Seq2Seq
+Retriever only (TaskRetriever)
+
+Longest completed length Avg completion length BLEU
+k=1
+17.6
+10.6
+13.5
+
+k=10
+8.1
+3.8
+
+k=10
+21.9
+13.2
+
+34.7
+19.2
+29.9
+
+k=5
+20.9
+12.5
+
+k=5
+7.5
+3.4
+
+k=1
+5.8
+2.5
+4.7
+
+Table 1. Retrieve-and-edit substantially improves the performance over baseline sequence-to-sequence
+models (Seq2Seq) and trained retrieval without editing (TaskRetriever) on the Python autocomplete
+dataset. k indicates the number of candidates over beam-search considered for predicting a token  and
+completion length is the number of successive tokens that are correctly predicted.
+
+TaskRetriever
+InputRetriever
+LexicalRetriever
+
+Longest completed length Avg completion length BLEU
+29.9
+29.8
+23.1
+
+13.5
+12.3
+9.8
+
+4.7
+4.1
+3.4
+
+Table 2.
+Retrievers based on the noisy encoder-decoder (TaskRetriever) outperform a retriever
+based on bag-of-word vectors (LexicalRetriever). Learning an encoder-decoder on the inputs alone
+(InputRetriever) results in a slight loss in accuracy.
+
+Results. Comparing the retrieve-and-edit model (Retrieve+Edit) to a sequence-to-sequence baseline
+(Seq2Seq) whose architecture and training procedure matches that of the editor  we ﬁnd that retrieval
+adds substantial performance gains on all metrics with no domain knowledge or hand-crafted features
+(Table 1).
+We also evaluate various retrievers: TaskRetriever  which is our task-dependent retriever presented
+in Section 3.1; LexicalRetriever  which embeds the input tokens using a bag-of-word vectors and
+retrieves based on cosine similarity; and InputRetriever  which uses the same encoder-decoder
+architecture as TaskRetriever but modiﬁes the decoder to predict x rather than y. Table 2 shows
+that TaskRetriever signiﬁcantly outperforms LexicalRetriever on all metrics  but is comparable to
+InputRetriever on BLEU and slightly better on the autocomplete metrics. We did not directly compare
+to abstract syntax tree (AST) based methods here since they do not have a direct way to condition on
+partially-generated code  which is needed for autocomplete.
+Examples of predicted outputs in Figure 2 demonstrate that the docstring does not fully specify
+the structure of the output code. Despite this  the retrieval-based methods are sometimes able to
+retrieve relevant functions. In the example  the retriever learns to return a function that has a similar
+conditional check. Retrieve+Edit does not have enough information to predict the true function and
+therefore predicts a generic conditional (if not b_data). In contrast  the seq2seq defaults to predicting
+a generic getter function rather than a conditional.
+
+Figure 2. Example from the Python autocomplete dataset along with the retrieved example used during
+prediction (top center) and baselines (right panels). The edited output (bottom center) mostly follows
+the retrieved example but replaces the conditional with a generic one.
+
+6
+
+is_encrypted Test if this is vault encrypted data blob :arg data: a python2 str or a python3 'bytes' to test whether it is recognized as vault encrypted data :returns: True if it is recognized. Otherwise  False. b_datadef is_encrypted(b_data): if b_data.startswith(b_HEADER): return True return Falsedef is_encrypted(b_data): if not b_data.startswith(b_HEADER): return True return False def is_encrypted(b_data): if b_data.startswith(b_HEADER): return True return b_data.get() return False def check_if_finished(pclip): duration=pclip.clip.duration started=pclip.started if(datetime.now()-started).total_seconds ()>duration: return True return False@classmethod def delete_grid_file(cls file): ret_val=gxapi_cy.WrapSYS._delete_grid_file( GXContext . _get_tls_geo()  file.encode()) return ret_val Ground truthRetrieved prototypeFixed retrievalEdited outputSeq2seq onlyInputxy’yFigure 3. Example from the Hearthstone validation set (left panels) and the retrieved example used
+during prediction (top right). The output (bottom right) differs with the gold standard only in omitting
+an optional variable deﬁnition (minion_type).
+
+BLEU Accuracy
+
+AST based
+22.7
+16.2
+
+79.2
+75.8
+Non AST models
+70.0
+65.6
+62.5
+60.4
+43.2
+
+9.1
+4.5
+0.0
+1.5
+0.0
+
+Abstract Syntax Network (ASN) [26]
+Yin et al[41]
+
+Retrieve+Edit (this work)
+Latent Predictor Network [22]
+Retriever [22]
+Sequence-to-sequence [22]
+Statistical MT [22]
+
+Table 3. Retrieve-and-edit substantially improves upon standard sequence-to-sequence approaches for
+Hearthstone  and closes the gap to AST-based models.
+
+4.2 Hearthstone cards benchmark
+
+The Hearthstone cards benchmark consists of 533 cards in a computer card game  where each card is
+associated with a code snippet. The task is to output a Python class given a card description. Figure 3
+shows a typical example along with the retrieved example and edited output. The small size of this
+dataset makes it challenging for sequence-to-sequence models to avoid overﬁtting to the training set.
+Indeed  it has been observed that naive sequence-to-sequence approaches perform quite poorly [22].
+For quantitative evaluation  we compute BLEU and exact match probabilities using the tokenization
+and evaluation scheme of [41]. Retrieve+Edit provides a 7 point improvement in BLEU over the
+sequence-to-sequence and retrieval baselines (Table 4.2) and 4 points over the best non-AST based
+method  despite the fact that our editor is a vanilla sequence-to-sequence model.
+Methods based on ASTs still achieve the highest BLEU and exact match scores  but we are able to
+signiﬁcantly narrow the gap between specialized code generation techniques and vanilla sequence-to-
+sequence models if the latter is boosted with the retrieve-and-edit framework. Note that retrieve-and-
+edit could also be applied to AST-based models  which would be an interesting direction for future
+work.
+Analysis of example outputs shows that for the most part  the retriever ﬁnds relevant cards. As an
+example  Figure 3 shows a retrieved card (DarkIronDwarf) that functions similarly to the desired
+output (Spellbreaker). Both cards share the same card type and attributes  both have a battlecry  which
+is a piece of code that executes whenever the card is played  and this battlecry consists of modifying
+the attributes of another card. Our predicted output corrects nearly all mistakes in the retrieved output 
+identifying that the modiﬁcation should be changed from ChangeAttack to Silence. The output
+
+7
+
+Name: Spellbreaker Stats: ATK4 DEF3 COST4 DUR-1 Type: Minion Class: Neutral Minion type: NIL Rarity: CommonDescription: <b>Battlecry:</b> <b>Silence</b> a minion class DarkIronDwarf (MinionCard): def __init__(self): super().__init__("Dark Iron Dwarf" 4  CHARACTER_CLASS.ALL CARD_RARITY.COMMON  minion_type=MINION_TYPE.NONE  battlecry=Battlecry(Give( BuffUntil(ChangeAttack(2)  TurnEnded(player=CurrentPlayer())))  MinionSelector(players=BothPlayer()  picker = UserPicker()))) def create_minion(self  player): return Minion(4  4) Ground truthEdited outputRetrieved prototypeInputxy’yclass Spellbreaker (MinionCard): def __init__(self): super().__init__ ("Spellbreaker" 4  CHARACTER_CLASS.ALL CARD_RARITY.COMMON  minion_type=MINION_TYPE.NONE  battlecry=Battlecry(Silence()  MinionSelector(players=BothPlayer()  picker = UserPicker()))) def create_minion(self  player): return Minion(4  3)class Spellbreaker (MinionCard): def __init__(self): super().__init__ ("Spellbreaker" 4  CHARACTER_CLASS.ALL CARD_RARITY.COMMON  minion_type=MINION_TYPE.NONE  battlecry=Battlecry(Silence()  MinionSelector(players=BothPlayer()  picker = UserPicker()))) def create_minion(self  player): return Minion(4  3)Blue text: missing from generation  but appears in ground truthRed text: appears in generation  but not in ground truthdiffers from the gold standard on only one line: omitting the line minion_type=MINION_TYPE.none.
+Incidentally  it turns out that this is not an actual semantic error since MINION_TYPE.none is the
+default setting for this ﬁeld  and the retrieved DarkIronDwarf card also omits this ﬁeld.
+
+5 Related work
+
+Retrieval models for text generation. The use of retrieval in text generation dates back to early
+example-based machine translation systems that retrieved and adapted phrases from a translation
+database [33]. Recent work on dialogue generation [40  30  37] proposed a joint system in which an
+RNN is trained to transform a retrieved candidate. Closely related work in machine translation [13]
+augments a neural machine translation model with sentence pairs from the training set retrieved by
+an off-the-shelf search engine. Retrieval-augmented models have also been used in image captioning
+[18  24]. These models generate captions of an image via a sentence compression scheme from an
+initial caption retrieved based on image context. Our work differs from all the above conceptually
+in designing retrieval systems explicitly for the task of editing  rather than using ﬁxed retrievers
+(e.g.  based on lexical overlap). Our work also demonstrates that retrieve-and-edit can boost the
+performance of vanilla sequence-to-sequence models without the use of domain-speciﬁc retrievers.
+A related edit-based model [14] has also proposed editing examples as a way to augment text
+generation. However  the task there was unconditional generation  and examples were chosen
+by random sampling. In contrast  our work focuses on conditional sequence generation with a
+deterministic retriever  which cannot be solved using the same random sampling and editing approach.
+
+Embedding models. Embedding sentences using noisy autoencoders has been proposed earlier as
+a sentence VAE [5]  which demonstrated that a Gaussian VAE captures semantic structure in a latent
+vector space. Related work on using the von-Mises Fisher distribution for VAE shows that sentences
+can also be represented using latent vectors on the unit sphere [9  14  38]. Our encoder-decoder
+is based on the same type of VAE  showing that the latent space of a noisy encoder-decoder is
+appropriate for retrieval.
+Semantic hashing by autoencoders [16] is a related idea where an autoencoder’s latent representation
+is used to construct a hash function to identify similar images or texts [29  6]. A related idea is
+cross-modal embeddings  which jointly embed and align items in different domains (such as images
+and captions) using autoencoders [39  2  31  10]. Both of these approaches seek to learn general
+similarity metrics between examples for the purpose of identifying documents or images that are
+semantically similar. Our work differs from these approaches in that we consider task-speciﬁc
+embeddings that consider items to be similar only if they are useful for the downstream edit task and
+derive bounds that connect similarity in a latent metric to editability.
+
+Learned retrieval. Some question answering systems learn to retrieve based on supervision of
+the correct item to retrieve [35  27  19]  but these approaches do not apply to our setting since we
+do not know which items are easy to edit into our target sequence y and must instead estimate this
+from the embedding. There have also been recent proposals for scalable large-scale learned memory
+models [34] that can learn a retrieval mechanism based on a known reward. While these approaches
+make training pret tractable for a known pedit  they do not resolve the problem that pedit is not ﬁxed or
+known.
+
+Code generation. Code generation is well studied [21  17  4  23  1]  but these approaches have not
+explored edit-based generation. Recent code generation models have also constrained the output
+structure based on ASTs [26  41] or used specialized copy mechanisms for code [22]. Our goal
+differs from these works in that we use retrieve-and-edit as a general-purpose method to boost model
+performance. We considerd simple sequence-to-sequence models as an example  but the framework
+is agnostic to the editor and could also be used with specialized code generation models. Recent
+work appearing after submission of this work supports this hypothesis by showing that augmenting
+AST-based models with AST subtrees retrieved via edit distance can boost the performance of
+AST-based models [15].
+
+Nonparametric models and mixture models. Our model is related to nonparametric regression
+techniques [32]  where in our case  proximity learned by the encoder corresponds to a neighborhood 
+
+8
+
+and the editor is a learned kernel. Adaptive kernels for nonparametric regression are well-studied
+[11] but have mainly focused on learning local smoothness parameters rather than the functional
+form of the kernel. More generally  the idea of conditioning on retrieved examples is an instance of a
+mixture model  and these types of ensembling approaches have been shown to boost the performance
+of simple base models on tasks such as language modeling [7]. One can view retrieve-and-edit as
+another type of mixture model.
+
+6 Discussion
+
+In this work  we considered the task of generating complex outputs such as source code using standard
+sequence-to-sequence models augmented by a learned retriever. We show that learning a retriever
+using a noisy encoder-decoder can naturally combine the desire to retrieve examples that maximize
+downstream editability with the computational efﬁciency of cosine LSH. Using this approach  we
+demonstrated that our model can narrow the gap between specialized code generation models and
+vanilla sequence-to-sequence models on the Hearthstone dataset  and show substantial improvements
+on a Python code autocomplete task over sequence-to-sequence baselines.
+
+Reproducibility. Data and code used to generate the results of this paper are available
+on the CodaLab Worksheets platform at https://worksheets.codalab.org/worksheets/
+0x1ad3f387005c492ea913cf0f20c9bb89/.
+
+Acknowledgements. This work was funded by the DARPA CwC program under ARO prime
+contract no. W911NF-15-1-0462.
+
+References
+[1] M. Allamanis  D. Tarlow  A. Gordon  and Y. Wei. Bimodal modelling of source code and natural
+language. In International Conference on Machine Learning (ICML)  pages 2123–2132  2015.
+
+[2] G. Andrew  R. Arora  J. Bilmes  and K. Livescu. Deep canonical correlation analysis. In
+
+International Conference on Machine Learning (ICML)  pages 1247–1255  2013.
+
+[3] D. Bahdanau  K. Cho  and Y. Bengio. Neural machine translation by jointly learning to align
+
+and translate. In International Conference on Learning Representations (ICLR)  2015.
+
+[4] M. Balog  A. L. Gaunt  M. Brockschmidt  S. Nowozin  and D. Tarlow. Deepcoder: Learning to
+
+write programs. arXiv preprint arXiv:1611.01989  2016.
+
+[5] S. R. Bowman  L. Vilnis  O. Vinyals  A. M. Dai  R. Jozefowicz  and S. Bengio. Generating
+sentences from a continuous space. In Computational Natural Language Learning (CoNLL) 
+pages 10–21  2016.
+
+[6] S. Chaidaroon and Y. Fang. Variational deep semantic hashing for text documents. In ACM
+
+Special Interest Group on Information Retreival (SIGIR)  pages 75–84  2017.
+
+[7] C. Chelba  T. Mikolov  M. Schuster  Q. Ge  T. Brants  P. Koehn  and T. Robinson. One billion
+word benchmark for measuring progress in statistical language modeling. arXiv preprint
+arXiv:1312.3005  2013.
+
+[8] K. Cho  B. van Merrienboer  C. Gulcehre  D. Bahdanau  F. Bougares  H. Schwenk  and
+Y. Bengio. Learning phrase representations using RNN encoder-decoder for statistical machine
+translation. In Empirical Methods in Natural Language Processing (EMNLP)  pages 1724–1734 
+2014.
+
+[9] T. R. Davidson  L. Falorsi  N. D. Cao  T. Kipf  and J. M. Tomczak. Hyperspherical variational
+
+auto-encoders. arXiv preprint arXiv:1804.00891  2018.
+
+[10] F. Feng  X. Wang  and R. Li. Cross-modal retrieval with correspondence autoencoder. In
+
+Proceedings of the 22Nd ACM International Conference on Multimedia  pages 7–16  2014.
+
+9
+
+[11] A. Goldenshluger and A. Nemirovski. On spatially adaptive estimation of nonparametric
+
+regression. Mathematical Methods of Statistics  6:135–170  1997.
+
+[12] J. Gu  Z. Lu  H. Li  and V. O. Li. Incorporating copying mechanism in sequence-to-sequence
+
+learning. In Association for Computational Linguistics (ACL)  2016.
+
+[13] J. Gu  Y. Wang  K. Cho  and V. O. Li. Search engine guided non-parametric neural machine
+
+translation. arXiv preprint arXiv:1705.07267  2017.
+
+[14] K. Guu  T. B. Hashimoto  Y. Oren  and P. Liang. Generating sentences by editing prototypes.
+
+Transactions of the Association for Computational Linguistics (TACL)  0  2018.
+
+[15] S. A. Hayati  R. Olivier  P. Avvaru  P. Yin  A. Tomasic  and G. Neubig. Retrieval-based neural
+
+code generation. In Empirical Methods in Natural Language Processing (EMNLP)  2018.
+
+[16] A. Krizhevsky and G. E. Hinton. Using very deep autoencoders for content-based image retrieval.
+In 19th European Symposium on Artiﬁcial Neural Networks  Computational Intelligence and
+Machine Learning (ESANN)  pages 489–494  2011.
+
+[17] N. Kushman and R. Barzilay. Using semantic uniﬁcation to generate regular expressions
+from natural language. In Human Language Technology and North American Association for
+Computational Linguistics (HLT/NAACL)  pages 826–836  2013.
+
+[18] P. Kuznetsova  V. Ordonez  A. C. Berg  T. L. Berg  and Y. Choi. Generalizing image captions for
+image-text parallel corpus. In Association for Computational Linguistics (ACL)  pages 790–796 
+2013.
+
+[19] T. Lei  H. Joshi  R. Barzilay  T. Jaakkola  K. Tymoshenko  A. Moschitti  and L. Marquez.
+Semi-supervised question retrieval with gated convolutions. In North American Association for
+Computational Linguistics (NAACL)  pages 1279–1289  2016.
+
+[20] J. Li  W. Monroe  T. Shi  A. Ritter  and D. Jurafsky. Adversarial learning for neural dialogue
+
+generation. arXiv preprint arXiv:1701.06547  2017.
+
+[21] P. Liang  M. I. Jordan  and D. Klein. Learning programs: A hierarchical Bayesian approach. In
+
+International Conference on Machine Learning (ICML)  pages 639–646  2010.
+
+[22] W. Ling  E. Grefenstette  K. M. Hermann  T. Koˇciský  A. Senior  F. Wang  and P. Blunsom.
+Latent predictor networks for code generation. In Association for Computational Linguistics
+(ACL)  pages 599–609  2016.
+
+[23] C. Maddison and D. Tarlow. Structured generative models of natural source code. In Interna-
+
+tional Conference on Machine Learning (ICML)  pages 649–657  2014.
+
+[24] R. Mason and E. Charniak. Domain-speciﬁc image captioning. In Computational Natural
+
+Language Learning (CoNLL)  pages 2–10  2014.
+
+[25] K. Papineni  S. Roukos  T. Ward  and W. Zhu. BLEU: A method for automatic evaluation of
+
+machine translation. In Association for Computational Linguistics (ACL)  2002.
+
+[26] M. Rabinovich  M. Stern  and D. Klein. Abstract syntax networks for code generation and
+
+semantic parsing. In Association for Computational Linguistics (ACL)  2017.
+
+[27] A. Severyn and A. Moschitti. Learning to rank short text pairs with convolutional deep neural
+networks. In ACM Special Interest Group on Information Retreival (SIGIR)  pages 373–382 
+2015.
+
+[28] L. Shao  S. Gouws  D. Britz  A. Goldie  B. Strope  and R. Kurzweil. Generating high-quality and
+informative conversation responses with sequence-to-sequence models. In Empirical Methods
+in Natural Language Processing (EMNLP)  pages 2210–2219  2017.
+
+[29] D. Shen  Q. Su  P. Chapfuwa  W. Wang  G. Wang  R. Henao  and L. Carin. Nash: Toward end-
+to-end neural architecture for generative semantic hashing. In Association for Computational
+Linguistics (ACL)  pages 2041–2050  2018.
+
+10
+
+[30] Y. Song  R. Yan  X. Li  D. Zhao  and M. Zhang. Two are better than one: An ensemble of
+
+retrieval- and generation-based dialog systems. arXiv preprint arXiv:1610.07149  2016.
+
+[31] N. Srivastava and R. R. Salakhutdinov. Multimodal learning with deep Boltzmann machines. In
+
+Advances in Neural Information Processing Systems (NIPS)  pages 2222–2230  2012.
+
+[32] C. J. Stone. Consistent nonparametric regression. Annals of Statistics  5  1977.
+
+[33] E. Sumita and H. Iida. Experiments and prospects of example-based machine translation. In
+
+Association for Computational Linguistics (ACL)  1991.
+
+[34] W. Sun  A. Beygelzimer  H. Daume  J. Langford  and P. Mineiro. Contextual memory trees.
+
+arXiv preprint arXiv:1807.06473  2018.
+
+[35] M. Tan  C. dos Santos  B. Xiang  and B. Zhou. LSTM-based deep learning models for non-
+
+factoid answer selection. arXiv preprint arXiv:1511.04108  2015.
+
+[36] Y. Wu  M. Schuster  Z. Chen  Q. V. Le  M. Norouzi  W. Macherey  M. Krikun  Y. Cao  Q. Gao 
+K. Macherey  et al. Google’s neural machine translation system: Bridging the gap between
+human and machine translation. arXiv preprint arXiv:1609.08144  2016.
+
+[37] Y. Wu  F. Wei  S. Huang  Z. Li  and M. Zhou. Response generation by context-aware prototype
+
+editing. arXiv preprint arXiv:1806.07042  2018.
+
+[38] J. Xu and G. Durrett. Spherical latent spaces for stable variational autoencoders. In Empirical
+
+Methods in Natural Language Processing (EMNLP)  2018.
+
+[39] F. Yan and K. Mikolajczyk. Deep correlation for matching images and text. In Computer Vision
+
+and Pattern Recognition (CVPR)  pages 3441–3450  2015.
+
+[40] R. Yan  Y. Song  and H. Wu. Learning to respond with deep neural networks for retrieval-based
+human-computer conversation system. In ACM Special Interest Group on Information Retreival
+(SIGIR)  pages 55–64  2016.
+
+[41] P. Yin and G. Neubig. A syntactic neural model for general-purpose code generation. In
+
+Association for Computational Linguistics (ACL)  pages 440–450  2017.
+
+11
+
+,Tatsunori Hashimoto
+Kelvin Guu
+Yonatan Oren
+Percy Liang

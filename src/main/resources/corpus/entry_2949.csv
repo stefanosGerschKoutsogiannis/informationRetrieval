@@ -1,0 +1,897 @@
+2018,Learning Loop Invariants for Program Verification,A fundamental problem in program verification concerns inferring loop invariants. The problem is undecidable and even practical instances are challenging. Inspired by how human experts construct loop invariants  we propose a reasoning framework Code2Inv that constructs the solution by multi-step decision making and querying an external program graph memory block. By training with reinforcement learning  Code2Inv captures rich program features and avoids the need for ground truth solutions as supervision. Compared to previous learning tasks in domains with graph-structured data  it addresses unique challenges  such as a binary objective function and an extremely sparse reward that is given by an automated theorem prover only after the complete loop invariant is proposed. We evaluate Code2Inv on a suite of 133 benchmark problems and compare it to three state-of-the-art systems. It solves 106 problems compared to 73 by a stochastic search-based system  77 by a heuristic search-based system  and 100 by a decision tree learning-based system. Moreover  the strategy learned can be generalized to new programs: compared to solving new instances from scratch  the pre-trained agent is more sample efficient in finding solutions.,Learning Loop Invariants for Program Veriﬁcation
+
+Xujie Si∗
+
+University of Pennsylvania
+
+xsi@cis.upenn.edu
+
+Hanjun Dai ∗
+Georgia Tech
+
+hanjundai@gatech.edu
+
+Mukund Raghothaman
+University of Pennsylvania
+rmukund@cis.upenn.edu
+
+Mayur Naik
+
+University of Pennsylvania
+
+mhnaik@cis.upenn.edu
+
+Le Song
+
+Georgia Tech and Ant Financial
+
+lsong@cc.gatech.edu
+
+Abstract
+
+A fundamental problem in program veriﬁcation concerns inferring loop invariants.
+The problem is undecidable and even practical instances are challenging. Inspired
+by how human experts construct loop invariants  we propose a reasoning framework
+CODE2INV that constructs the solution by multi-step decision making and querying
+an external program graph memory block. By training with reinforcement learning 
+CODE2INV captures rich program features and avoids the need for ground truth
+solutions as supervision. Compared to previous learning tasks in domains with
+graph-structured data  it addresses unique challenges  such as a binary objective
+function and an extremely sparse reward that is given by an automated theorem
+prover only after the complete loop invariant is proposed. We evaluate CODE2INV on
+a suite of 133 benchmark problems and compare it to three state-of-the-art systems.
+It solves 106 problems compared to 73 by a stochastic search-based system  77 by
+a heuristic search-based system  and 100 by a decision tree learning-based system.
+Moreover  the strategy learned can be generalized to new programs: compared to
+solving new instances from scratch  the pre-trained agent is more sample efﬁcient
+in ﬁnding solutions.
+
+Introduction
+
+1
+The growing ubiquity and complexity of software has led to a dramatic increase in software bugs and
+security vulnerabilities that pose enormous costs and risks. Program veriﬁcation technology enables
+programmers to prove the absence of such problems at compile-time before deploying their program.
+One of the main activities underlying this technology involves inferring a loop invariant—a logical
+formula that constitutes an abstract speciﬁcation of a loop—for each loop in the program. Obtaining
+loop invariants enables a broad and deep range of correctness and security properties to be proven
+automatically by a variety of program veriﬁcation tools spanning type checkers  static analyzers  and
+theorem provers. Notable examples include Microsoft Code Contracts for .NET programs [1] and
+the Veriﬁed Software Toolchain spanning C source code to machine language [2].
+Many different approaches have been proposed in the literature to infer loop invariants. The problem
+is undecidable  however  and even practical instances are challenging  which greatly limits the
+beneﬁts of program veriﬁcation technology. Existing approaches suffer from key drawbacks: they
+are purely search-based  or they use hand-crafted features  or they are based on supervised learning.
+The performance of search-based approaches is greatly hindered by their inability to learn from past
+mistakes. Hand-crafted features limit the space of possible invariants  e.g.  Garg et al. [3] is limited
+to features of the form x±y≤ c where c is a constant  and thus cannot handle invariants that involve
+x+y≤ z for program variables x y z. Finally  obtaining ground truth solutions needed by supervised
+learning is hindered by the undecidability of the loop invariant generation problem.
+In this paper  we propose CODE2INV  an end-to-end learning-based approach to infer loop invariants.
+CODE2INV has the ability to automatically learn rich latent representations of desirable invariants 
+
+∗Both authors contributed equally to the paper.
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+and can avoid repeating similar mistakes. Furthermore  it leverages reinforcement learning to discover
+invariants by partial feedback from trial-and-error  without needing ground truth solutions for training.
+The design of CODE2INV is inspired by the reasoning exercised by human experts. Given a program  a
+human expert ﬁrst maps the program to a well-organized structural representation  and then composes
+the loop invariant step by step. Based on such reasoning  different parts of the representation get
+highlighted at each step. To mimic this procedure  we utilize a graph neural network model (GNN)
+to construct the structural external memory representation of the program. The multi-step decision
+making is implemented by an autoregressive model  which queries the external memory using an
+attention mechanism. The decision at each step is a syntax- and semantics-guided decoder which
+generates subparts of the loop invariant.
+CODE2INV employs a reinforcement learning approach since it is computationally intensive to ob-
+tain ground truth solutions. Although reinforcement learning algorithms have shown remarkable
+success in domains like combinatorial optimization [4  5] (see Section 6 for more discussion on
+related work)  our setting differs in two crucial ways: ﬁrst  it has a non-continuous objective func-
+tion (i.e.  a proposed loop invariant is correct or not); and second  the positive reward is extremely
+sparse and given only after the correct loop invariant is proposed  by an automated theorem prover
+[6]. We therefore model the policy learning as a multi-step decision making process: it provides a
+ﬁne-grained reward at each step of building the loop invariant  followed by continuous feedback in
+the last step based on counterexamples collected by the agent itself during trial-and-error learning.
+We evaluate CODE2INV on a suite of 133 benchmark problems from recent works [3  7  8] and the
+2017 SyGuS program synthesis competition [9]. We also compare it to three state-of-the-art systems:
+a stochastic search-based system C2I [10]  a heuristic search-based system LOOPINVGEN [8]  and
+and a decision tree learning-based system ICE-DT [3]. CODE2INV solves 106 problems  versus 73 by
+C2I  77 by LOOPINVGEN  and 100 by ICE-DT. Moreover  CODE2INV exhibits better learning  making
+orders-of-magnitude fewer calls to the theorem prover than these systems.
+2 Background
+We formally deﬁne the loop invariant inference and learning problems by introducing Hoare logic [11] 
+which comprises a set of axioms and inference rules for proving program correctness assertions. Let P
+and Q denote predicates over program variables and let S denote a program. We say that Hoare triple
+{P} S {Q} is valid if whenever S begins executing in a state that satisﬁes P and ﬁnishes executing 
+then the resulting state satisﬁes Q. We call P and Q the pre-condition and post-condition respectively
+of S. Hoare rules allow to derive such triples inductively over the structure of S. The rule most relevant
+for our purpose is that for loops:
+P ⇒ I (pre)
+
+(I∧¬B)⇒ Q (post)
+
+{I∧B} S {I} (inv)
+{P} while B do S {Q}
+
+Predicate I is called a loop invariant  an assertion that holds before and after each iteration  as shown
+in the premise of the rule. We can now formally state the loop invariant inference problem:
+Problem 1 (Loop Invariant Inference): Given a pre-condition P   a post-condition Q and a program
+S containing a single loop  can we ﬁnd a predicate I such that {P} S {Q} is valid?
+Given a candidate loop invariant  it is straightforward for an automated theorem prover such as Z3 [6]
+to check whether the three conditions denoted pre  inv  and post in the premise of the above rule hold 
+and thereby prove the property asserted in the conclusion of the rule. If any of the three conditions
+fails to hold  the theorem prover returns a concrete counterexample witnessing the failure.
+The loop invariant inference problem is undecidable. Moreover  even seemingly simple instances are
+challenging  as we illustrate next using the program in Figure 1(a). The goal is to prove that assertion
+(y > 0) holds at the end of the program  for every input value of integer variable y. In this case  the
+pre-condition P is true since the input value of y is unconstrained  and the post-condition Q is (y > 0) 
+the assertion to be proven. Using predicate (x < 0 ∨ y > 0) as the loop invariant I sufﬁces to prove
+the assertion  as shown in Figure 1(b). Notation φ[e/x] denotes the predicate φ with each occurrence
+of variable x replaced by expression e. This loop invariant is non-trivial to infer. The reasoning is
+simple in the case when the input value of y is non-negative  but far more subtle in the case when it
+is negative: regardless of how negative it is at the beginning  the loop will iterate at least as many times
+as to make it positive  thereby ensuring the desired assertion upon ﬁnishing. Indeed  a state-of-the-art
+loop invariant generator LOOPINVGEN [8] crashes on this problem instance after making 1 119 calls
+to Z3  whereas CODE2INV successfully generates it after only 26 such calls.
+
+2
+
+x := −50;
+while (x < 0) {
+x := x+y;
+y := y+1 }
+assert(y > 0)
+
+(cid:40)
+
+(b) A desirable loop invariant I is a predicate over x y such that:
+∀x y :
+
+I ∧ x < 0 ⇒ I[(y+1)/y (x+y)/x]
+I ∧ x≥ 0 ⇒ y > 0
+
+true ⇒ I[−50/x]
+
+(pre)
+(inv)
+(post)
+
+(a) An example program.
+Figure 1: A program with a correctness assertion and a loop invariant that sufﬁces to prove it.
+
+(c) The desired loop invariant is (x < 0 ∨ y > 0).
+
+The central role played by loop invariants in program veriﬁcation has led to a large body of work to auto-
+matically infer them. Many previous approaches are based on exhaustive bounded search using domain-
+speciﬁc heuristics and are thereby limited in applicability and scalability [7  12–18]. A different strategy
+is followed by data-driven approaches proposed in recent years [3  8  10]. These methods speculatively
+guess likely invariants from program executions and check their validity. In [3]  decision trees are used
+to learn loop invariants with simple linear features  e.g. a∗x+b∗y < c  where a b∈{−1 0 1} c∈ Z.
+In [8]  these features are generalized by systematic enumeration. In [10]  stochastic search is performed
+over a set of constraint templates. While such features or templates perform well in speciﬁc domains 
+however  they may fail to adapt to new domains. Moreover  even in the same domain  they do not
+beneﬁt from past experiences: successfully inferring the loop invariant for one program does not speed
+up the process for other similar ones. We hereby formulate the second problem we aim to address:
+Problem 2 (Loop Invariant Learning): Given a set of programs {Si} ∼ P that are sampled from
+some unknown distribution P  can we learn from them and generalize the strategy we learned to other
+programs { ˜Si} that are from the same distribution?
+3 End-to-End Reasoning Framework
+3.1 The reasoning process of a human expert
+We start out by illustrating how a human expert might typically
+accomplish the task of inferring a loop invariant. Consider the
+example in Figure 2 chosen from our benchmarks.
+An expert usually starts by reading the assertion (line 15)  which
+contains variables x and y  then determines the locations where
+these two variables are initialized  and then focuses on the locations
+where they are updated in the loop. Instead of reasoning about the
+entire assertion at once  an expert is likely to focus on updates to one
+variable at a time. This reasoning yields the observation that x is
+initialized to zero (line 2) and may get incremented in each iteration
+(line 5 9). Thus  the sub goal “x < 4” may not always hold  given that
+the loop iterates non-deterministically. This in turn forces the other
+part “y > 2” to be true when “x >= 4”. The only way x can equal or
+exceed 4 is to execute the ﬁrst if branch 4 times (line 4-6)  during
+which y is set to 100. Now  a natural guess for the loop invariant is
+“x < 4 || y >= 100”. The reason for guessing “y >= 100” instead of
+“y <= 100” is because part of the proof goal is “y > 2”. However 
+this guess will be rejected by the theorem prover. This is because y might be decreased by an arbitrary
+number of times in the third if-branch (line 12)  which happens when x is less than zero; to avoid that
+situation  “x >= 0” should also be part of the loop invariant. Finally  we have the correct loop invariant:
+“(x >= 0) && (x < 4 || y >= 100)”  which sufﬁces to prove the assertion.
+We observe that the entire reasoning process consists of three key components: 1) organize the program
+in a hierarchical-structured way rather than a sequence of tokens; 2) compose the loop invariant step by
+step; and 3) focus on a different part of the program at each step  depending on the inference logic  e.g. 
+abduction and induction.
+
+Figure 2: An example from our
+benchmarks. “*” denotes non-
+deterministic choice.
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16 }
+
+int main() {
+int x = 0  y = 0;
+while (*) {
+if (*) {
+
+}
+assert( x < 4 || y > 2);
+
+} else if (*) {
+if (x >= 4) {
+
+x++;
+y = 100;
+
+x++;
+y++;
+
+}
+if (x < 0) y--;
+
+}
+
+3.2 Programming the reasoning procedure with neural networks
+We propose to use a neural network to mimic the reasoning used by human experts as described above.
+The key idea is to replace the above three components with corresponding differentiable modules:
+• a structured external memory representation which encodes the program;
+• a multi-step autoregressive model for incremental loop invariant construction; and
+• an attention component that mimics the varying focus in each step.
+
+3
+
+Figure 3: Overall framework of neuralizing loop invariant inference.
+
+As shown in Figure 3  these modules together build up the network that constructs loop invariants
+from programs  while being jointly trained with reinforcement learning described in Section 4. At
+each step  the neural network generates a predicate. Then  given the current generated partial tree  a
+TreeLSTM module summarizes what have been generated so far  and the summarization is used to read
+the memory using attention. Lastly  the summarization together with the read memory is fed into next
+time step. We next elaborate upon each of these three components.
+
+3.2.1 Structured external memory
+The loop invariant is built within the given context of program. Thus it is natural to encode the program
+as an external memory module. However  in contrast to traditional memory networks [19  20]  where
+the memory slots are organized as a linear array  the information contained in a program has rich
+structure. A chain LSTM over program tokens can in principle capture such information but it is
+challenging for neural networks to understand with limited data. Inspired by Allamanis et al. [21]  we
+instead use a graph-structured memory representation. Such a representation allows to capture rich
+semantic knowledge about the program such as its control-ﬂow and data-ﬂow.
+More concretely  we ﬁrst convert a given program into static single assignment (SSA) form [22]  and
+construct a control ﬂow graph  each of whose nodes represents a single program statement. We then
+transform each node into an abstract syntax tree (AST) representing the corresponding statement. Thus
+a program can be represented by a graph G = (V E)  where V contains terminals and nonterminals
+of the ASTs  and E ={(e(i)
+y  e(i)
+t ) starts
+t ∈{1 2 ... K} representing edge type. In our construction  the program
+from node e(i)
+graph contains 3 different edge types (and 6 after adding reversed edges).
+
+i=1 is the set of edges. The directed edge (e(i)
+
+x  e(i)
+y   with e(i)
+
+x  e(i)
+
+y  e(i)
+
+t )}|E|
+
+x to e(i)
+
+Figure 4: Diagram for source code graph as external structured memory. We convert a given program
+into a graph G  where nodes correspond to syntax elements  and edges indicate the control ﬂow  syntax
+tree structure  or variable linking. We use embedding neural network to get structured memory f (G).
+
+To convert the graph into vector representation  we follow the general message passing operator
+introduced in graph neural network (GNN) [23] and its variants [21  24  25]. Speciﬁcally  the graph
+
+4
+
+!(#)ConstVars%&othersyx……04100StructuredMemory…'&&&||>=x0attention……TreeLSTM%('(&&||<x4TreeLSTM……&&||<x4>=y100||>=x0')%)STOP……Output Solutioncopycopycopy……SSA nodeNon-terminalsTerminals<loop>y1<1000<assign>x2=+x1y1<assign>y2=+y11xySource CodeGraph Representation<loop>y1<1000<assign>=+y1<assign>y2=+y11yNeural Graph Embeddingx2x1x!"($)!"&($'&)!"(($'&)Variable linkAST edgeControl flowVector representation)(*)*message passing operator$=& … .……StructuredExternal Memorynetwork will associate each node v∈ V with an embedding vector µv ∈Rd. The embedding is updated
+iteratively using the general neighborhood embedding as follows:
+
+= h({µ(l)
+
+u }u∈N k(v) k∈{1 2 ... K})
+
+µ(l+1)
+
+(1)
+Here h(·) is a nonlinear function that aggregates the neighborhood information to update the embedding.
+N k(v) is the set of neighbor nodes connected to v with edge type k  i.e.  N k(v) ={u|(u v k)∈ E}.
+ ∀v ∈ V . Our
+Such process will be repeated for L steps  and the node embedding µv is set to µ(L)
+parameterization takes the edge types into account. The speciﬁc parameterization used is shown below:
+
+v
+
+v
+
+µ(l+1) k
+
+v
+µ(l+1)
+
+= σ(W3[µ(l+1) 1
+
+v
+
+u∈N k(v)W2µ(l)
+
+u ) ∀k∈{1 2 ... K}
+])
+
+ ... µ(l+1) K
+
+ µ(l+1) 2
+
+v
+
+v
+
+(2)
+
+(3)
+
+= σ((cid:80)
+
+T(cid:89)
+
+T(cid:89)
+
+v
+with the boundary case µ(0)
+v = W1xv. Here xv represents the syntax information of node v  such as
+token or constant value in the program. Matrices W1 2 3 are learnable model parameters  and σ is
+some nonlinear activation function. Figure 4 shows the construction of graph structured memory using
+iterative message passing operator in Eq (1). f (G) ={µv}v∈V denotes the structured memory.
+3.2.2 Multi-step decision making process
+A loop invariant itself is a mini-program that contains expressions and logical operations. Without loss
+of generality  we deﬁne the loop invariant to be a tree T   in a form with conjunctions of disjunctions:
+(4)
+Each subtreeTt is a simple logic expression (i.e.  x < y * 2 + 10 - z). Given this representation form 
+it is natural to use Markov decision process (MDP) to model this problem  where the corresponding
+T -step ﬁnite horizon MDP is deﬁned as MG = (s1 a1 r1 s2 a2 ... sT ). Here st at rt represent the
+state  action and reward at time step t = 1 ... T −1  respectively. Here we describe the state and action
+used in the inference model  and describe the design of reward and termination in Section 4.
+action: As deﬁned in Eq (4)  a loop invariant tree T consists of multiple subtrees {Tt}. Thus we model
+the action at time step t as at = (opt Tt)  where opt can either be || or &&. That is to say  at each time
+step  the agent ﬁrst decides whether to attach the subexpression Tt to an existing disjunction  or create a
+new disjunction and add it to the list of conjunctions. We use T (<t) to denote the partial tree generated
+by time t so far. So the policy π(T |G) is decomposed into:
+
+T = (T1 || T2...) && (Tt+1 || Tt+2...) && ... (...TT−1|| TT )
+
+π(T |G) =
+
+π(at|T (<t) G) =
+
+π(opt Tt|T (<t) G)
+
+(5)
+
+t=1
+
+t=1
+
+where T (<1) is empty at the ﬁrst step. The generation process of subtree Tt is also an autoregressive
+model implemented by LSTM. However  generating a valid program is nontrivial  since strong syntax
+and semantics constraints should be enforced. Recent advances in neural program synthesis [26  27]
+utilize formal language information to help the generation process. Here we use the Syntax-Directed
+decoder proposed in [28] to guarantee both the syntax and semantics validity. Speciﬁcally 
+• Syntax constraints: The AST generation follows the grammar of loop invariants described in Eq 4.
+Operators such as +  -  * are non-terminal nodes in the AST while operands such as constants or
+variables are leaf nodes.
+• Semantic constraints: We regulate the generated loop invariant to be meaningful. For example  a
+valid loop invariant must contains all the variables that appear in the given assertion. Otherwise 
+the missing variables can take arbitrary values  causing the assertion to be violated. In contrast to
+ofﬂine checking which discards invalid programs after generation  such online regulation restricts
+the output space of the program generative model  which in turn makes learning efﬁcient.
+
+state: At time step t = 1  the state is simply the weighted average of structured memory f (G). At each
+later time step t > 1  the action at should be conditioned on graph memory  as well as the partial tree
+generated so far. Thus st = (G T (<t)).
+3.2.3 Memory query with attention
+At different time steps of inference  a human usually focuses on different parts of program. Thus the
+attention mechanism is a good choice to mimic such process. Speciﬁcally  at time step t  to summarize
+what we have generated so far  we use TreeLSTM [29] to embed the partial tree T (<t). Then the
+
+5
+
+memory f (G). Speciﬁcally  read(f (G) vT (<t)) =(cid:80)
+
+embedding of partial tree vT (<t) = TreeLSTM(T (<t)) is used as the query to read the structured
+are the
+
+v∈V αvµv and αv =
+
+(cid:80)
+
+expµ(cid:62)
+v∈V expµ(cid:62)
+
+v vT (<t)
+
+v vT (<t)
+
+corresponding attention weights.
+
+4 Learning
+The undecidability of the loop invariant generation problem hinders the ability to obtain ground truth
+solutions as supervisions for training. Inspired by recent advances in combinatorial optimization [4  5] 
+where the agent learns a good policy by trial-and-error  we employ reinforcement learning to learn to
+propose loop invariants. Ideally  we seek to learn a policy π(T |G) that proposes a correct loop invariant
+T for a program graph G. However  directly solving such a model is practically not feasible  since:
+• In contrast to problems tackled by existing work  where the objective function is relatively continuous
+(e.g.  tour length of traveling salesman problem)  the proposed loop invariant only has binary objective
+(i.e.  correct or not). This makes the loss surface of the objective function highly non-smooth.
+• Finding the loop invariant is a bandit problem where the binary reward is given only after the invariant
+is proposed. Also  in contrast to two player games [30] where a default policy (e.g.  random rollout)
+can be used to estimate the reward  it is a single player game with an extremely sparse reward.
+
+To tackle the above two challenges  the multi-step decision making model proposed in Section 3.2.2 is
+used  where a ﬁne-grained reward is also designed for each step. In the last step  a continuous feedback
+is provided based on the counterexamples collected by the agent itself.
+4.1 Reinforcement learning setup
+Section 3.2.2 deﬁnes the state and action representation used for inference. We next describe our setup
+of the environment which is important to properly train a reinforcement learning agent.
+reward: In each intermediate step t∈ 1 ... T −1  an intermediate reward rt is given to regulate the
+generation process. For example  a subexpression should be non-trivial  and it should not contradict
+T (<t). In the last step  the generated loop invariant T is given to a theorem prover  which returns
+success or failure. In the latter case  the theorem prover also tells which step (pre  inv  post) failed  and
+provides a counterexample. The failure step can be viewed as a “milestone” of the veriﬁcation process 
+providing a coarse granularity feedback. To achieve continuous (i.e. ﬁne granularity) reward within
+each step  we exploit the counterexamples collected so far. For instance  the ratio of passed examples is
+a good indicator of the learning progress. Appendix ?? describes the reward design in detail.
+termination: There are several conditions that may trigger the termination of tree generation: (1) the
+agent executes the “stop” action  as illustrated in Figure 3; (2) the generated tree has the maximum
+number of branches allowed; or (3) the agent generates an invalid action.
+4.2 Training of the learning agent
+We use advantage actor critic (A2C) to train the above reinforcement learning policy. Speciﬁcally  let
+θ ={Wi} be the parameters in graph memory representation f (·;θ)  and φ be the parameter used in
+π(at|T (<t) G;φ)  our objective is to maximize the expected policy reward:
+
+T(cid:88)
+
+t(cid:48)=t
+
+E
+π(opt Tt|T (<t) G;φ)(
+max
+θ φ
+
+γt(cid:48)−trt(cid:48)−b(T (<t) G;ψ))
+
+(6)
+
+reduce the variance of policy gradient. It is trained to minimize Eπ t(cid:107)(cid:80)T
+
+The baseline function b(T (<t) G;ψ) parameterized by ψ is used to estimate the expected return  so as to
+t(cid:48)=tγt(cid:48)−trt(cid:48)−b(T (<t) G;ψ)(cid:107).
+We simply apply two layer fully connected neural network to predict the expected return. γ is the
+discounting factor. Since the MDP is ﬁnite horizon  we use γ = 1 to address the long-term reward.
+5 Experiments
+We evaluate CODE2INV on a suite of 133 benchmark programs from recent works [3  7  8] and the 2017
+SyGuS competition [31].2 Each program consists of three parts: a number of assumption or assignment
+statements  one loop which contains nested if-else statements with arithmetic operations  and one
+assertion statement. Appendix ?? provides more details about the dataset and the competition.
+
+2Our code and data are publicly available from https://github.com/PL-ML/code2inv
+
+6
+
+(a) veriﬁcation cost by each solver
+
+(b) sample complexity of C2I and CODE2INV
+
+Figure 5: Comparison of CODE2INV with state-of-the-art solvers on benchmark dataset.
+
+We ﬁrst evaluate CODE2INV as an out-of-the-box solver  i.e.  without any training or ﬁne-tuning with
+respect to the dataset. We then conduct an ablation study to justify various design choices. Finally  we
+evaluate the impact of training CODE2INV on a similar dataset.
+
+5.1 Finding loop invariants from scratch
+In this section  we study the capability of CODE2INV with no training  that is  using it as an out-of-
+the-box solver. We compare CODE2INV with three state-of-the-art solvers: C2I [10]  which is based
+on stochastic search; LOOPINVGEN [8]  which searches a conjunctive normal form over predicates
+synthesized by an underlying engine  ESCHER [17]; and ICE-DT [3]  which learns a decision tree over
+manually designed features (e.g. predicate templates). The last two solvers are the winners of the
+invariant synthesis track of the SyGuS 2017 and 2016 competitions  respectively.
+A uniform metric is needed to compare the different solvers since they can leverage diverse performance
+optimizations. For instance  CODE2INV can take advantage of GPUs and TPUs  and C2I can beneﬁt
+from massive parallelization. Instead of comparing absolute running times  we observe that all four
+solvers are based on the Z3 theorem prover [6] and rely on the counterexamples from Z3 to adjust their
+search strategy. Therefore  we compare the number of queries to Z3  which is usually the performance
+bottleneck for veriﬁcation tasks. We run all solvers on a single 2.4 GHz AMD CPU core up to 12 hours
+and using up to 4 GB memory for each program.
+Figure 5a shows the number of instances solved by each solver and the corresponding number of
+queries to Z3. CODE2INV solves the largest number of instances  which is 106. In contrast  ICE-DT 
+LOOPINVGEN and C2I solve 100  77 and 74 instances  respectively. ICE-DT heavily relies on predicate
+templates designed by human experts  which are insufﬁcient for 19 instances that are successfully
+solved by CODE2INV. Furthermore  to solve the same amount of instances  CODE2INV costs orders of
+magnitude fewer queries to Z3 compared to the other solvers.
+We also run CODE2INV using the time limit of one hour from the 2017 SyGuS competition. CODE2INV
+solves 92 instances within this time limit with the same hardware conﬁguration. While it cannot
+outperform existing state-of-the-art solvers based on absolute running times  however  we believe its
+speed can be greatly improved by (1) pre-training on similar programs  which we show in Section 5.3;
+and (2) an optimized implementation that takes advantage of GPUs or TPUs.
+CODE2INV is most related to C2Isince both use accumulated counterexamples to adjust the sample
+distribution of loop invariants. The key difference is that C2I uses MCMC sampling whereas CODE2INV
+learns using RL. Figure 5b shows the sample complexity  i.e.  number of candidates generated before
+successfully ﬁnding the desired loop invariant. We observe that CODE2INV needs orders of magnitude
+less samples which suggests that it is more efﬁcient in learning from failures.
+
+5.2 Ablation study
+We next study the effectiveness of two key components in our framework via ablation experiments:
+counterexamples and attention mechanism. We use the same dataset as in Section 5.1. Table 1 shows our
+ablation study results. We see that besides providing a continuous reward  the use of counterexamples
+(CE) signiﬁcantly reduces the veriﬁcation cost  i.e.  number of Z3 queries. On the other hand  the
+attention mechanism helps to reduce the training cost  i.e.  number of parameter updates. Also  it
+
+7
+
+0102030405060708090100110# instances solved 100101102103# Z3 queriesC2ILoopInvGenICE-DTCode2Inv0102030405060708090100110# instances solved100101102103104105106# candidates generatedC2ICode2Inv(a) with 1 confounding variable
+
+(b) with 5 confounding variables
+
+(c) attention for invariant a == b
+
+(d) attention for the ﬁrst part of
+invariant: c >= -1 && n >= 1
+
+Figure 6: (a) and (b) are veriﬁcation costs of pre-trained model and untrained model; (c) and (d) are
+attention highlights for two example programs.
+
+helps to reduce the veriﬁcation cost modestly. CODE2INV achieves the best performance with both
+components enabled—the conﬁguration used in other parts of our evaluation.
+Additionally  to test the effectiveness of neural graph embedding  we study a simpler encoding  that is 
+viewing a program as a sequence of tokens and encoding the sequence using an LSTM. The performance
+of this setup is shown in the last row of Table 1. With a simple LSTM embedding  CODE2INV solves 13
+fewer instances and  moreover  requires signiﬁcantly more parameter updates.
+
+Table 1: Ablation study for different conﬁgurations of CODE2INV.
+
+conﬁguration
+without CE  without attention
+without CE  with attention
+with CE  without attention
+with CE  with attention
+LSTM embedding + CE + attention
+
+#solved instances max #Z3 queries max #parameter updates
+91
+94
+95
+106
+93
+
+441K
+162K
+337K
+290K
+661K
+
+415K
+147K
+392
+276
+32
+
+5.3 Boosting the search with pre-training
+We next address the question: given an agent that is pre-trained on programs Ptrain ={pi}∼P  can the
+agent solve new programs Ptest ={˜pi}∼P faster than solving from scratch? We prepare the training
+and testing data as follows. We take the programs solved by CODE2INV as the initial set and augment
+it by creating 100 variations for each of them by introducing confounding variables and statements
+in such a way that any valid loop invariant for the original program is still valid. Further details are
+provided in Appendix ??. Finally  90% of them serves as Ptrain  and the rest are used for Ptest.
+After pre-training the agent on Ptrain for 50 epochs  we save the model and then reuse it for “ﬁne tuning”
+(or active search [4])  i.e.  the agent continues the trial-and-error reinforcement learning  on Ptest.
+Figure 6a and Figure 6b compare the veriﬁcation costs between the pre-trained model and untrained
+model on datasets augmented with 1 and 5 confounding variables  respectively. We observe that  on
+one hand  the pre-trained model has a clear advantage over the untrained model on either dataset; but on
+the other hand  this gap reduces when more confounding variables are introduced. This result suggests
+an interesting future research direction: how to design a learning agent to effectively ﬁgure out loop
+invariant related variables from a potentially large number of confounding variables.
+5.4 Attention visualization
+Figure 6c and 6d show the attention highlights for two example programs. The original highlights are
+provided on the program graph representation described in Section 3.2.1. We manually converted the
+graphs back to source code for clarity. Figure 6c shows an interesting example for which CODE2INV
+
+8
+
+0100200300400500# instances solved100101102# Z3 queriesuntrainedpretrained0100200300400# instances solved100101102# Z3 queriesuntrainedpretrainedlearns a strategy of showing the assertion is actually not reachable  and thus holds trivially. Figure 6d
+shows another interesting example for which CODE2INV performs a form of abductive reasoning.
+5.5 Discussion of limitations
+We conclude our study with a discussion of limitations. For most of the instances that CODE2INV fails
+to solve  we observe that the loop invariant can be expressed in a compact disjunctive normal form
+(DNF) representation  which is more suited for the decision tree learning approach with hand-crafted
+features. However  CODE2INV is designed to produce loop invariants in the conjunctive normal form
+(CNF). The reduction of loop invariants from DNF to CNF could incur an exponential blowup in size.
+An interesting future research direction concerns designing a learning agent that can ﬂexibly switch
+between these two forms.
+6 Related Work
+We survey work in program synthesis  program learning  learning loop invariants  and learning
+combinatorial optimizations.
+Program synthesis. Automatically synthesizing a program from its speciﬁcation has been a key
+challenge problem since Manna and Waldinger’s work [32]. In this context  syntax-guided synthesis
+(SyGuS) [9] was proposed as a common format to express these problems. Besides several imple-
+mentations of SyGuS solvers [9  33–35]  a number of probabilistic techniques have been proposed
+to model syntactic aspects of programs and to accelerate synthesis[36–38]. While logical program
+synthesis approaches guarantee semantic correctness  they are chieﬂy limited by their scalability and
+requirement of rigorous speciﬁcations.
+Program learning. There have been several attempts to learn general programs using neural net-
+works. One large class of projects includes those attempting to use neural networks to accelerate the
+discovery of conventional programs [39–42]. Most existing works only consider speciﬁcations which
+are in the form input-output examples  where weak supervision [43–45] or more ﬁne grained trace
+information is provided to help training. In our setting  there is no supervision for the ground truth
+loop invariant  and the agent needs to be able to compose a loop invariant purely from trial-and-error.
+Drawing inspiration from both programming languages and embedding methods  we build up an
+efﬁcient learning agent that can perform end-to-end reasoning  in a way that mimics human experts.
+Learning program loop invariants. Our work is closely related to recent work on learning loop
+invariants from either labeled ground truth [46] or active interactions with human experts [47].
+Brockschmidt et al. [46] learn shape invariants for data structures (e.g. linked lists or trees). Their
+approach ﬁrst extracts features using n-gram and reachability statistics over the program’s heap graph
+and then applies supervised learning to train a neural network to map features to shape invariants. In
+contrast  we are concerned with general loop invariant generation  and our approach employs graph
+embedding directly on the program’s AST and learns a generation policy without using ground truth as
+supervision. Bounov et al. [47] propose inferring loop invariants through gamiﬁcation and crowdsourc-
+ing  which relieves the need for expertise in software veriﬁcation  but still requires signiﬁcant human
+effort. In contrast  an automated theorem prover sufﬁces for our approach.
+Learning combinatorial optimizations. Our work is also related to recent advances in combina-
+torial optimization using machine learning [4  5  48  49]. However  as elaborated in Section 4  the
+problem we study is signiﬁcantly more difﬁcult  in the sense that the objective function is non-smooth
+(binary objective)  and the positive reward is extremely sparse due to the exponentially growing size of
+the search space with respect to program size.
+7 Conclusion
+We studied the problem of learning loop invariants for program veriﬁcation. Our proposed end-to-end
+reasoning framework learns to compose the solution automatically without any supervision. It solves a
+comparable number of benchmarks as the state-of-the-art solvers while requiring much fewer queries
+to a theorem prover. Moreover  after being pre-trained  it can generalize the strategy to new instances
+much faster than starting from scratch. In the future  we plan to extend the framework to discover loop
+invariants for larger programs which present more confounding variables  as well as to discover other
+kinds of program correctness properties such as ranking functions for proving program termination [50]
+and separation predicates for proving correctness of pointer-manipulating programs [51].
+Acknowledgments. We thank the anonymous reviewers for insightful comments. We thank Ningning
+Xie for useful feedback. This research was supported in part by DARPA FA8750-15-2-0009  NSF
+(CCF-1526270  IIS-1350983  IIS-1639792  CNS-1704701) and ONR N00014-15-1-2340.
+
+9
+
+References
+[1] Manuel Fahndrich and Francesco Logozzo. Static contract checking with abstract interpretation.
+
+In
+Proceedings of the 2010 International Conference on Formal Veriﬁcation of Object-Oriented Software  2010.
+
+[2] Andrew W. Appel. Veriﬁed Software Toolchain. In Proceedings of the 20th European Symposium on
+
+Programming (ESOP)  2011.
+
+[3] Pranav Garg  Daniel Neider  P. Madhusudan  and Dan Roth. Learning invariants using decision trees
+and implication counterexamples. In Proceedings of the ACM Symposium on Principles of Programming
+Languages (POPL)  2016.
+
+[4] Irwan Bello  Hieu Pham  Quoc V. Le  Mohammad Norouzi  and Samy Bengio. Neural combinatorial
+
+optimization with reinforcement learning. CoRR  abs/1611.09940  2016.
+
+[5] Elias B. Khalil  Hanjun Dai  Yuyu Zhang  Bistra Dilkina  and Le Song. Learning combinatorial optimization
+algorithms over graphs. In Proceedings of the Conference on Neural Information Processing Systems (NIPS) 
+2017.
+
+[6] Leonardo de Moura and Nikolaj Bjørner. Z3: An efﬁcient SMT solver.
+
+In Proceedings of the 14th
+International Conference on Tools and Algorithms for the Construction and Analysis of Systems (TACAS) 
+2008.
+
+[7] Isil Dillig  Thomas Dillig  Boyang Li  and Ken McMillan. Inductive invariant generation via abductive
+inference. In Proceedings of the ACM Conference on Object-Oriented Programming Systems  Languages
+and Applications (OOPSLA)  2013.
+
+[8] Saswat Padhi  Rahul Sharma  and Todd Millstein. Data-driven precondition inference with learned features.
+In Proceedings of the ACM Conference on Programming Language Design and Implementation (PLDI) 
+2016.
+
+[9] Rajeev Alur  Rastislav Bodik  Garvit Juniwal  Milo M. K. Martin  Mukund Raghothaman  Sanjit A. Seshia 
+Rishabh Singh  Armando Solar-Lezama  Emina Torlak  and Abhishek Udupa. Syntax-guided synthesis. In
+Proceedings of Formal Methods in Computer-Aided Design (FMCAD)  2013.
+
+[10] Rahul Sharma and Alex Aiken. From invariant checking to invariant inference using randomized search. In
+
+Proceedings of the International Conference on Computer Aided Veriﬁcation (CAV)  2014.
+
+[11] C. A. R. Hoare. An axiomatic basis for computer programming. Communications of the ACM  12(10) 
+
+October 1969.
+
+[12] Michael A. Colón  Sriram Sankaranarayanan  and Henny B. Sipma. Linear invariant generation using non-
+linear constraint solving. In Proceedings of the International Conference on Computer Aided Veriﬁcation
+(CAV)  2003.
+
+[13] Sriram Sankaranarayanan  Henny B. Sipma  and Zohar Manna. Non-linear loop invariant generation using
+Gröbner bases. In Proceedings of the ACM Symposium on Principles of Programming Languages (POPL) 
+2004.
+
+[14] Sumit Gulwani and Nebojsa Jojic. Program veriﬁcation as probabilistic inference. In Proceedings of the
+
+ACM Symposium on Principles of Programming Languages (POPL)  2007.
+
+[15] Rahul Sharma  Saurabh Gupta  Bharath Hariharan  Alex Aiken  Percy Liang  and Aditya V. Nori. A data
+driven approach for algebraic loop invariants. In Proceedings of the European Symposium on Programming
+(ESOP)  2013.
+
+[16] Rahul Sharma  Isil Dillig  Thomas Dillig  and Alex Aiken. Simplifying loop invariant generation using
+splitter predicates. In Proceedings of the International Conference on Computer Aided Veriﬁcation (CAV) 
+2011.
+
+[17] Aws Albarghouthi  Sumit Gulwani  and Zachary Kincaid. Recursive program synthesis. In Proceedings of
+
+the International Conference on Computer Aided Veriﬁcation (CAV)  2013.
+
+[18] Pranav Garg  Christof Löding  P. Madhusudan  and Daniel Neider. Ice: A robust framework for learning
+
+invariants. In Proceedings of the International Conference on Computer Aided Veriﬁcation (CAV)  2014.
+
+[19] Sainbayar Sukhbaatar  Jason Weston  Rob Fergus  et al. End-to-end memory networks. In Proceedings of
+
+the Conference on Neural Information Processing Systems (NIPS)  2015.
+
+[20] Alexander Miller  Adam Fisch  Jesse Dodge  Amir-Hossein Karimi  Antoine Bordes  and Jason Weston.
+Key-value memory networks for directly reading documents. In Proceedings of the Conference on Empirical
+Methods in Natural Language Processing (EMNLP)  2016.
+
+10
+
+[21] Miltiadis Allamanis  Marc Brockschmidt  and Mahmoud Khademi. Learning to represent programs with
+
+graphs. In Proceedings of the International Conference on Learning Representations (ICLR)  2018.
+
+[22] Ron Cytron  Jeanne Ferrante  Barry K. Rosen  Mark N. Wegman  and F. Kenneth Zadeck. Efﬁciently
+computing static single assignment form and the control dependence graph. ACM Trans. Program. Lang.
+Syst.  13(4)  1991.
+
+[23] Franco Scarselli  Marco Gori  Ah Chung Tsoi  Markus Hagenbuchner  and Gabriele Monfardini. The graph
+
+neural network model. IEEE Transactions on Neural Networks  20(1):61–80  2009.
+
+[24] David K Duvenaud  Dougal Maclaurin  Jorge Iparraguirre  Rafael Bombarell  Timothy Hirzel  Alán Aspuru-
+Guzik  and Ryan P Adams. Convolutional networks on graphs for learning molecular ﬁngerprints. In
+Proceedings of the Conference on Neural Information Processing Systems (NIPS)  2015.
+
+[25] Hanjun Dai  Bo Dai  and Le Song. Discriminative embeddings of latent variable models for structured data.
+
+In Proceedings of the International Conference on Machine Learning (ICML)  2016.
+
+[26] Emilio Parisotto  Abdel-rahman Mohamed  Rishabh Singh  Lihong Li  Dengyong Zhou  and Pushmeet
+
+Kohli. Neuro-symbolic program synthesis. arXiv preprint arXiv:1611.01855  2016.
+
+[27] Matt J Kusner  Brooks Paige  and José Miguel Hernández-Lobato. Grammar variational autoencoder. In
+
+Proceedings of the International Conference on Machine Learning (ICML)  2017.
+
+[28] Hanjun Dai  Yingtao Tian  Bo Dai  Steven Skiena  and Le Song. Syntax-directed variational autoencoder for
+structured data. In Proceedings of the International Conference on Learning Representations (ICLR)  2018.
+
+[29] Kai Sheng Tai  Richard Socher  and Christopher D Manning. Improved semantic representations from
+tree-structured long short-term memory networks. In Proceedings of the Association for Computational
+Linguistics (ACL)  2015.
+
+[30] David Silver  Julian Schrittwieser  Karen Simonyan  Ioannis Antonoglou  Aja Huang  Arthur Guez  Thomas
+Hubert  Lucas Baker  Matthew Lai  Adrian Bolton  et al. Mastering the game of Go without human
+knowledge. Nature  550(7676):354–359  2017.
+
+[31] SyGuS Competition  2017. http://sygus.seas.upenn.edu/SyGuS-COMP2017.html.
+
+[32] Zohar Manna and Richard J. Waldinger. Toward automatic program synthesis. In Communications of the
+
+ACM  1971.
+
+[33] Sumit Gulwani  Susmit Jha  Ashish Tiwari  and Ramarathnam Venkatesan. Synthesis of loop-free programs.
+In Proceedings of the ACM Conference on Programming Language Design and Implementation (PLDI) 
+2011.
+
+[34] Rajeev Alur  Arjun Radhakrishna  and Abhishek Udupa. Scaling enumerative program synthesis via divide
+
+and conquer. 2017.
+
+[35] Eric Schkufza  Rahul Sharma  and Alex Aiken. Stochastic superoptimization. 2013. ISBN 978-1-4503-
+
+1870-9.
+
+[36] Pavol Bielik  Veselin Raychev  and Martin Vechev. Phog: Probabilistic model for code. In Proceedings of
+
+the International Conference on Machine Learning (ICML)  2016.
+
+[37] C.J. Maddison and D. Tarlow. Structured generative models of natural source code. In Proceedings of the
+
+International Conference on Machine Learning (ICML)  2014.
+
+[38] Anh Tuan Nguyen and Tien N. Nguyen. Graph-based statistical language model for code. In Proceedings of
+
+the International Conference on Software Engineering (ICSE)  2015.
+
+[39] M. Balog  A. L. Gaunt  M. Brockschmidt  S. Nowozin  and D. Tarlow. Deepcoder: Learning to write
+
+programs. In Proceedings of the International Conference on Learning Representations (ICLR)  2017.
+
+[40] Vijayaraghavan Murali  Letao Qi  Swarat Chaudhuri  and Chris Jermaine. Neural sketch learning for
+conditional program generation. In Proceedings of the International Conference on Learning Representations
+(ICLR)  2018.
+
+[41] Jacob Devlin  Jonathan Uesato  Surya Bhupatiraju  Rishabh Singh  Abdel rahman Mohamed  and Pushmeet
+Kohli. Robustﬁll: Neural program learning under noisy i/o. In Proceedings of the International Conference
+on Machine Learning (ICML)  2017.
+
+[42] Emilio Parisotto  Abdel-rahman Mohamed  Rishabh Singh  Lihong Li  Dengyong Zhou  and Pushmeet
+Kohli. Neuro-symbolic program synthesis. Proceedings of the International Conference on Learning
+Representations (ICLR)  2016.
+
+11
+
+[43] Chen Liang  Jonathan Berant  Quoc Le  Kenneth D Forbus  and Ni Lao. Neural symbolic machines: Learning
+
+semantic parsers on freebase with weak supervision. arXiv preprint arXiv:1611.00020  2016.
+
+[44] Xinyun Chen  Chang Liu  and Dawn Song. Towards synthesizing complex programs from input-output
+
+examples. In International Conference on Learning Representations  2018.
+
+[45] Rudy Bunel  Matthew Hausknecht  Jacob Devlin  Rishabh Singh  and Pushmeet Kohli. Leveraging gram-
+mar and reinforcement learning for neural program synthesis. In International Conference on Learning
+Representations  2018.
+
+[46] Marc Brockschmidt  Yuxin Chen  Pushmeet Kohli  Siddharth Krishna  and Daniel Tarlow. Learning shape
+
+analysis. In Proceedings of the Static Analysis Symposium (SAS)  2017.
+
+[47] Dimitar Bounov  Anthony DeRossi  Massimiliano Menarini  William G. Griswold  and Sorin Lerner.
+Inferring loop invariants through gamiﬁcation. In Proceedings of the 2018 CHI Conference on Human
+Factors in Computing Systems  CHI ’18  2018.
+
+[48] Elias Boutros Khalil  Pierre Le Bodic  Le Song  George L Nemhauser  and Bistra N Dilkina. Learning to
+
+branch in mixed integer programming. 2016.
+
+[49] Daniel Selsam  Matthew Lamm  Benedikt Bunz  Percy Liang  Leonardo de Moura  and David L Dill.
+
+Learning a sat solver from single-bit supervision. arXiv preprint arXiv:1802.03685  2018.
+
+[50] Byron Cook  Andreas Podelski  and Andrey Rybalchenko. Proving program termination. Communications
+
+of the ACM  54(5)  2011.
+
+[51] John C. Reynolds. Separation logic: A logic for shared mutable data structures. In Proceedings of the IEEE
+
+Symposium on Logic in Computer Science (LICS)  2002.
+
+12
+
+,Xujie Si
+Hanjun Dai
+Mukund Raghothaman
+Mayur Naik
+Le Song
+Jaehyeok Shin
+Aaditya Ramdas
+Alessandro Rinaldo

@@ -1,0 +1,1091 @@
+2019,Double Quantization for Communication-Efficient Distributed Optimization,Modern distributed training of machine learning models often suffers from high communication overhead for synchronizing stochastic gradients and model parameters. In this paper  to reduce the communication complexity  we propose \emph{double quantization}  a general scheme for quantizing both model parameters and gradients. Three communication-efficient algorithms are proposed based on this general scheme. Specifically  (i) we  propose a low-precision algorithm AsyLPG  with asynchronous parallelism  (ii) we explore integrating gradient sparsification with  double quantization and develop Sparse-AsyLPG  (iii)  we show that double quantization can be accelerated by the momentum technique and design accelerated AsyLPG. We establish rigorous performance guarantees for the algorithms  and conduct experiments on a multi-server test-bed with real-world datasets to demonstrate that our algorithms can effectively save transmitted bits without performance degradation  and significantly outperform existing methods with either model parameter or gradient quantization.,Double Quantization for Communication-Efﬁcient
+
+Distributed Optimization
+
+Yue Yu
+
+IIIS  Tsinghua University
+
+yu-y14@mails.tsinghua.edu.cn
+
+Jiaxiang Wu
+Tencent AI Lab
+
+jonathanwu@tencent.com
+
+Longbo Huang∗
+
+IIIS  Tsinghua University
+
+longbohuang@tsinghua.edu.cn
+
+Abstract
+
+Modern distributed training of machine learning models often suffers from high
+communication overhead for synchronizing stochastic gradients and model pa-
+rameters. In this paper  to reduce the communication complexity  we propose
+double quantization  a general scheme for quantizing both model parameters and
+gradients. Three communication-efﬁcient algorithms are proposed based on this
+general scheme. Speciﬁcally  (i) we propose a low-precision algorithm AsyLPG
+with asynchronous parallelism  (ii) we explore integrating gradient sparsiﬁcation
+with double quantization and develop Sparse-AsyLPG  (iii) we show that double
+quantization can be accelerated by the momentum technique and design acceler-
+ated AsyLPG. We establish rigorous performance guarantees for the algorithms 
+and conduct experiments on a multi-server test-bed with real-world datasets to
+demonstrate that our algorithms can effectively save transmitted bits without per-
+formance degradation  and signiﬁcantly outperform existing methods with either
+model parameter or gradient quantization.
+
+1
+
+Introduction
+
+The data parallel mechanism is a widely used architecture for distributed optimization  which has
+received much recent attention due to data explosion and increasing model complexity. It decomposes
+the time consuming gradient computations into sub-tasks  and assigns them to separate worker
+machines for execution. Speciﬁcally  the training data is distributed among M workers and each
+worker maintains a local copy of model parameters. At each iteration  each worker computes a
+gradient from a mini-batch randomly drawn from its local data. The global stochastic gradient is
+then computed by synchronously aggregating M local gradients. Model parameters are then updated
+accordingly.
+Two issues signiﬁcantly slow down methods based on the data parallel architecture. One is the
+communication cost. For example  all workers must send their entire local gradients to the master
+node. If gradients are dense  the master node has to receive and send M × d ﬂoating-point numbers
+per iteration (d is the size of the model vector)  which scales linearly with network and model vector
+sizes. With the increasing computing cluster size and model complexity  it has been observed in many
+systems that such communication overhead has become the performance bottleneck [38  35]. The
+other factor is the synchronization cost  i.e.  the master node has to wait for the last local gradient
+arrival at each iteration. This coordination dramatically increases system’s idle time.
+
+∗Corresponding author.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+min
+x∈Ω
+
+(cid:88)n
+
+1
+n
+
+To overcome the ﬁrst issue  many works focus on reducing the communication complexity of
+gradients in the data parallel architecture. Generally  there are two approaches. One is quantization
+[2]  which stores gradients using fewer number of bits (lower precision). The other is sparsiﬁcation
+[1]  i.e.  dropping out some coordinates of gradients following certain rules. However  existing
+communication-efﬁcient algorithms based on data-parallel network still suffer from signiﬁcant
+synchronization cost. To address the second issue  many asynchronous algorithms have recently
+been developed for distributed training [17  23]. By allowing workers to communicate with master
+without synchronization  they can effectively improve the training efﬁciency. Unfortunately  the
+communication bottleneck caused by transmitting gradients in ﬂoating-point numbers still exists.
+In this paper  we are interested in jointly achieving communication-efﬁciency and asynchronous
+parallelism. Speciﬁcally  we study the following composite problem
+
+fi(x) 
+
+i=1
+
+P (x) = f (x) + h(x) 
+
+f (x) =
+
+(1)
+where x ∈ Rd is the model vector  fi(x) is smooth  and h(x) is convex but can be nonsmooth.
+Domain Ω ⊆ Rd is a convex set. This formulation has found applications in many different areas 
+such as operations research  statistics and machine learning [10  14]  e.g.  classiﬁcation or regression.
+In these problems  n often denotes the number of samples  and fi(x) denotes the loss function for
+sample i  and h(x) represents certain regularizer.
+To solve (1)  we propose a novel double quantization scheme  which quantizes both model parameters
+and gradients. This quantization is nontrivial  because we have to deal with low-precision gradients 
+evaluated on low-precision model vectors. Three communication-efﬁcient algorithms are then
+proposed under double quantization. We analyze the precision loss of low-precision gradients
+and prove that these algorithms achieve fast convergence rates while signiﬁcantly reducing the
+communication cost. The main contributions are summarized as follows.
+(i) We propose an asynchronous low-precision algorithm AsyLPG to solve the nonconvex and
+nonsmooth problem (1). We show that AsyLPG achieves the same asymptotic convergence rate
+as the unquantized serial counterpart  but with a signiﬁcantly lower communication cost. (ii) We
+combine gradient sparsiﬁcation with double quantization and propose Sparse-AsyLPG to further
+
+reduce communication overhead. Our analysis shows that the convergence rate scales with(cid:112)d/ϕ for
+
+a sparsity budget ϕ. (iii) We propose accelerated AsyLPG  and mathematically prove that double
+quantization can be accelerated by the momentum technique [19  26]. (iv) We conduct experiments
+on a multi-server distributed test-bed. The results validate the efﬁciency of our algorithms.
+
+2 Related Work
+
+Designing large-scale distributed algorithms for machine learning has been receiving increasing
+attention  and many algorithms  both synchronous and asynchronous  have been proposed  e.g. 
+[22  4  17  12]. In order to reduce the communication cost  researchers also started to focus on cutting
+down transmitted bits per iteration  based mainly on two schemes  i.e.  quantization and sparsiﬁcation.
+Quantization. Algorithms based on quantization store a ﬂoating-point number using limited number
+of bits. For example  [25] quantized gradients to a representation of {−1  1}  and empirically showed
+the communication-efﬁciency in training of deep neural networks. [5  6] considered the bi-direction
+communications of gradients between master and workers. In their setting  each worker transmitted
+√
+gradient sign to the master and master aggregated signs by majority vote. [2  34  35] adopted an
+unbiased gradient quantization with multiple levels. [13] provided a convergence rate of O(1/
+K)
+for implementing SGD with unbiased gradient quantizer in solving nonconvex objectives  where K is
+the number of iterations. The error-feedback method was applied in [25  35  29] to integrate history
+quantization error into the current stage. Speciﬁcally  [29] compressed transmitted gradients with
+error-compensation in both directions between master and workers  and showed a linear speedup
+in the nonconvex case. [15] constructed several examples where simply transmitting gradient sign
+cannot converge. They combine the error-feedback method to ﬁx the divergence and prove the
+convergence rate for nonconvex smooth objectives. [40] also studied bi-direction compression with
+error-feedback. They partitioned gradients into several blocks  which were compressed using different
+1-bit quantizers separately. They analyzed the convergence rate when integrating the momentum. [9]
+proposed a low-precision framework of SVRG [14]  which quantized model parameters for single
+
+2
+
+machine computation. [38] proposed an end-to-end low-precision scheme  which quantized data 
+model and gradient with synchronous parallelism. A biased quantization with gradient clipping
+was analyzed in [37]. [8] empirically studied asynchronous and low-precision SGD on logistic
+regression. [28] considered the decentralized training and proposed an extrapolation compression
+method to obtain a higher compression level. [36] proposed a two-phase parameter quantization
+method  where the parameter in the ﬁrst phase was the linear combination of full-precision and
+low-precision parameters. In the second phase  they set the weight of full-precision value to zero to
+obtain a full compression.
+Sparsiﬁcation. Methods on sparsiﬁcation drop out certain coordinates of transmitted vectors. [1]
+only transmitted gradients exceeding a threshold. [33  30] formulated gradient sparsiﬁcation into an
+optimization problem to balance sparsity and variance. [31] reduced transmissions in the parameter-
+server setting by solving a shifted L1 regularized minimization problem. [13] studied a variant of
+√
+distributed SGD  i.e.  only transmitting a subset of model parameters in each iteration. They showed
+a convergence rate of O(1/
+K) and a linear speedup as long as all of the model parameters were
+transmitted in limited consecutive iterations. Recently  [27  3] analyzed the convergence behavior of
+sparsiﬁed SGD with memory  i.e.  compensating gradient with sparsiﬁcation error.
+Our work distinguishes itself from the above results in: (i) we quantize both model vectors and
+gradients  (ii) we integrate gradient sparsiﬁcation into double quantization and prove convergence 
+and (iii) we analyze how double quantization can be accelerated to reduce communication rounds.
+Notation. x∗ is the optimal solution of (1). ||x||∞  ||x||1 and ||x|| denote the max  L1 and L2 norms
+of x  respectively. For a vector vt ∈ Rd  [vt]i or vt i denotes its i-th coordinate. {ei}d
+i=1 is the
+standard basis in Rd. The base of logarithmic function is 2. ˜O(f ) denotes O(f · polylog(f )). We
+use the proximal operator to handle a nonsmooth function h(x)  i.e.  proxηh(x) = arg miny h(y) +
+2η||y − x||2. If problem (1) is nonconvex and nonsmooth  we apply the commonly used convergence
+1
+η [x − proxηh(x − η∇f (x))]. x is deﬁned as an
+metric gradient mapping [20]  i.e.  Gη(x) (cid:44) 1
+-accurate solution if it satisﬁes E||Gη(x)||2 ≤ .
+
+3 Preliminary
+
+Low-Precision Representation via Quantization. Low-precision representation stores numbers
+using limited number of bits  contrast to the 32-bit full-precision.2 It can be represented by a tuple
+(δ  b)  where δ ∈ R is the scaling factor and b ∈ N+ is the number of bits used. Speciﬁcally  given a
+tuple (δ  b)  the set of representable numbers is given by
+
+dom(δ  b) = {−2b−1 · δ  ... −δ  0  δ  ...  (2b−1 − 1) · δ}.
+
+For any full-precision x ∈ R  we call the procedure of transforming it to a low-precision representation
+as quantization  which is denoted by function Q(δ b)(x). It outputs a number in dom(δ  b) according
+to the following rules:
+(i) If x lies in the convex hull of dom(δ  b)  i.e.  there exists a point z ∈ dom(δ  b) such that
+x ∈ [z  z + δ]  then x will be stochastically rounded in an unbiased way:
+δ  
+with probability z+δ−x
+δ
+
+(cid:26)z + δ  with probability x−z
+
+.
+
+Q(δ b)(x) =
+
+z 
+
+(ii) Otherwise  Q(δ b)(x) outputs the closest point to x in dom(δ  b).
+This quantization method is widely used in existing works  e.g.  [38  2  34  9]  sometimes under
+different formulation. In the following sections  we adopt Q(δ b)(v) to denote quantization on vector
+v ∈ Rd  which means that each coordinate of v is independently quantized using the same tuple
+(δ  b). Low-precision representation can effectively reduce communication cost  because we only
+need (32 + bd) bits to transmit the quantized Q(δ b)(v) (32 bits for δ  and b bits for each coordinate) 
+whereas it needs 32d bits for a full-precision v.
+
+2We assume without loss of generality that a ﬂoating-point number is stored using 32 bits (also see  e.g. 
+
+[2  37]). Our results can extend to the case when numbers are stored with other precision.
+
+3
+
+Algorithm 1 AsyLPG
+1: Input: S  m  η  bx  b  ˜x0 = x0;
+2: for s = 0  1  ...  S − 1 do
+xs+1
+0 = ˜xs;
+3:
+Compute ∇f (˜xs) = 1
+4:
+for t = 0 to m − 1 do
+5:
+6:
+7:
+
+n
+
+(cid:80)n
+i=1 ∇fi(˜xs);
+
+/* Map-reduce global gradient computation
+
+||xs+1
+D(t)||∞
+2bx−1−1 and quantize xs+1
+
+D(t) subject to (2).
+
+/* For master:
+(i) Model Parameter Quantization: Set δx =
+Then  send Q(δx bx)(xs+1
+D(t)) to workers;
+(ii) Receive local gradient ζt  update us+1
+/* For worker:
+(i) Receive Q(δx bx)(xs+1
+gradient αt = ∇fa(Q(δx bx)(xs+1
+(ii) Gradient Quantization: Set δαt =
+Q(δαt  b)(αt) to the master;
+
+t = ζt +∇f (˜xs)  xs+1
+
+t − ηus+1
+);
+D(t))  stochastically sample a data-point a ∈ {1  ...  n}  and calculate
+
+t+1 = proxηh(xs+1
+
+D(t))) − ∇fa(˜xs);
+||αt||∞
+2b−1−1 and send the quantized gradient ζt =
+
+t
+
+8:
+9:
+10:
+
+11:
+
+end for
+m ;
+˜xs+1 = xs+1
+
+12:
+13:
+14: end for
+15: Output: Uniformly choosing from {{xs+1
+
+t=0 }S−1
+}m−1
+s=0 .
+
+t
+
+Distributed Network with Asynchronous Communication. As shown in Figure 1  we con-
+sider a network with one master and multiple workers  e.g. 
+the parameter-server setting.
+The master maintains and updates a model vec-
+tor x  and keeps a training clock. Each worker
+can get access to the full datasets and keeps a dis-
+joint partition of data. In each communication
+round  a worker retrieves x from the master  eval-
+uates the gradient g(x)  and then sends it back to
+Figure 1: The framework of distributed network with
+the master. Since workers asynchronously pull
+asynchronous communication. Left: network structure.
+and push data during the training process  at a
+Right: training process.
+time t  the master may use a delayed gradient
+calculated on a previous xD(t)  where D(t) ≤ t. Many works showed that a near linear speedup can
+be achieved if the delay is reasonably moderate [17  23].
+
+4 Algorithms
+
+To solve problem (1)  we propose a communication-efﬁcient algorithm with double quantization 
+namely AsyLPG  and introduce its two variants with gradient sparsiﬁcation and momentum accelera-
+tion. We begin with the assumptions made in this paper. They are mild and are often assumed in the
+literature  e.g.  [14  24].
+Assumption 1. The stochastically sampled gradient is unbiased  i.e.  for a ∈ {1  ...  n} sampled in
+Algorithms 1  2  3  Ea[∇fa(x)] = ∇f (x). Moreover  the random variables in different iterations are
+independent.
+Assumption 2. Each fi(x) in (1) is L-smooth  i.e.  ||∇fi(x) − ∇fi(y)|| ≤ L||x − y||  ∀x  y ∈ Ω.
+Assumption 3. The gradient delay is bounded by some ﬁnite constant τ > 0  i.e.  t − D(t) ≤ τ  ∀t.
+
+4.1 Communication-Efﬁcient Algorithm with Double Quantization: AsyLPG
+
+In this section  we introduce our new distributed algorithm AsyLPG  with asynchronous communica-
+tion and low-precision ﬂoating-point representation. As shown in Algorithm 1  AsyLPG divides the
+training procedure into epochs  similar to SVRG [14]  with each epoch containing m inner iterations.
+At the beginning of each epoch  AsyLPG performs one round of communication between the master
+and workers to calculate the full-batch gradient ∇f (˜xs)  where ˜xs is a snapshot variable evaluated at
+
+4
+
+the end of each epoch s. This one round communication involves full-precision operation because it is
+only performed once per epoch  and its communication overhead is small compared to the subsequent
+m communication rounds in inner iterations  where the model parameters are updated.
+In inner iterations  the communication between the master and workers utilizes the asynchronous
+parallelism described in Section 3. To reduce communication complexity  we propose double
+quantization  i.e.  quantizing both model parameters and gradients.
+Model Parameter Quantization. Prior works [9  39] showed that simply quantizing model vectors
+using a constant tuple (δ  b) fails to converge to the optimal solution due to a non-diminishing
+quantization error. In our case  we impose the additional requirement that the chosen (δ  b) satisﬁes
+the following condition (see Step 7 of AsyLPG):
+
+EQ||Q(δx bx)(xs+1
+
+D(t)) − xs+1
+
+D(t)||2 ≤ µ||xs+1
+
+D(t) − ˜xs||2.
+
+(2)
+
+D(t) with a dynamic value of ||xs+1
+
+Figure 2: The value of µ in different epochs that guaran-
+tees (2). Left: bx = 8. Right: bx = 4. The statistics are
+based on a logistic regression on dataset covtype [7].
+
+This condition is set to control the precision loss
+D(t) − ˜xs||2
+of xs+1
+and a positive hyperparameter µ  so as to achieve
+an accurate solution. Note that with a larger µ 
+we can aggressively save more transmitted bits
+(using a smaller bx). In practice  the precision
+loss and communication cost can be balanced by
+selecting a proper µ . On the other hand  from
+the analysis aspect  we can always ﬁnd a µ that guarantees (2) throughout the training process  for
+any given bx. In the special case when xs+1
+D(t) = ˜xs  the master only needs to send a ﬂag bit since ˜xs
+has already been stored at the workers  and (2) still holds. Figure 2 validates the practicability of
+(2)  where we plot the value of µ required to guarantee (2) given bx. Note that the algorithm already
+converges in both graphs. In this case  we see that when bx is 4 or 8  µ can be upper bounded by
+a constant. Also  by setting a larger µ  we can choose a smaller bx. The reason µ increases at the
+beginning of each epoch is because ||xs+1
+D(t) − ˜xs||2 is small. After several inner iterations  xs+1
+moves further away from ˜xs. Thus  a smaller µ sufﬁces to guarantee (2).
+Gradient Quantization. After receiving the low-precision model parameter  as shown in Steps 10-11 
+a worker calculates a gradient αt and quantizes it into its low-precision representation Q(δαt  b)(αt) 
+and then sends it to the master.
+In Step 8  the master constructs a semi-stochastic gradient us+1
+based on the received low-precision
+Q(δαt  b)(αt) and the full-batch gradient ∇f (˜xs)  and updates the model vector x using step size η.
+The semi-stochastic gradient evaluated here adopts the variance reduction method proposed in SVRG
+[14] and is used to accelerate convergence. If Algorithm 1 is run without double quantization and
+asynchronous parallelism  i.e.  only one compute node with no delay  [24] showed that:
+Theorem 1. ([24]  Theorem 5) Suppose h(x) is convex and Assumptions 1  2 hold. Let T = Sm and
+η = ρ/L where ρ ∈ (0  1/2) and satisﬁes 4ρ2m2 + ρ ≤ 1. Then for the output xout of Algorithm 1 
+
+we have E||Gη(xout)||2 ≤(cid:0)2L(P (x0) − P (x∗))(cid:1)/(cid:0)ρ(1 − 2ρ)T(cid:1).
+
+D(t)
+
+t
+
+4.1.1 Theoretical Analysis
+Lemma 1. Denote ∆ =
+Algorithm 1  its variance can be bounded by
+
+E||us+1
+
+t − ∇f (xs+1
+
+4(2b−1−1)2 . If Assumptions 1  2  3 hold  then for the gradient us+1
+
+t − ˜xs||2(cid:105)
+output xout of Algorithm 1   we have E||Gη(xout)||2 ≤(cid:0)2L(P (x0) − P (x∗))(cid:1)/(cid:0)ρ(1 − 2ρ)T(cid:1).
+
+Theorem 2. Suppose h(x) is convex  conditions in Lemma 1 hold  T = Sm  η = ρ
+ρ ∈ (0  1
+
+L   where
+2 )  and ρ  τ satisfy 8ρ2m2(µ + 1)(∆ + 2) + 2ρ2(µ + 1)(∆ + 2)τ 2 + ρ ≤ 1. Then  for the
+
+)||2 ≤ 2L2(µ + 1)(∆ + 2)E
+
+(cid:104)||xs+1
+
+D(t) − xs+1
+
+||2 + ||xs+1
+
+in
+
+t
+
+.
+
+d
+
+t
+
+t
+
+√
+
+Remarks. From Theorem 2  we see that if µ = O(1)  b = O(log
+m )  AsyLPG
+achieves the same asymptotic convergence rate as in Theorem 1  while transmitting much fewer
+bits (b = O(log
+d) is much smaller than 32). Our analytical results focus on convergence  as
+done in [35  34]. Exactly quantifying the amount of improvement on communication complexity 
+however  remains challenging due to the complicated dynamics of parameter updates  e.g.  [9  28].
+
+d) and ρ = O( 1
+
+√
+
+5
+
+0123456Epochs0.00.51.01.52.02.5Value of 0123456Epochs05101520Value of Algorithm 2 Sparse-AsyLPG: Procedures for worker
+1: (i) Receive Q(δx bx)(xs+1
+
+D(t))  stochastically sample a data-point a ∈ {1  ...  n}  and calculate
+
+gradient αt = ∇fa(Q(δx bx)(xs+1
+
+2: (ii) Gradient Sparsiﬁcation: Select a budget ϕt and sparsify αt to obtain βt using (3);
+3: (iii) Gradient Quantization: Set δβt =
+
+D(t))) − ∇fa(˜xs);
+||βt||∞
+2b−1−1  and send ζt = Q(δβt  b)(βt) to the master;
+
+We instead show through extensive experiments that our scheme signiﬁcantly improves upon existing
+benchmarks  e.g.  Figure 3 and Table 1. Note that AsyLPG can also adopt other gradient quantization
+methods (even biased ones)  e.g.  [37]  and similar results can be established.
+
+4.2 AsyLPG with Gradient Sparsiﬁcation
+
+In this section  we explore how to further reduce the communication cost by incorporating gradient
+sparsiﬁcation into double quantization  and propose a new algorithm Sparse-AsyLPG. As shown in
+Algorithm 2  after calculating αt  workers successively perform sparsiﬁcation and quantization on it.
+Speciﬁcally  we drop out certain coordinates of αt to obtain a sparsiﬁed vector βt according to the
+following rules [33]:
+
+αt 1
+p1
+
+αt 2
+p2
+
+ 
+
+Z1
+
+  Z2
+
+βt =
+
+  ...  Zd
+
+pi. It can be veriﬁed that E[βt] = αt. Deﬁne ϕt (cid:44)(cid:80)d
+||αt||∞ . Then  for αt =(cid:80)d
+
+(3)
+where Z = [Z1  Z2  ...  Zd] is a binary-valued vector with Zi ∼ Bernoulli(pi)  0 < pi ≤ 1  and Zi’s
+are independent. Thus  βt is obtained by randomly selecting the i-th coordinate of αt with probability
+i=1 pi to measure the sparsity of βt. To reduce
+the communication complexity  it is desirable to make ϕt as small as possible  which  on the other
+hand  brings about a large variance. The following lemma quantiﬁes the relationship between βt and
+ϕt  and is derived based on results in [30].
+Lemma 2. Suppose ϕt ≤ ||αt||1
+E||βt||2 ≥ 1
+Based on Lemma 2  in Step 2 of Algorithm 2  we can select a sparsity budget ϕt ≤ ||αt||1
+||αt||∞ and set
+to minimize the variance of βt. Then  we quantize βt and send its low-precision version
+pi =
+to the master. The master node in Sparse-AsyLPG employs the same model parameter quantization
+and updates parameter x in the same manner as in AsyLPG. The asynchronous parallelism is also
+applied in the communications between master and workers.
+
+i=1 αt iei and βt generated in (3)  we have
+
+1. The equality holds if and only if pi =
+
+|αt i|·ϕt
+||αt||1
+
+|αt i|·ϕt
+||αt||1
+
+||αt||2
+
+ϕt
+
+.
+
+(cid:104)
+
+(cid:105)
+
+αt d
+pd
+
+4.2.1 Theoretical Analysis
+
+t = ζt + ∇f (˜xs).
+
+t
+
+d2
+
+t − ∇f (xs+1
+
+We ﬁrst study the variance of the sparsiﬁed gradient us+1
+Lemma 3. Suppose ϕt ≤ ||αt||1
+||αt||∞   Assumptions 1  2  3 hold  and for each i ∈ {1  ...  d}  pi =
+ϕ + 1  where ϕ = mint{ϕt}. Then  for the gradient us+1
+Denote Γ =
+4ϕ(2b−1−1)2 + d
+||2 + ||xs+1
+AsyLPG  we have E||us+1
+Theorem 3. Suppose h(x) is convex  conditions in Lemma 3 hold  T = Sm  η = ρ
+ρ ∈ (0  1
+
+L   where
+2 )  and ρ  τ satisfy 8ρ2m2(µ + 1)Γ + 2ρ2(µ + 1)τ 2Γ + ρ ≤ 1. Then  for the output xout of
+
+Sparse-AsyLPG  we have E||Gη(xout)||2 ≤(cid:0)2L(P (x0) − P (x∗))(cid:1)/(cid:0)ρ(1 − 2ρ)T(cid:1).
+that Sparse-AsyLPG converges with a rate linearly scales with(cid:112)d/ϕ  and signiﬁcantly reduces
+
+d)  we obtain Γ = O(d/ϕ). We then conclude from Theorem 3
+
+t − ˜xs||2(cid:105)
+
+.
+in Sparse-
+.
+
+Remarks. Setting b = O(log
+
+)||2 ≤ 2L2(µ + 1)ΓE
+
+(cid:104)||xs+1
+
+D(t) − xs+1
+
+|αt i|·ϕt
+||αt||1
+
+transmitted bits per iteration. Note that before transmitting ζt  we need to encode it to a string  which
+contains 32 bits for δβt and b bits for each coordinate. Since βt is sparse  we only encode the nonzero
+coordinates  i.e.  using log d bits to encode the position of a nonzero element followed by its value.
+
+√
+
+t
+
+t
+
+6
+
+m = ˜x0;
+(cid:80)n
+0 + (1 − θs)˜xs−1  ys
+i=1 ∇fi(˜xs−1); /* Map-reduce global gradient computation
+
+0 = ys−1
+m ;
+
+Algorithm 3 Acc-AsyLPG
+1: Input: S  m  bx  b  ˜x0  y0
+2: for s = 1  2  ...  S do
+3:
+4:
+5:
+6:
+7:
+
+update θs  ηs  xs
+0 = θsys
+Compute ∇f (˜xs−1) = 1
+for t = 0 to m − 1 do
+n
+
+(cid:80)m−1
+
+t=0 xs
+
+t+1;
+
+end for
+˜xs = 1
+m
+
+11:
+12:
+13:
+14: end for
+15: Output: ˜xS.
+
+D(t)) to workers;
+
+||xs
+D(t)||∞
+2bx−1−1   and quantize xs
+
+/* For master:
+(i) Model Parameter Quantization: Set δx =
+Then  send Q(δx bx)(xs
+(ii) Momentum Acceleration:
+Receive local gradient Q(δαt  b)(αt)  compute us
+ys
+t+1 = proxηsh(ys
+/* For worker:
+(i) Receive Q(δx bx)(xs
+gradient αt = ∇fa(Q(δx bx)(xs
+(ii) Gradient Quantization: quantize αt using Step 11 in Algorithm 1;
+
+D(t))) − ∇fa(˜xs−1);
+
+t+1 = ˜xs−1 + θs(ys
+
+t+1 − ˜xs−1);
+
+t − ηsus
+
+t )  xs
+
+D(t))  stochastically sample a data-point a ∈ {1  ...  n} and calculate
+
+8:
+
+9:
+10:
+
+D(t) subject to (4).
+
+t = Q(δαt  b)(αt) + ∇f (˜xs−1) and update
+
+4.3 Accelerated AsyLPG
+
+In the above  we mainly focus on reducing the communication cost within each iteration. Here we
+propose an algorithm with an even faster convergence and fewer communication rounds. Speciﬁcally 
+we incorporate the popular momentum or Nesterov technique [19  26] into AsyLPG. To simplify
+presentation  we only present accelerated AsyLPG (Acc-AsyLPG) in Algorithm 3. The method can
+similarly be applied to Sparse-AsyLPG.
+Algorithm 3 still adopts asynchronous parallelism and double quantization  and makes the following
+key modiﬁcations. (i) In Step 7  the model parameter quantization satisﬁes
+
+EQ||Q(δx bx)(xs
+
+D(t)) − xs
+
+D(t)||2 ≤ θsµ||xs
+
+D(t) − ˜xs−1||2 
+
+t+1. The update of xs
+
+t+1 combines history information ˜xs−1 and ys
+
+(4)
+where µ is the hyperparameter that controls the precision loss. θs is the momentum weights and its
+value will be speciﬁed later. (ii) Momentum acceleration is implemented in Steps 3 and 8  through
+an auxiliary variable ys
+t+1. In
+the following  we show that with the above modiﬁcations  Acc-AsyLPG achieves an even faster
+convergence rate.
+Theorem 4. Suppose each fi(x) and h(x) are convex  Assumptions 1  2  3 hold  and the domain
+Ω of x is bounded by D  such that ∀x  y ∈ Ω ||x − y||2 ≤ D. Let θs = 2
+  where
+σ > 1 is a constant. If σ  τ satisfy τ ≤ 1
+∆ =
+˜O((L/m + LDµ∆/τ + LDµ)/S2).
+
+where
+(2b−1−1)2 + 2  γ = 1 + 2θsµ  then under Algorithm 3  we have E[P (˜xS) − P (x∗)] ≤
+
+s+2   ηs = 1
+σLθs
++ θs∆)
+
++ θs∆(cid:1)2
+
+(cid:104)(cid:113)(cid:0) 2
+
+γ − ( 2
+
++ 4(σ−1)
+
+(cid:105)
+
+γθs
+
+γθs
+
+d
+
+2
+
+√
+The bounded domain condition in Theorem 4 is commonly assumed in literature  e.g.  [32]  and the
+possibility of going outside domain is avoided by the proximal operator in Step 8. If b = O(log
+d)
+and µ = O(1)  the constraint of delay τ can be easily satisﬁed with a moderate σ. Then  our
+Acc-AsyLPG achieves acceleration while effectively reducing the communication cost.
+
+5 Experiments
+
+We conduct experiments to validate the efﬁciency of our algorithms. We start with the logistic
+regression problem and then evaluate the performance of our algorithms on neural network models.
+We further study the relationship of hyperparameter µ and number of transmitted bits.
+
+7
+
+(a) dataset: real-sim
+
+(b) dataset: real-sim
+
+(c) dataset: rcv1
+
+(d) dataset: rcv1
+
+Figure 3: (a) and (c): training curves on real-sim and rcv1. (b): decomposition of time consumption (recorded
+until the training loss is ﬁrst below 0.5). (d): # of transmitted bits until the training loss is ﬁrst below 0.4.
+5.1 Evaluations on Logistic Regression.
+
+We begin with logistic regression on dataset real-sim [7]. The evaluations are setup on a 6-server
+distributed test-bed. Each server has 16 cores and 16GB memory. The communication among
+servers is handled by OpenMPI [21]. We use L1  L2 regularization with weights 10−5 and 10−4 
+B(cid:101). The following six algorithms
+respectively. The mini-batch size B = 200 and epoch length m = (cid:100) n
+are compared  using a constant learning rate (denoted as lr) tuned to achieve the best result from
+{1e−1  1e−2  5e−2  1e−3  5e−3  ...  1e−5  5e−5}.
+(i) AsyLPG  Sparse-AsyLPG  Acc-AsyLPG. We set bx = 8 and b = 8 in these three algorithms. The
+sparsity budget in Sparse-AsyLPG is selected as ϕt = ||αt||1/||αt||∞. We do not tune ϕt to present
+a fair comparison. Parameters in Acc-AsyLPG are set to be θs = 2/(s + 2) and ηs = lr/θs.
+(ii) QSVRG [2]  which is a gradient-quantized algorithm. We implement it in an asynchronous-
+parallelism way. Its gradient quantization method is equivalent to Step 11 in AsyLPG. If run with
+synchronization and without quantization  QSVRG and AsyLPG have the same convergence rate.
+For a fair comparison  we set the gradient quantization bit b = 8 for QSVRG.
+(iii) The full-precision implementations of AsyLPG and Acc-AsyLPG  denoted as AsyFPG and
+Acc-AsyFPG  respectively. In both algorithms  we remove double quantization.
+Convergence and time consumption. Figure 3 presents the evaluations on dataset real-sim. The
+plot (a) shows that AsyLPG and Acc-AsyLPG have similar convergence rates to their full-precision
+counterparts. Our Sparse-AsyLPG also converges fast with a very small accuracy degradation. The
+time consumption presented in the plot (b) shows the communication-efﬁciency of our algorithms.
+With similar convergence rates  our low-precision algorithms signiﬁcantly reduce the communication
+overhead when achieving the same training loss. Moreover  the comparison between AsyLPG and
+QSVRG validates the redundancy of 32 bits representation of model parameter.
+Communication complexity. We experimented logistic regression on dataset rcv1 [7]. The L1 and
+L2 regularization are adopted  both with weights 10−4. lr is tuned in the same way as real-sim. In
+Figure 3(d)  we record the total number of transmitted bits. It shows that AsyLPG  Sparse-AsyLPG 
+Acc-AsyLPG can save up to 6.48×  7.33× and 19.19× bits compared to AsyFPG.
+
+5.2 Evaluations on Neural Network
+
+We conduct evaluations on dataset MNIST [18] using a 3-layer fully
+connected neural network. The 6-server distributed test-bed in Sec-
+tion 5.1 is adopted. The hidden layer contains 100 nodes  and uses
+ReLU activation function. Softmax loss function and L2 regularizer
+with weight 10−4 are adopted. We use 10k training and 2k test samples
+which are randomly drawn from the full dataset (60k training / 10k
+test). The mini-batch size is 20 and the epoch size m is 500. We set
+bx = 8 and b = 4 for low-precision algorithms.
+We also compare our algorithms with HALP [9]  which is a low-
+precision variant of SVRG with quantized model vectors. We im-
+plement its distributed version with asynchronous parallelism. For a
+fair comparison  we also set bx = 8 for HALP. lr is constant and is
+tuned to achieve the best result for each algorithm. Figure 4 presents the convergence of the seven
+algorithms. In the left table of Table 1  we record the total number of transmitted bits. We see
+that the results are similar as in the logistic regression case  i.e.  our new low-precision algorithms
+can signiﬁcantly reduce communication overhead compared to their full-precision counterparts and
+
+Figure 4: Evaluation on dataset
+MNIST. Top: the training curve.
+Bottom: the test error rate.
+
+8
+
+020406080100# of epochs0.10.20.30.40.50.60.7Loss function's valueAsyLPGSparse-AsyLPGAcc-AsyLPGAsyFPGQSVRGAcc-AsyFPGAsyFPGAcc-AsyFPGQSVRGAsyLPGSparse-AsyLPGAcc-AsyLPG010203040506070Time (s)ComputationEncodingTransmissionDecoding020406080100# of epochs0.10.20.30.40.50.60.7Loss function's valueAsyLPGSparse-AsyLPGAcc-AsyLPGAsyFPGQSVRGAcc-AsyFPGAsyFPGAcc-AsyFPGQSVRGAsyLPGSparse-AsyLPGAcc-AsyLPG1010# of bits1.00x2.21x3.04x6.48x7.33x19.19x20406080100# of epochs0.00.10.20.30.4Loss function's valueAsyLPGHALPSparse-AsyLPGAcc-AsyLPGAsyFPGQSVRGAcc-AsyFPG20406080100# of epochs0.100.150.200.25Test error rateAsyLPGHALPSparse-AsyLPGAcc-AsyLPGAsyFPGQSVRGAcc-AsyFPGFigure 6: Evaluations on CIFAR10: training loss (1st column)  test accuracy (2nd column) and total number of
+transmitted bits.
+Table 1: Evaluation on dataset MNIST. Left: # of transmitted bits until the training loss is ﬁrst below 0.05. Right:
+The value of bx and # of transmitted bits of AsyLPG under different µ.
+
+# bits
+Algorithm
+2.42e9
+AsyFPG
+6.87e8
+Acc-AsyFPG
+4.50e8
+QSVRG
+7.36e8
+HALP
+3.33e8
+AsyLPG
+Sparse-AsyLPG 2.73e8
+Acc-AsyLPG
+1.26e8
+
+Ratio
+−
+3.52×
+5.38×
+3.29×
+7.28×
+8.87×
+19.13×
+
+µ
+0.005
+0.01
+0.05
+0.1
+0.5
+
+bx
+11
+10
+9
+8
+7
+
+# bits
+2.42e7
+2.33e7
+1.52e7
+1.07e7
+1.12e7
+
+µ
+2.0
+10
+50
+150
+800
+
+bx
+6
+5
+4
+3
+2
+
+# bits
+1.24e7
+1.14e7
+1.08e7
+1.44e7
+2.16e8
+
+QSVRG. Moreover  our AsyLPG with double quantization has comparable convergence rate to HALP
+while sending much less bits.
+Study of µ. The hyperparameter µ is set to control the precision loss incurred by model pa-
+rameter quantization. Before  we ﬁx bx to compare our algorithms with other methods. Now
+we study the relationship of µ and transmitted bits. Note that when µ is ﬁxed  we choose bx
+to satisfy (2).
+In Figure 5  we set µ = 0.6 and study how the accuracy of model quantizer
+improves with iterations when running AsyLPG on MNIST. We see that the quantization error
+diminishes. Thus  the number of transmitted bits increases as the number of iteration grows.
+Next  in the right table of Table 1  we study the performance of AsyLPG
+under different µ. The value bx is also chosen by guaranteeing (2). We
+provide the overall numbers of transmitted bits under different bx until
+the training loss is ﬁrst less than 0.5. The results validate that with the
+increasing µ  we can choose a smaller bx  to save more communication
+cost per iteration. The total number of transmitted bits decreases until
+a threshold µ = 0.5  beyond which signiﬁcant precision loss happens
+and we need more training iterations for achieving the same accuracy.
+Evaluations on Deep Model. We further set up experiments on PyTorch with ResNet18 [11] on
+CIFAR10 dataset [16]. The model size is about 44MB. We use 50k training samples and 10k
+evaluation samples. For direct comparison  no data augmentation is used. The batch size is 128. The
+learning rate starts from 0.1  and is divided by 10 at 150 and 250 epochs. We set bx = 8  b = 4 for
+low-precision algorithms. The sparsity budget ϕt = ||αt||1/||αt||∞. In Figure 6  we plot the training
+loss and test accuracy with respect to epochs  and provide the total transmitted bits until the training
+loss ﬁrst gets below 0.17. It shows that our algorithms achieve similar accuracy and effectively reduce
+the communication cost compared to benchmarks.
+
+Figure 5: The accuracy of
+model quantizer.
+
+6 Conclusion
+
+We propose three communication-efﬁcient algorithms for distributed training with asynchronous
+parallelism. The key idea is quantizing both model parameters and gradients  called double quan-
+tization. We analyze the variance of low-precision gradients and show that our algorithms achieve
+the same asymptotic convergence rate as the full-precision algorithms  while transmitting much
+fewer bits per iteration. We also incorporate gradient sparsiﬁcation into double quantization  and
+setup relation between convergence rate and sparsity budget. We accelerate double quantization by
+integrating momentum techniques. The evaluations on logistic regression and neural network based
+on real-world datasets validate that our algorithms can signiﬁcantly reduce communication cost.
+
+Acknowledgments
+The work of Yue Yu and Longbo Huang was supported in part by the National Natural Science
+Foundation of China Grant 61672316  the Zhongguancun Haihua Institute for Frontier Information
+Technology and the Turing AI Institute of Nanjing. We would like to thank anonymous reviewers for
+their insightful suggestions.
+
+9
+
+0100200300Epochs0.00.51.01.52.0Loss functions valueAsyLPGSparse-AsyLPGAcc-AsyLPGAsyFPGAcc-AsyFPGQSVRG0100200300Epochs30405060708090Test accuracyAsyLPGSparse-AsyLPGAcc-AsyLPGAsyFPGAcc-AsyFPGQSVRGAsyFPGAcc-AsyFPGQSVRGAsyLPGSparse-AsyLPGAcc-AsyLPG1014# of bits1.00X1.11X3.45X6.03X8.17X8.59X024681012141618Epochs0.02.55.07.5Quantization errorReferences
+[1] A. F. Aji and K. Heaﬁeld. Sparse communication for distributed gradient descent. In Proceedings
+
+of the 2017 Conference on Empirical Methods in Natural Language Processing  2017.
+
+[2] D. Alistarh  D. Grubic  J. Li  R. Tomioka  and M. Vojnovic. Qsgd: Communication-efﬁcient
+sgd via gradient quantization and encoding. In Advances in Neural Information Processing
+Systems  pages 1709–1720  2017.
+
+[3] D. Alistarh  T. Hoeﬂer  M. Johansson  N. Konstantinov  S. Khirirat  and C. Renggli. The
+convergence of sparsiﬁed gradient methods. In Advances in Neural Information Processing
+Systems  pages 5977–5987  2018.
+
+[4] R. Bekkerman  M. Bilenko  and J. Langford. Scaling up machine learning: Parallel and
+
+distributed approaches. Cambridge University Press  2011.
+
+[5] J. Bernstein  Y.-X. Wang  K. Azizzadenesheli  and A. Anandkumar. signSGD: Compressed
+Optimisation for Non-Convex Problems. In International Conference on Machine Learning
+(ICML)  2018.
+
+[6] J. Bernstein  Y.-X. Wang  K. Azizzadenesheli  and A. Anandkumar. signSGD with Majority
+Vote is Communication Efﬁcient and Fault Tolerant. In International Conference on Learning
+Representations (ICLR)  2019.
+
+[7] C.-C. Chang and C.-J. Lin. Libsvm: a library for support vector machines. ACM transactions
+
+on intelligent systems and technology (TIST)  2(3):27  2011.
+
+[8] C. De Sa  M. Feldman  C. Ré  and K. Olukotun. Understanding and optimizing asynchronous
+low-precision stochastic gradient descent. In Proceedings of the 44th Annual International
+Symposium on Computer Architecture  pages 561–574. ACM  2017.
+
+[9] C. De Sa  M. Leszczynski  J. Zhang  A. Marzoev  C. R. Aberger  K. Olukotun  and C. Ré.
+
+High-accuracy low-precision training. arXiv preprint:1803.03383  2018.
+
+[10] J. Dean  G. Corrado  R. Monga  K. Chen  M. Devin  M. Mao  A. Senior  P. Tucker  K. Yang 
+Q. V. Le  et al. Large scale distributed deep networks. In Advances in Neural Information
+Processing Systems  pages 1223–1231  2012.
+
+[11] K. He  X. Zhang  S. Ren  and J. Sun. Deep residual learning for image recognition.
+
+In
+Proceedings of the IEEE conference on computer vision and pattern recognition  pages 770–
+778  2016.
+
+[12] Z. Huo and H. Huang. Asynchronous stochastic gradient descent with variance reduction for
+
+non-convex optimization. arXiv preprint arXiv:1604.03584  2016.
+
+[13] P. Jiang and G. Agrawal. A linear speedup analysis of distributed deep learning with sparse
+and quantized communication. In Advances in Neural Information Processing Systems  pages
+2525–2536. Curran Associates  Inc.  2018.
+
+[14] R. Johnson and T. Zhang. Accelerating stochastic gradient descent using predictive variance
+
+reduction. In Advances in Neural Information Processing Systems  pages 315–323  2013.
+
+[15] S. P. Karimireddy  Q. Rebjock  S. U. Stich  and M. Jaggi. Error feedback ﬁxes signsgd and other
+gradient compression schemes. In International Conference on Machine Learning (ICML) 
+2019.
+
+[16] A. Krizhevsky  G. Hinton  et al. Learning multiple layers of features from tiny images. Technical
+
+report  Tech Report  2009.
+
+[17] X. Lian  Y. Huang  Y. Li  and J. Liu. Asynchronous parallel stochastic gradient for nonconvex
+optimization. In Advances in Neural Information Processing Systems  pages 2737–2745  2015.
+
+[18] MNIST. http://yann.lecun.com/exdb/mnist/.
+
+10
+
+[19] Y. Nesterov. A method of solving a convex programming problem with convergence rate o
+
+(1/k2). In Soviet Mathematics Doklady  volume 27  pages 372–376  1983.
+
+[20] Y. Nesterov. Introductory Lectures on Convex Optimization: A Basic Course. Springer  2003.
+
+[21] OpenMPI. https://www.open-mpi.org/.
+
+[22] B. Recht  C. Re  S. Wright  and F. Niu. Hogwild: A lock-free approach to parallelizing stochastic
+gradient descent. In Advances in Neural Information Processing Systems  pages 693–701  2011.
+
+[23] S. J. Reddi  A. Hefny  S. Sra  B. Poczos  and A. J. Smola. On variance reduction in stochastic
+gradient descent and its asynchronous variants. In Advances in Neural Information Processing
+Systems  pages 2647–2655  2015.
+
+[24] S. J. Reddi  S. Sra  B. Poczos  and A. Smola. Fast stochastic methods for nonsmooth nonconvex
+
+optimization. In Advances in Neural Information Processing Systems  2016.
+
+[25] F. Seide  H. Fu  J. Droppo  G. Li  and D. Yu. 1-bit stochastic gradient descent and its application
+to data-parallel distributed training of speech dnns. In Fifteenth Annual Conference of the
+International Speech Communication Association  2014.
+
+[26] F. Shang  Y. Liu  J. Cheng  and J. Zhuo. Fast stochastic variance reduced gradient method with
+
+momentum acceleration for machine learning. arXiv preprint arXiv:1703.07948  2017.
+
+[27] S. U. Stich  J.-B. Cordonnier  and M. Jaggi. Sparsiﬁed sgd with memory. In Advances in Neural
+
+Information Processing Systems  pages 4452–4463  2018.
+
+[28] H. Tang  S. Gan  C. Zhang  T. Zhang  and J. Liu. Communication compression for decentralized
+
+training. In Advances in Neural Information Processing Systems  pages 7652–7662  2018.
+
+[29] H. Tang  C. Yu  X. Lian  T. Zhang  and J. Liu. Doublesqueeze: Parallel stochastic gradient
+descent with double-pass error-compensated compression. In International Conference on
+Machine Learning (ICML)  2019.
+
+[30] H. Wang  S. Sievert  S. Liu  Z. Charles  D. Papailiopoulos  and S. Wright. Atomo:
+Communication-efﬁcient learning via atomic sparsiﬁcation. In Advances in Neural Information
+Processing Systems  2018.
+
+[31] J. Wang  M. Kolar  N. Srebro  and T. Zhang. Efﬁcient distributed learning with sparsity.
+In Proceedings of the 34th International Conference on Machine Learning  volume 70 of
+Proceedings of Machine Learning Research  pages 3636–3645  International Convention Centre 
+Sydney  Australia  06–11 Aug 2017. PMLR.
+
+[32] J. Wang  W. Wang  and N. Srebro. Memory and communication efﬁcient distributed stochastic
+
+optimization with minibatch-prox. Conference on Learning Theory (COLT)  2017.
+
+[33] J. Wangni  J. Wang  J. Liu  and T. Zhang. Gradient sparsiﬁcation for communication-efﬁcient
+
+distributed optimization. In Advances in Neural Information Processing Systems  2018.
+
+[34] W. Wen  C. Xu  F. Yan  C. Wu  Y. Wang  Y. Chen  and H. Li. Terngrad: Ternary gradients
+to reduce communication in distributed deep learning. In Advances in Neural Information
+Processing Systems  pages 1509–1519  2017.
+
+[35] J. Wu  W. Huang  J. Huang  and T. Zhang. Error compensated quantized sgd and its applications
+to large-scale distributed optimization. In International Conference on Machine Learning
+(ICML)  2018.
+
+[36] P. Yin  S. Zhang  J. Lyu  S. Osher  Y. Qi  and J. Xin. Binaryrelax: A relaxation approach for
+training deep neural networks with quantized weights. SIAM Journal on Imaging Sciences 
+11(4):2205–2223  2018.
+
+[37] Y. Yu  J. Wu  and J. Huang. Exploring fast and communication-efﬁcient algorithms in large-
+scale distributed networks. In Proceedings of The 22nd International Conference on Artiﬁcial
+Intelligence and Statistics (AISTATS)  2019.
+
+11
+
+[38] H. Zhang  J. Li  K. Kara  D. Alistarh  J. Liu  and C. Zhang. Zipml: Training linear models
+with end-to-end low precision  and a little bit of deep learning. In International Conference on
+Machine Learning (ICML)  pages 4035–4043  2017.
+
+[39] X. Zhang  J. Liu  Z. Zhu  and E. S. Bentley. Compressed distributed gradient descent:
+Communication-efﬁcient consensus over networks. In IEEE INFOCOM 2019-IEEE Conference
+on Computer Communications  pages 2431–2439. IEEE  2019.
+
+[40] S. Zheng  Z. Huang  and J. T. Kwok. Communication-efﬁcient distributed blockwise momentum
+
+sgd with error-feedback. In Advances in Neural Information Processing Systems  2019.
+
+12
+
+,Yue Yu
+Jiaxiang Wu
+Longbo Huang

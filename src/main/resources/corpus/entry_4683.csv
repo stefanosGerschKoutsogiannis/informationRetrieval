@@ -1,0 +1,821 @@
+2019,Reliable training and estimation of variance networks,We propose and investigate new complementary methodologies for estimating predictive variance networks in regression neural networks. We derive a locally aware mini-batching scheme that results in sparse robust gradients  and we show how to make unbiased weight updates to a variance network. Further  we formulate a heuristic for robustly fitting both the mean and variance networks post hoc. Finally  we take inspiration from posterior Gaussian processes and propose a network architecture with similar extrapolation properties to Gaussian processes. The proposed methodologies are complementary  and improve upon baseline methods individually. Experimentally  we investigate the impact of predictive uncertainty on multiple datasets and tasks ranging from regression  active learning and generative modeling. Experiments consistently show significant improvements in predictive uncertainty estimation over state-of-the-art methods across tasks and datasets.,Reliable training and estimation of variance networks
+
+Nicki S. Detlefsen∗ †
+
+nsde@dtu.dk
+
+Martin Jørgensen* †
+
+marjor@dtu.dk
+
+Søren Hauberg †
+sohau@dtu.dk
+
+Abstract
+
+We propose and investigate new complementary methodologies for estimating
+predictive variance networks in regression neural networks. We derive a locally
+aware mini-batching scheme that results in sparse robust gradients  and we show
+how to make unbiased weight updates to a variance network. Further  we formulate
+a heuristic for robustly ﬁtting both the mean and variance networks post hoc. Finally 
+we take inspiration from posterior Gaussian processes and propose a network
+architecture with similar extrapolation properties to Gaussian processes. The
+proposed methodologies are complementary  and improve upon baseline methods
+individually. Experimentally  we investigate the impact of predictive uncertainty on
+multiple datasets and tasks ranging from regression  active learning and generative
+modeling. Experiments consistently show signiﬁcant improvements in predictive
+uncertainty estimation over state-of-the-art methods across tasks and datasets.
+
+1
+
+Introduction
+
+The quality of mean predictions has dramatically increased in the last decade with the rediscovery of
+neural networks [LeCun et al.  2015]. The predictive variance  however  has turned out to be a more
+elusive target  with established solutions being subpar. The general ﬁnding is that neural networks
+tend to make overconﬁdent predictions [Guo et al.  2017] that can be harmful or offensive [Amodei
+et al.  2016]. This may be explained by neural networks being general function estimators that does
+not come with principled uncertainty estimates. Another explanation is that variance estimation is a
+fundamentally different task than mean estimation  and that the tools for mean estimation perhaps do
+not generalize. We focus on the latter hypothesis within regression.
+To illustrate the main practical problems in variance estimation  we
+consider a toy problem where data is generated as y = x · sin(x) +
+0.3·1 +0.3·x·2  with 1  2 ∼ N (0  1) and x is uniform on [0  10]
+(Fig. 1). As is common  we do maximum likelihood estimation of
+N (µ(x)  σ2(x))  where µ and σ2 are neural nets. While µ provides
+an almost perfect ﬁt to the ground truth  σ2 shows two problems: σ2
+is signiﬁcantly underestimated and σ2 does not increase outside the
+data support to capture the poor mean predictions.
+These ﬁndings are general (Sec. 4)  and alleviating them is the main
+purpose of the present paper. We ﬁnd that this can be achieved by a
+combination of methods that 1) change the usual mini-batching to be location aware; 2) only optimize
+variance conditioned on the mean; 3) for scarce data  we introduce a more robust likelihood function;
+and 4) enforce well-behaved interpolation and extrapolation of variances. Points 1 and 2 are achieved
+through changes to the training algorithm  while 3 and 4 are changes to model speciﬁcations. We
+empirically demonstrate that these new tools signiﬁcantly improve on state-of-the-art across datasets
+in tasks ranging from regression to active learning  and generative modeling.
+
+Figure 1: Max. likelihood ﬁt
+of N (µ(x)  σ2(x)) to data.
+
+∗Equal contribution
+†Section for Cognitive Systems  Technical University of Denmark
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+2 Related work
+
+Gaussian processes (GPs) are well-known function approximators with built-in uncertainty estima-
+tors [Rasmussen and Williams  2006]. GPs are robust in settings with a low amount of data  and
+can model a rich class of functions with few hyperparameters. However  GPs are computationally
+intractable for large amounts of data and limited by the expressiveness of a chosen kernel. Advances
+like sparse and deep GPs [Snelson and Ghahramani  2006  Damianou and Lawrence  2013] partially
+alleviate this  but neural nets still tend to have more accurate mean predictions.
+Uncertainty aware neural networks model the predictive mean and variance as two separate neural
+networks  often as multi-layer perceptrons. This originates with the work of Nix and Weigend [1994]
+and Bishop [1994]; today  the approach is commonly used for making variational approximations
+[Kingma and Welling  2013  Rezende et al.  2014]  and it is this general approach we investigate.
+Bayesian neural networks (BNN) [MacKay  1992] assume a prior distribution over the network
+parameters  and approximate the posterior distribution. This gives direct access to the approximate
+predictive uncertainty. In practice  placing an informative prior over the parameters is non-trivial.
+Even with advances in stochastic variational inference [Kingma and Welling  2013  Rezende et al. 
+2014  Hoffman et al.  2013] and expectation propagation [Hernández-Lobato and Adams  2015]  it is
+still challenging to perform inference in BNNs.
+Ensemble methods represent the current state-of-the-art. Monte Carlo (MC) Dropout [Gal and
+Ghahramani  2016] measure the uncertainty induced by Dropout layers [Hinton et al.  2012] arguing
+that this is a good proxy for predictive uncertainty. Deep Ensembles [Lakshminarayanan et al. 
+2017] form an ensemble from multiple neural networks trained with different initializations. Both
+approaches obtain ensembles of correlated networks  and the extent to which this biases the predictive
+uncertainty is unclear. Alternatives include estimating conﬁdence intervals instead of variances
+[Pearce et al.  2018]  and gradient-based Bayesian model averaging [Maddox et al.  2019].
+Applications of uncertainty include reinforcement learning  active learning  and Bayesian optimiza-
+tion [Szepesvári  2010  Huang et al.  2010  Frazier  2018]. Here  uncertainty is the crucial element
+that allows for systematically making a trade-off between exploration and exploitation. It has also
+been shown that uncertainty is required to learn the topology of data manifolds [Hauberg  2018].
+The main categories of uncertainty are epistemic and aleatoric uncertainty [Kiureghian and
+Ditlevsen  2009  Kendall and Gal  2017]. Aleatoric uncertainty is induced by unknown or un-
+measured features  and  hence  does not vanish in the limit of inﬁnite data. Epistemic uncertainty
+is often referred to as model uncertainty  as it is the uncertainty due to model limitations. It is this
+type of uncertainty that Bayesian and ensemble methods generally estimate. We focus on the overall
+predictive uncertainty  which reﬂects both epistemic and aleatoric uncertainty.
+
+3 Methods
+
+The opening remarks (Sec. 1) highlighted two common problems that appear when µ and σ2 are
+neural networks. In this section we analyze these problems and propose solutions.
+Preliminaries. We assume that datasets D = {xi  yi}N
+i=1 contain i.i.d. observations yi ∈ R  xi ∈
+(cid:80)
+RD. The targets yi are assumed to be conditionally Gaussian  pθ(y|x) = N (y|µ(x)  σ2(x))  where
+µ and σ2 are continuous functions parametrized by θ = {θµ  θσ2}. The maximum likelihood estimate
+(MLE) of the variance of i.i.d. observations {yi}N
+i(yi − ˆµ)2  where ˆµ is the sample
+mean. This MLE does not exist based on a single observation  unless the mean µ is known  i.e. the
+mean is not a free parameter. When yi is Gaussian  the residuals (yi − µ)2 are gamma distributed.
+
+i=1 is
+
+1
+
+N−1
+
+3.1 A local likelihood model analysis
+
+By assuming that both µ and σ2 are continuous functions  we are implicitly saying that σ2(x) is
+correlated with σ2(x + δ) for sufﬁciently small δ  and similar for µ. Consider the local likelihood
+estimation problem [Loader  1999  Tibshirani and Hastie  1987] at a point xi 
+
+log ˜pθ(yi|xi) =
+
+wj(xi) log pθ(yj|xj) 
+
+(1)
+
+N(cid:88)
+
+j=1
+
+2
+
+where wj is a function that declines as (cid:107)xj − xi(cid:107) increases  implying that the local likelihood at xi
+is dependent on the points nearest to xi. Notice ˜pθ(yi|xi) = pθ(yi|xi) if wj(xi) = 1i=j. Consider 
+with this w  a uniformly drawn subsample (i.e. a standard mini-batch) of the data {xk}M
+k=1 and its
+corresponding stochastic gradient of Eq. 1 with respect to θσ2. If for a point  xi  no points near it
+are in the subsample  then no other point will inﬂuence the gradient of σ2(xi)  which will point in
+the direction of the MLE  that is highly uninformative as it does not exist unless µ(xi) is known.
+Local data scarcity  thus  implies that while we have sufﬁcient data for ﬁtting a mean  locally we
+have insufﬁcient data for ﬁtting a variance. Essentially  if a point is isolated in a mini-batch  all
+information it carries goes to updating µ and none is present for σ2.
+If we do not use mini-batches  we encounter that gradients wrt. θµ and θσ2 will both be scaled with
+2σ2(x) meaning that points with small variances effectively have higher learning rates [Nix and
+Weigend  1994]. This implies a bias towards low-noise regions of data.
+
+1
+
+3.2 Horvitz-Thompson adjusted stochastic gradients
+
+We will now consider a solution to this problem within the local likelihood framework  which will
+give us a reliable  but biased  stochastic gradient for the usual (nonlocal) log-likelihood. We will then
+show how this can be turned into an unbiased estimator.
+If we are to add some local information  giving more reliable gradients  we should choose a w in Eq.1
+that reﬂects this. Assume for simplicity that wj(xi) = 1(cid:107)xi−xj(cid:107)<d for some d > 0. The gradient
+of log ˜pθ(y|xi) will then be informative  as more than one observation will contribute to the local
+variance if d is chosen appropriately. Accordingly  we suggest a practical mini-batching algorithm
+that samples a random point xj and we let the mini-batch consist of the k nearest neighbors of xj.3
+In order to allow for more variability in a mini-batch  we suggest sampling m points uniformly 
+and then sampling n points among the k nearest neighbors of each of the m initially sampled
+points. Note that this is a more informative sample  as all observations in the sample are likely to
+inﬂuence the same subset of parameters in θ  effectively increasing the degrees of freedom4  hence
+the quality of variance estimation. In other words  if the variance network is sufﬁciently expressive 
+our Monte Carlo gradients under this sampling scheme are of smaller variation and more sparse. In
+the supplementary material  we empirically show that this estimator yields signiﬁcantly more sparse
+gradients  which results in improved convergence. Pseudo-code of this sampling-scheme  can be
+found in the supplementary material.
+While such a mini-batch would give rise to an informative stochastic gradient  it would not be an
+unbiased stochastic gradient of the (nonlocal) log-likelihood. This can  however  be adjusted by using
+the Horvitz-Thompson (HT) algorithm [Horvitz and Thompson  1952]  i.e. rescaling the log-likelihood
+contribution of each sample xj by its inclusion probability πj. With this  an unbiased estimate of the
+log-likelihood (up to an additive constant) becomes
+
+log(σ2(xi)) − (yi − µ(xi))2
+
+2σ2(xi)
+
+− 1
+2
+
+log(σ2(xj)) − (yj − µ(xj))2
+
+2σ2(xj)
+
+− 1
+2
+
+1
+πj
+
+(2)
+
+where O denotes the mini-batch. With the nearest neighbor mini-batching  the inclusion probabilities
+can be calculated as follows. The probability that observation j is in the sample is n/k if it is among
+the k nearest neighbors of one of the initial m points  which are chosen with probability m/N  i.e.
+
+(cid:26)
+
+N(cid:88)
+
+i=1
+
+(cid:27)
+
+(cid:26)
+
+(cid:27)
+
+≈ (cid:88)
+
+xj∈O
+
+N(cid:88)
+
+i=1
+
+n
+k
+where Ok(i) denotes the k nearest neighbors of xi.
+
+πj =
+
+m
+N
+
+1j∈Ok(i) 
+
+(3)
+
+Computational costs The proposed sampling scheme requires an upfront computational cost of
+O(N 2D) before any training can begin. We stress that this is pre-training computation and not
+
+3By convention  we say that the nearest neighbor of a point is the point itself.
+4Degrees of freedom here refers to the parameters in a Gamma distribution – the distribution of variance
+estimators under Gaussian likelihood. Degrees of freedom in general is a quite elusive quantity in regression
+problems.
+
+3
+
+updated during training. The cost is therefore relative small  compared to training a neural network
+for small to medium size datasets. Additionally  we note that the search algorithm does not have to
+be precise  and we could therefore take advantage of fast approximate nearest neighbor algorithms
+[Fu and Cai  2016].
+
+3.3 Mean-variance split training
+
+The most common training strategy is to ﬁrst optimize θµ assuming a constant σ2  and then proceed
+to optimize θ = {θµ  θσ2} jointly  i.e. a warm-up of µ. As previously noted  the MLE of σ2 does
+not exist when only a single observation is available and µ is unknown. However  the MLE does
+exist when µ is known  in which case it is ˆσ2(xi) = (yi − µ(xi))2  assuming that the continuity of
+σ2 is not crucial. This observation suggests that the usual training strategy is substandard as σ2 is
+never optimized assuming µ is known. This is easily solved: we suggest to never updating µ and σ2
+simultaneously  i.e. only optimize µ conditioned on σ2  and vice versa. This reads as sequentially
+optimizing pθ(y|θµ) and pθ(y|θσ2)  as we under these conditional distributions we may think of µ
+and σ2 as known  respectively. We will refer to this as mean-variance split training (MV).
+
+3.4 Estimating distributions of variance
+
+When σ2(xi) is inﬂuenced by few observations  underestimation is still likely due to the left skewness
+i = (yi − µ(xi))2. As always  when in a low data regime  it is sensible
+of the gamma distribution of ˆσ2
+to be Bayesian about it; hence instead of point estimating ˆσ2
+i we seek to ﬁnd a distribution. Note
+that we are not imposing a prior  we are training the parameters of a Bayesian model. We choose
+the inverse-Gamma distribution  as this is the conjugate prior of σ2 when data is Gaussian. This
+means θσ2 = {θα  θβ} where α  β > 0 are the shape and scale parameters of the inverse-Gamma
+respectively. So the log-likelihood is now calculated by integrating out σ2
+
+N (yi|µi  σ2
+
+i )dσ2
+
+log pθ(yi) = log
+
+i = log tµi αi βi (yi) 
+
+(4)
+i ∼ INV-GAMMA(αi  βi) and αi = α(xi)  βi = β(xi) are modeled as neural networks.
+where σ2
+Having an inverse-Gamma prior changes the predictive distribution to a located-scaled5 Student-t
+distribution  parametrized with µ  α and β. Further  the t-distribution is often used as a replacement
+of the Gaussian when data is scarce and the true variance is unknown and yields a robust regression
+[Gelman et al.  2014  Lange et al.  1989]. We let α and β be neural networks that implicitly determine
+the degrees of freedom and the scaling of the distribution. Recall the higher the degrees of freedom 
+the better the Gaussian approximation of the t-distribution.
+
+(cid:90)
+
+3.5 Extrapolation architecture
+
+ˆσ2(x0) =(cid:0)1 − ν(δ(x0))(cid:1)ˆσ2
+
+If we evaluate the local log-likelihood (Eq. 1) at a point x0 far away from all data points  then
+the weights wi(x0) will all be near (or exactly) zero. Consequently  the local log-likelihood is
+approximately 0 regardless of the observed value y(x0)  which should be interpreted as a large
+entropy of y(x0). Since we are working with Gaussian and t-distributed variables  we can recreate
+this behavior by exploiting the fact that entropy is only an increasing function of the variance. We can
+re-enact this behavior by letting the variance tend towards an a priori determined value η if x0 tends
+away from the training data. Let {ci}L
+i=1 be points in RD that represent the training data  akin to
+inducing points in sparse GPs [Snelson and Ghahramani  2006]. Then deﬁne δ(x0) = mini (cid:107)ci−x0(cid:107)
+and
+
+θ + ην(δ(x0)) 
+
+(5)
+where ν : [0 ∞) (cid:55)→ [0  1] is a surjectively increasing function. Then the variance estimate will go to
+η as δ → ∞ at a rate determined by ν. In practice  we choose ν to be a scaled-and-translated sigmoid
+function: ν(x) = sigmoid((x + a)/γ)  where γ is a free parameter we optimize during training and
+a ≈ −6.9077γ to ensure that ν(0) ≈ 0. The inducing points ci are initialized with k-means and
+optimized during training. This choice of architecture is similar to that attained by posterior Gaussian
+processes when the associated covariance function is stationary. It is indeed the behavior of these
+established models that we aim to mimic with Eq. 5.
+
+5This means y ∼ F   where F = µ + σt(ν). The explicit density can be found in the supplementary material.
+
+4
+
+4 Experiments
+
+4.1 Regression
+
+To test our methodologies we conduct multiple experiments in various settings. We compare our
+method to state-of-the-art methods for quantifying uncertainty: Bayesian neural network (BNN)
+[Hernández-Lobato and Adams  2015]  Monte Carlo Dropout (MC-Dropout) [Gal and Ghahramani 
+2016] and Deep Ensembles (Ens-NN) [Lakshminarayanan et al.  2017]. Additionally we compare to
+two baseline methods: standard mean-variance neural network (NN) [Nix and Weigend  1994] and
+GPs (sparse GPs (SGP) when standard GPs are not applicable) [Rasmussen and Williams  2006]. We
+refer to our own method(s) as Combined  since we apply all the methodologies described in Sec. 3.
+Implementation details and code can be found in the supplementary material. Strict comparisons
+of the models should be carefully considered; having two seperate networks to model mean and
+variance seperately (as NN  Ens-NN and Combined) means that all the predictive uncertainty  i.e. both
+aleatoric and episteminc  is modeled by the variance networks alone. BNN and MC-Dropout have a
+higher emphasis on modeling epistemic uncertainty  while GPs have the cleanest separation of noise
+and model uncertainty estimation. Despite the methods quantifying different types of uncertainty 
+their results can still be ranked by test set log-likelihood  which is a proper scoring function.
+
+Toy regression. We ﬁrst return to the toy problem of Sec. 1  where we consider 500 points from
+y = x · sin(x) + 0.3 · 1 + 0.3 · x · 2  with 1  2 ∼ N (0  1). In this example  the variance is
+heteroscedastic  and models should estimate larger variance for larger values of x. The results6 can
+be seen in Figs. 2 and 3. Our approach is the only one to satisfy all of the following: capture the
+heteroscedasticity  extrapolate high variance outside data region and not underestimating within.
+
+Figure 2: From top left to bottom right: GP  NN 
+BNN  MC-Dropout  Ens-NN  Combined.
+
+Figure 3: Standard deviation estimates
+as a function of x.
+
+Variance calibration. To our knowledge  no benchmark for quantifying variance estimation exists.
+We propose a simple dataset with known uncertainty information. More precisely  we consider
+weather data from over 130 years.7 Each day the maximum temperature is measured  and the
+uncertainty is then given as the variance in temperature over the 130 years. The ﬁtted models can
+be seen in Fig. 4. Here we measure performance by calculating the mean error in uncertainty:
+est(xi)|. The numbers are reported above each ﬁt. We observe that our
+Err = 1
+N
+Combined model achieves the lowest error of all the models  closely followed by Ens-NN and GP.
+Both NN  BNN and MC-Dropout all severely underestimate the uncertainty.
+
+(cid:80)N
+i=1 |σ2
+
+true(xi) − σ2
+
+Ablation study. To determine the inﬂuence of each methodology from Sec. 3  we experimented
+with four UCI regression datasets (Fig. 5). We split our contributions in four: the locality sampler
+(LS)  the mean-variance split (MV)  the inverse-gamma prior (IG) and the extrapolating architecture
+(EX). The combined model includes all four tricks. The results clearly shows that LS and IG
+methodologies has the most impact on test set log likelihood  but none of the methodologies perform
+worse than the baseline model. Combined they further improves the results  indicating that the
+proposed methodologies are complementary.
+
+6The standard deviation plotted for Combined  is the root mean of the inverse-Gamma.
+7https://mrcc.illinois.edu/CLIMATE/Station/Daily/StnDyBTD2.jsp
+
+5
+
+x89/%7:089/!
+7454:938
+42-30/(a) GP
+
+(f) Combined
+Figure 4: Weather data with uncertainties. Dots are datapoints  green lines are the true uncertainty 
+blue curves are mean predictions and the blue shaded areas are the estimated uncertainties.
+
+(d) MC-Dropout
+
+(e) Ens-NN
+
+(c) BNN
+
+(b) NN
+
+Figure 5: The complementary methodologies from Sec. 3 evaluated on UCI benchmark datasets.
+
+UCI benchmark. We now follow the experimental setup from Hernández-Lobato and Adams
+[2015]  by evaluating models on a number of regression datasets from the UCI machine learning
+database. Additional to the standard benchmark  we have added 4 datasets. Test set log-likelihood can
+be seen in Table 1  and the corresponding RMSE scores can be found in the supplementary material.
+Our Combined model performs best on 10 of the 13 datasets. For the small Boston and Yacht datasets 
+the standard GP performs the best  which is in line with the experience that GPs perform well when
+data is scarce. On these datasets our model is the best-performing neural network. On the Energy
+and Protein datasets Ens-NN perform the best  closely followed by our Combined model. One clear
+advantage of our model compared to Ens-NN is that we only need to train one model  whereas
+Ens-NN need to train 5+ (see the supplementary material for training times for each model). The
+worst performing model in all cases is the baseline NN model  which clearly indicates that the usual
+tools for mean estimation does not carry over to variance estimation.
+
+Active learning. The performance of active learning depends on predictive uncertainty [Settles 
+2009]  so we use this to demonstrate the improvements induced by our method. We use the same
+network architectures and datasets as in the UCI benchmark. Each dataset is split into: 20% train  60%
+pool and 20% test. For each active learning iteration  we ﬁrst train a model  evaluate the performance
+on the test set and then estimate uncertainty for all datapoints in the pool. We then select the n points
+with highest variance (corresponding to highest entropy [Houlsby et al.  2012]) and add these to the
+
+GP
+
+NN
+
+BNN
+
+SGP
+
+Combined
+
+MC-Dropout
+
+Ens-NN
+
+D
+N
+13 −1.76 ± 0.3 −1.85 ± 0.25 −3.64 ± 0.09 −2.59 ± 0.11 −2.51 ± 0.31 −2.45 ± 0.25 −2.09 ± 0.09
+506
+Boston
+- 3.74 ± 0.53 −2.03 ± 0.14 −1.1 ± 1.76 −1.08 ± 0.05 −0.44 ± 7.28 4.35 ± 0.16
+10721 7
+Carbon
+8 −2.13 ± 0.14 −2.29 ± 0.12 −4.23 ± 0.07 −3.31 ± 0.05 −3.11 ± 0.12 −3.06 ± 0.32 −1.78 ± 0.04
+1030
+Concrete
+8 −1.85 ± 0.34 −2.22 ± 0.15 −3.78 ± 0.04 −2.07 ± 0.08 −2.01 ± 0.11 −1.48 ± 0.31 −1.68 ± 0.13
+768
+Energy
+- 2.01 ± 0.02 −0.08 ± 0.02 0.95 ± 0.08 0.95 ± 0.15
+1.18 ± 0.03 2.49 ± 0.07
+8192
+8
+Kin8nm
+5.55 ± 0.05 7.27 ± 0.13
+- 3.47 ± 0.21 3.71 ± 0.05 3.80 ± 0.09
+11934 16
+-
+Naval
+- −1.9 ± 0.03 −4.26 ± 0.14 −2.89 ± 0.01 −2.89 ± 0.14 −2.77 ± 0.04 −1.19 ± 0.03
+4
+Power plant 9568
+- −2.95 ± 0.09 −2.91 ± 0.00 −2.93 ± 0.14 −2.80 ± 0.02 −2.83 ± 0.05
+-
+Protein
+45730 9
+- −4.07 ± 0.01 −4.92 ± 0.10 −3.06 ± 0.14 −2.91 ± 0.19 −3.01 ± 0.05 −2.43 ± 0.05
+Superconduct 21263 81
+0.96 ± 0.18 −0.08 ± 0.01 −1.19 ± 0.11 −0.98 ± 0.01 −0.94 ± 0.01 −0.93 ± 0.09 1.21 ± 0.23
+11
+Wine (red)
+1599
+- −0.14 ± 0.05 −1.29 ± 0.09 −1.41 ± 0.17 −1.26 ± 0.01 −0.99 ± 0.06 0.40 ± 0.42
+Wine (white) 4898
+11
+7 0.16 ± 1.22 −0.38 ± 0.32 −4.12 ± 0.17 −1.65 ± 0.05 −1.55 ± 0.12 −1.18 ± 0.21 −0.07 ± 0.05
+308
+Yacht
+- −5.21 ± 0.87 −3.97 ± 0.34 −3.78 ± 0.01 −3.42 ± 0.02 −3.01 ± 0.14
+Year
+515345 90
+Table 1: Dataset characteristics and tests set log-likelihoods for the different methods. A - indicates
+the model was infeasible to train. Bold highlights the best results.
+
+-
+
+6
+
+xy77xy77050100150200250300350x020406080100yErr=7.6xy77xy77xy773.753.503.253.002.752.502.252.00logp(x)NNNN+LSNN+MVNN+EXNN+IGCombinedBoston4.03.53.02.52.0logp(x)NNNN+LSNN+MVNN+EXNN+IGCombinedConcrete1.00.50.00.51.01.5logp(x)NNNN+LSNN+MVNN+EXNN+IGCombinedWine (red)1.51.00.50.00.51.0logp(x)NNNN+LSNN+MVNN+EXNN+IGCombinedWine (white)training set. We set n = 1% of the initial pool size. This is repeated 10 times  such that the last model
+is trained on 30%. We repeat this on 10 random training-test splits to compute standard errors.
+Fig. 6 show the evolution of average RMSE for each method during the data collection process for
+the Boston  Superconduct and Wine (white) datasets (all remaining UCI datasets are visualized in the
+supplementary material). In general  we observe two trends. For some datasets we observe that our
+Combined model outperforms all other models  achieving signiﬁcantly faster learning. This indicates
+that our model is better at predicting the uncertainty of the data in the pool set. On datasets where the
+sampling process does not increase performance  we are on par with other models.
+
+Figure 6: Average test set RMSE and standard errors in active learning. The remaining datasets are
+shown in the supplementary material.
+
+4.2 Generative models
+
+To show a broader application of our approach  we also explore it in the context of generative
+modeling. We focus on variational autoencoders (VAEs) [Kingma and Welling  2013  Rezende et al. 
+2014] that are popular deep generative models. A VAE model the generative process:
+
+pθ(x|z) =N(cid:0)x|µθ(z)  σ2
+θ (z)(cid:1)
+
+or pθ(x|z) =B(cid:0)x|µθ(z)(cid:1) 
+
+(cid:90)
+
+(6)
+
+p(x) =
+
+pθ(x|z)p(z)dz 
+where p(z) = N (0  Id).
+This is trained by introducing a variational approximation
+qφ(z|x) = N (z|µφ(x)  σ2
+φ(x)) and then jointly training pθ and qφ. For our purposes  it
+suffcient to note that a VAE estimates both a mean and a variance function. Thus using standard
+training methods  the same problems arise as in the regression setting. Mattei and Frellsen [2018]
+have recently shown that estimating a VAE is ill-posed unless the variance is bounded from below.
+In the literature  we often ﬁnd that
+1. Variance networks are avoided by using a Bernoulli distribution  even if data is not binary.
+2. Optimizing VAEs with a Gaussian posterior is considerably harder than the Bernoulli case. To
+overcome this  the variance is often set to a constant e.g. σ2(z) = 1. The consequence is that the
+log-likelihood reconstruction term in the ELBO collapses into an L2 reconstruction term.
+3. Even though the generative process is given by Eq. 6  samples shown in the literature are often
+reduced to ˜x = µ(z)  z ∼ N (0  I). This is probably due to the wrong/meaningless variance term.
+We aim to ﬁx this by training the posterior variance σ2
+θ (z) with our Combined method. We do not
+change the encoder variance σ2
+
+φ(x) and leave this to future study.
+
+Artiﬁcial data. We ﬁrst evaluate the beneﬁts of more reliable variance networks in VAEs on
+artiﬁcial data. We generate data inspired by the two moon dataset8  which we map into four
+dimensions. The mapping is thoroughly described in the supplementary material  and we emphasize
+that we have deliberately used mappings that MLP’s struggle to learn  thus with a low capacity
+network the only way to compensate is to learn a meaningful variance function.
+In Fig. 7 we plot pairs of output dimensions using 5000 generated samples. For all pairwise
+combinations we refer to the supplementary material. We observe that samples from our Comb-VAE
+capture the data distribution in more detail than a standard VAE. For VAE the variance seems to be
+
+8https://scikit-learn.org/stable/modules/generated/sklearn.datasets.make_moons.
+
+html
+
+7
+
+Ground truth
+
+VAE
+
+Comb-VAE
+
+Figure 7: The ground truth and generated distributions.
+Top: x1 vs. x2. Bottom: x2 vs x3.
+
+Figure 8: Variance esti-
+mates in latent space for
+standard VAE (top) and
+our Comb-VAE (bottom).
+Blue points are the encoded
+training data.
+
+ELBO
+
+log p(x)
+
+VAE
+Comb-VAE
+VAE
+Comb-VAE
+
+SVHN
+3696.35 ± 2.94
+3701.41 ± 5.84
+3606.28 ± 2.75
+3614.39 ± 7.91
+Table 2: Generative modeling of 4 datasets. For each dataset we report training ELBO and test set
+log-likelihood. The standard errors are calculated over 3 trained models with random initialization.
+
+FashionMNIST CIFAR10
+1506.31 ± 2.71
+1621.29 ± 7.23
+1481.38 ± 3.68
+1567.23 ± 4.82
+
+MNIST
+2053.01 ± 1.60
+2152.31 ± 3.32
+1914.77 ± 2.15
+2018.37 ± 4.35
+
+1980.84 ± 3.32
+2057.32 ± 8.13
+1809.43 ± 10.32
+1891.39 ± 20.21
+
+data. In Fig. 8  we calculated the accumulated variance(cid:80)D
+
+underestimated  which is similar to the results from regression. The poor sample quality of a standard
+VAE can partially be explained by the arbitrariness of decoder variance function σ2(z) away from
+j (z) over a grid of latent points.
+We clearly see that for the standard VAE  the variance is low where we have data and arbitrary away
+from data. However  our method produces low-variance region where the two half moons are and
+a high variance region away from data. We note that Arvanitidis et al. [2018] also dealt with the
+problem of arbitrariness of the decoder variance. However their method relies on post-ﬁtting of the
+variance  whereas ours is ﬁtted during training. Additionally  we note that [Takahashi et al.  2018]
+also successfully modeled the posterior of a VAE as a Student t-distribution similar to our proposed
+method  but without the extrapolation and different training procedure.
+
+j=1 σ2
+
+Image data. For our last set of experiments we ﬁtted a standard VAE and our Comb-VAE to
+four datasets: MNIST  FashionMNIST  CIFAR10  SVHN. We want to measure whether there is an
+improvement to generative modeling by getting better variance estimation. The details about network
+architecture and training can be found in the supplementary material. Training set ELBO and test
+set log-likelihoods can be viewed in Table 2. We observe on all datasets that  on average tighter
+bounds and higher log-likelihood are achieved  indicating that we better ﬁt the data distribution. We
+quantitatively observe (see Fig. 9) that variance has a more local structure for Comb-VAE and that
+the variance reﬂects the underlying latent structure.
+
+5 Discussion & Conclusion
+
+While variance networks are commonly used for modeling the predictive uncertainty in regression
+and in generative modeling  there have been no systematic studies of how to ﬁt these to data. We
+have demonstrated that tools developed for ﬁtting mean networks to data are subpar when applied to
+
+8
+
+2101201012312101232202021012330212022202321012010123121012322020210123302120222023210120101231210123220202101233021202220232101201012312101232202021012330212022202321012010123121012322020210123302120222023210120101231210123220202101233021202220230.10.20.30.40.50.65101520253035Figure 9: Generated MNIST images on a grid in latent space using the standard variance network
+(left) and proposed variance network (right).
+
+variance estimation. The key underlying issue appears to be that it is not feasible to estimate both a
+mean and a variance at the same time  when data is scarce.
+While it is beneﬁcial to have separate estimates of both epistemic and aleatoric uncertainty  we have
+focused on predictive uncertainty  which combine the two. This is a lesser but more feasible goal.
+We have proposed a new mini-batching scheme that samples locally to ensure that variances are better
+deﬁned during model training. We have further argued that variance estimation is more meaningful
+when conditioned on the mean  which implies a change to the usual training procedure of joint
+mean-variance estimation. To cope with data scarcity we have proposed a more robust likelihood that
+model a distribution over the variance. Finally  we have highlighted that variance networks need to
+extrapolate differently from mean networks  which implies architectural differences between such
+networks. We speciﬁcally propose a new architecture for variance networks that ensures similar
+variance extrapolations to posterior Gaussian processes from stationary priors.
+Our methodologies depend on algorithms that computes Euclidean distances. Since these often break
+down in high dimensions  this indicates that our proposed methods may not be suitable for high
+dimensional data. Since we mostly rely on nearest neighbor computations  that empirical are known
+to perform better in high dimensions  our methodologies may still work in this case. Interestingly  the
+very deﬁnition of variance is dependent on Euclidean distance and this may indicate that variance
+is inherently difﬁcult to estimate for high dimensional data. This could possible be circumvented
+through a learned metric.
+Experimentally  we have demonstrated that proposed methods are complementary and provide
+signiﬁcant improvements over state-of-the-art. In particular  on benchmark data we have shown
+that our method improves upon the test set log-likelihood without improving the RMSE  which
+demonstrate that the uncertainty is a signiﬁcant improvement over current methods. Another indicator
+of improved uncertainty estimation is that our method speeds up active learning tasks compared
+to state-of-the-art. Due to the similarities between active learning  Bayesian optimization  and
+reinforcement learning  we expect that our approach carries signiﬁcant value to these ﬁelds as well.
+Furthermore  we have demonstrated that variational autoencoders can be improved through better
+generative variance estimation. Finally  we note that our approach is directly applicable alongside
+ensemble methods  which may further improve results.
+
+9
+
+Acknowledgements. This project has received funding from the European Research Council (ERC)
+under the European Union’s Horizon 2020 research and innovation programme (grant agreement
+no 757360). NSD  MJ and SH were supported in part by a research grant (15334) from VILLUM
+FONDEN. We gratefully acknowledge the support of NVIDIA Corporation with the donation of
+GPU hardware used for this research.
+
+References
+D. Amodei  C. Olah  J. Steinhardt  P. Christiano  J. Schulman  and D. Mané. Concrete problems in ai safety.
+
+arXiv preprint arXiv:1606.06565  2016.
+
+G. Arvanitidis  L. K. Hansen  and S. Hauberg. Latent space oddity: on the curvature of deep generative models.
+
+In International Conference on Learning Representations  2018.
+
+C. M. Bishop. Mixture density networks. Technical report  Citeseer  1994.
+
+A. Damianou and N. D. Lawrence. Deep gaussian processes. Proceedings of the 16th International Conference
+
+on Artiﬁcial Intelligence and Statistics (AISTATS)  2013.
+
+P. I. Frazier. A tutorial on bayesian optimization. arXiv preprint arXiv:1807.02811  2018.
+
+C. Fu and D. Cai. Efanna : An extremely fast approximate nearest neighbor search algorithm based on knn
+
+graph. 09 2016.
+
+Y. Gal and Z. Ghahramani. Dropout as a bayesian approximation: Representing model uncertainty in deep
+
+learning. In international Conference on Machine Learning  pages 1050–1059  2016.
+
+A. Gelman  J. B. Carlin  H. S. Stern  D. B. Dunson  A. Vehtari  and D. B. Rubin. Bayesian Data Analysis. CRC
+
+Press  2014.
+
+C. Guo  G. Pleiss  Y. Sun  and K. Q. Weinberger. On calibration of modern neural networks. In Proceedings of
+
+the 34th International Conference on Machine Learning-Volume 70  pages 1321–1330. JMLR. org  2017.
+
+S. Hauberg. Only bayes should learn a manifold (on the estimation of differential geometric structure from data).
+
+arXiv preprint arXiv:1806.04994  2018.
+
+J. M. Hernández-Lobato and R. Adams. Probabilistic backpropagation for scalable learning of bayesian neural
+
+networks. In International Conference on Machine Learning  pages 1861–1869  2015.
+
+G. Hinton  N. Srivastava  A. Krizhevsky  I. Sutskever  and R. R. Salakhutdinov. Improving neural networks by
+
+preventing co-adaptation of feature detectors. arXiv preprint  arXiv  07 2012.
+
+M. D. Hoffman  D. M. Blei  C. Wang  and J. Paisley. Stochastic variational inference. The Journal of Machine
+
+Learning Research  14(1):1303–1347  2013.
+
+D. G. Horvitz and D. J. Thompson. A generalization of sampling without replacement from a ﬁnite universe.
+
+Journal of the American Statistical Association  47(260):663–685  1952.
+
+N. Houlsby  F. Huszar  Z. Ghahramani  and J. M. Hernández-lobato. Collaborative gaussian processes for
+preference learning. In F. Pereira  C. J. C. Burges  L. Bottou  and K. Q. Weinberger  editors  Advances in
+Neural Information Processing Systems 25  pages 2096–2104. Curran Associates  Inc.  2012.
+
+S.-J. Huang  R. Jin  and Z.-H. Zhou. Active learning by querying informative and representative examples. In
+
+Advances in neural information processing systems  pages 892–900  2010.
+
+A. Kendall and Y. Gal. What uncertainties do we need in bayesian deep learning for computer vision? In
+
+Advances in neural information processing systems  pages 5574–5584  2017.
+
+D. P. Kingma and M. Welling. Auto-encoding variational bayes. ICLR  12 2013.
+
+A. D. Kiureghian and O. Ditlevsen. Aleatory or epistemic? does it matter? Structural Safety  31(2):105 – 112 
+
+2009. Risk Acceptance and Risk Communication.
+
+B. Lakshminarayanan  A. Pritzel  and C. Blundell. Simple and scalable predictive uncertainty estimation using
+
+deep ensembles. In Advances in Neural Information Processing Systems  pages 6402–6413  2017.
+
+K. L. Lange  R. J. A. Little  and J. M. G. Taylor. Robust statistical modeling using the t distribution. Journal of
+
+the American Statistical Association  84(408):881–896  1989.
+
+10
+
+Y. LeCun  Y. Bengio  and G. E. Hinton. Deep learning. Nature  521(7553):436–444  2015.
+
+C. Loader. Local Regression and Likelihood. Springer  New York  1999.
+
+D. J. C. MacKay. A Practical Bayesian Framework for Backpropagation Networks. Neural Comput.  4(3):
+
+448–472  may 1992.
+
+W. Maddox  T. Garipov  P. Izmailov  D. Vetrov  and A. G. Wilson. A Simple Baseline for Bayesian Uncertainty
+
+in Deep Learning. CoRR  feb 2019.
+
+P.-A. Mattei and J. Frellsen. Leveraging the exact likelihood of deep latent variable models. In Proceedings of
+the 32Nd International Conference on Neural Information Processing Systems  NIPS’18  pages 3859–3870 
+USA  2018. Curran Associates Inc.
+
+D. Nix and A. Weigend. Estimating the mean and variance of the target probability distribution. In Proc. 1994
+
+IEEE Int. Conf. Neural Networks  pages 55–60 vol.1. IEEE  1994.
+
+T. Pearce  M. Zaki  A. Brintrup  and A. Neely. High-Quality Prediction Intervals for Deep Learning: A
+Distribution-Free  Ensembled Approach. In Proceedings of the 35th International Conference on Machine
+Learning  feb 2018.
+
+C. E. Rasmussen and C. Williams. Gaussian Processes for Machine Learning. University Press Group Limited 
+
+2006.
+
+D. J. Rezende  S. Mohamed  and D. Wierstra. Stochastic backpropagation and approximate inference in deep
+generative models. In E. P. Xing and T. Jebara  editors  Proceedings of the 31st International Conference
+on Machine Learning  volume 32 of Proceedings of Machine Learning Research  pages 1278–1286  Bejing 
+China  22–24 Jun 2014. PMLR.
+
+B. Settles. Active learning literature survey. Technical report  University of Wisconsin-Madison Department of
+
+Computer Sciences  2009.
+
+E. Snelson and Z. Ghahramani. Sparse gaussian processes using pseudo-inputs.
+
+information processing systems  pages 1257–1264  2006.
+
+In Advances in neural
+
+C. Szepesvári. Algorithms for reinforcement learning. Synthesis lectures on artiﬁcial intelligence and machine
+
+learning  4(1):1–103  2010.
+
+H. Takahashi  T. Iwata  Y. Yamanaka  M. Yamada  and S. Yagi. Student-t variational autoencoder for robust den-
+sity estimation. In Proceedings of the Twenty-Seventh International Joint Conference on Artiﬁcial Intelligence 
+IJCAI-18  pages 2696–2702. International Joint Conferences on Artiﬁcial Intelligence Organization  7 2018.
+
+R. Tibshirani and T. Hastie. Local likelihood estimation. Journal of the American Statistical Association  82
+
+(398):559–567  1987.
+
+11
+
+,Matthäus Kleindessner
+Ulrike von Luxburg
+Nicki Skafte
+Martin Jørgensen
+Søren Hauberg

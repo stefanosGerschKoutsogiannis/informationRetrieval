@@ -1,0 +1,1211 @@
+2019,Qsparse-local-SGD: Distributed SGD with Quantization  Sparsification and Local Computations,Communication bottleneck has been identified as a significant issue in distributed optimization of large-scale learning models. Recently  several approaches to mitigate this problem have been proposed  including different forms of gradient compression or computing local models and mixing them iteratively. In this paper we propose Qsparse-local-SGD algorithm  which combines aggressive sparsification with quantization and local computation along with error compensation  by keeping track of the difference between the true and compressed gradients. We propose both synchronous and asynchronous implementations of Qsparse-local-SGD. We analyze convergence for Qsparse-local-SGD in the distributed case  for smooth non-convex and convex objective functions. We demonstrate that Qsparse-local-SGD converges at the same rate as vanilla distributed SGD for many important classes of sparsifiers and quantizers. We use Qsparse-local-SGD to train ResNet-50 on ImageNet  and show that it results in significant savings over the state-of-the-art  in the number of bits transmitted to reach target accuracy.,Qsparse-local-SGD: Distributed SGD with
+
+Quantization  Sparsiﬁcation  and Local Computations
+
+Debraj Basu ⇤
+Adobe Inc.
+
+dbasu@adobe.com
+
+Can Karakus ⇤
+Amazon Inc.
+
+cakarak@amazon.com
+
+Deepesh Data
+
+UCLA
+
+deepeshdata@ucla.edu
+
+Suhas Diggavi
+
+UCLA
+
+suhasdiggavi@ucla.edu
+
+Abstract
+
+Communication bottleneck has been identiﬁed as a signiﬁcant issue in distributed
+optimization of large-scale learning models. Recently  several approaches to
+mitigate this problem have been proposed  including different forms of gradient
+compression or computing local models and mixing them iteratively. In this paper
+we propose Qsparse-local-SGD algorithm  which combines aggressive sparsiﬁ-
+cation with quantization and local computation along with error compensation 
+by keeping track of the difference between the true and compressed gradients.
+We propose both synchronous and asynchronous implementations of Qsparse-
+local-SGD. We analyze convergence for Qsparse-local-SGD in the distributed
+case  for smooth non-convex and convex objective functions. We demonstrate that
+Qsparse-local-SGD converges at the same rate as vanilla distributed SGD for many
+important classes of sparsiﬁers and quantizers. We use Qsparse-local-SGD to train
+ResNet-50 on ImageNet  and show that it results in signiﬁcant savings over the
+state-of-the-art  in the number of bits transmitted to reach target accuracy.
+
+1
+
+Introduction
+
+t   where {gr
+
+t}R
+
+r=1 gr
+
+RPR
+
+Stochastic Gradient Descent (SGD) [14] and its many variants have become the workhorse for modern
+large-scale optimization as applied to machine learning [5  8]. We consider the setup where SGD is
+applied to the distributed setting  where R different nodes compute local SGD on their own datasets
+Dr. Co-ordination between them is done by aggregating these local computations to update the
+overall parameter xt as  xt+1 = xt  ⌘t
+r=1 are the local stochastic gradients
+at the R machines for a local loss function f (r)(x) of the parameters  where f (r) : Rd ! R.
+It is well understood by now that sending full-precision gradients  causes communication to be
+the bottleneck for many large scale models [4  7  33  39]. The communication bottleneck could be
+signiﬁcant in emerging edge computation architectures suggested by federated learning [1  17  22].
+To address this  many methods have been proposed recently  and these methods are broadly based
+on three major approaches: (i) Quantization of gradients  where nodes locally quantize the gradient
+(perhaps with randomization) to a small number of bits [3 7 33 39 40]. (ii) Sparsiﬁcation of gradients 
+e.g.  where nodes locally select Topk values of the gradient in absolute value and transmit these at
+full precision [2  4  20  30  32  40]  while maintaining errors in local nodes for later compensation.
+(iii) Skipping communication rounds whereby nodes average their models after locally updating their
+models for several steps [9  10  31  34  37  43  45].
+
+⇤Work done while Debraj Basu and Can Karakus were at UCLA.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+In this paper we propose Qsparse-local-SGD algorithm  which combines aggressive sparsiﬁcation
+with quantization and local computation along with error compensation  by keeping track of the
+difference between the true and compressed gradients. We propose both synchronous and asyn-
+chronous2 implementations of Qsparse-local-SGD. We analyze convergence for Qsparse-local-SGD
+in the distributed case  for smooth non-convex and convex objective functions. We demonstrate
+that  Qsparse-local-SGD converges at the same rate as vanilla distributed SGD for many important
+classes of sparsiﬁers and quantizers. We implement Qsparse-local-SGD for ResNet-50 using the
+ImageNet dataset  and show that we achieve target accuracies with a small penalty in ﬁnal accuracy
+(approximately 1 %)  with about a factor of 15-20 savings over the state-of-the-art [4  30  31]  in the
+total number of bits transmitted. While the downlink communication is not our focus in this paper
+(also in [4  20  39]  for example)  it can be inexpensive when the broadcast routine is implemented in
+a tree-structured manner as in many MPI implementations  or if the parameter server aggregates the
+sparse quantized updates and broadcasts it.
+Related work. The use of quantization for communication efﬁcient gradient methods has decades
+rich history [11] and its recent use in training deep neural networks [27  32] has re-ignited interest.
+Theoretically justiﬁed gradient compression using unbiased stochastic quantizers has been proposed
+and analyzed in [3  33  39]. Though methods in [36  38] use induced sparsity in the quantized
+gradients  explicitly sparsifying the gradients more aggressively by retaining Topk components  e.g. 
+k < 1%  has been proposed [2  4  20  30  32]  combined with error compensation to ensure that all
+co-ordinates do get eventually updated as needed. [40] analyzed error compensation for QSGD 
+without Topk sparsiﬁcation and a focus on quadratic functions. Another approach for mitigating
+the communication bottlenecks is by having infrequent communication  which has been popularly
+referred to in the literature as iterative parameter mixing and model averaging  see [31  43] and
+references therein. Our work is most closely related to and builds on the recent theoretical results
+in [4  30  31  43]. [30] considered the analysis for the centralized Topk (among other sparsiﬁers) 
+and [4] analyzed a distributed version with the assumption of closeness of the aggregated Topk
+gradients to the centralized Topk case  see Assumption 1 in [4]. [31  43] studied local-SGD  where
+several local iterations are done before sending the full gradients  and did not do any gradient
+compression beyond local iterations. Our work generalizes these works in several ways. We
+prove convergence for the distributed sparsiﬁcation and error compensation algorithm  without the
+assumption of [4]  by using the perturbed iterate methods [21  30]. We analyze non-convex (smooth)
+objectives as well as strongly convex objectives for the distributed case with local computations. [30]
+gave a proof only for convex objective functions and for centralized case and therefore without local
+computations3. Our techniques compose a (stochastic or deterministic 1-bit sign) quantizer with
+sparsiﬁcation and local computations using error compensation; in fact this technique works for any
+compression operator satisfying a regularity condition (see Deﬁnition 3).
+Contributions. We study a distributed set of R worker nodes each of which perform computa-
+tions on locally stored data denoted by Dr. Consider the empirical-risk minimization of the loss
+function f (x) = 1
+[·] denotes expec-
+tation4 over a random sample chosen from the local data set Dr. For f :
+d !   we denote
+x⇤ := arg minx2Rd f (x) and f⇤ := f (x⇤). The distributed nodes perform computations and pro-
+vide updates to the master node that is responsible for aggregation and model update. We develop
+Qsparse-local-SGD  a distributed SGD composing gradient quantization and explicit sparsiﬁcation
+(e.g.  Topk components)  along with local iterations. We develop the algorithms and analysis for both
+synchronous as well as asynchronous operations  in which workers can communicate with the master
+at arbitrary time intervals. To the best of our knowledge  these are the ﬁrst algorithms which combine
+quantization  aggressive sparsiﬁcation  and local computations for distributed optimization.
+
+r=1 f (r)(x)  where f (r)(x) = E
+i⇠Dr
+
+[fi(x)]  where E
+i⇠Dr
+
+RPR
+
+2In our asynchronous model  the distributed nodes’ iterates evolve at the same rate  but update the gradients
+
+at arbitrary times; see Section 4 for more details.
+
+3At the completion of our work  we recently found that in parallel to our work [15] examined use of sign-
+SGD quantization  without sparsiﬁcation for the centralized model. Another recent work in [16] studies the
+decentralized case with sparsiﬁcation for strongly convex function. Our work  developed independent of these
+works  uses quantization  sparsiﬁcation and local computations for the distributed case with local computations
+for both non-convex and strongly convex objectives.
+4Our setup can also handle different local functional forms  beyond dependence on the local data set Dr 
+
+which is not explicitly written for notational simplicity.
+
+2
+
+Our main theoretical results are the convergence analysis of Qsparse-local-SGD for both (smooth)
+non-convex objectives as well as for the strongly convex case. See Theorem 1  2 for the synchronous
+case  as well as Theorem 3  4  for the asynchronous operation. Our analysis also demonstrates natural
+gains in convergence that distributed  mini-batch operation affords  and has convergence similar to
+vanilla SGD with local iterations (see Corollary 1  2)  for both the non-convex case (with convergence
+rate ⇠ 1/pT for ﬁxed learning rate) as well as the strongly convex case (with convergence rate
+⇠ 1/T  for diminishing learning rate)  demonstrating that quantizing and sparsifying the gradient 
+even after local iterations asymptotically yields an almost “free” communication efﬁciency gain (also
+observed numerically in Section 5 non-asymptotically). The numerical results on ImageNet dataset
+implemented for a ResNet-50 architecture demonstrates that one can get signiﬁcant communication
+savings  while retaining equivalent state-of-the art performance with a small penalty in ﬁnal accuracy.
+Unlike previous works  Qsparse-local-SGD stores the compression error of the net local update 
+which is a sum of at most H gradient steps and the historical error  in the local memory. From
+literature [4  30]  we know that methods with error compensation work only when the evolution of
+the error is controlled. The combination of quantization  sparsiﬁcation  and local computations poses
+several challenges for theoretical analysis  including (i) the analysis of impact of local iterations on
+the evolution of the error due to quantization and sparsiﬁcation  as well as the deviation of local
+iterates (see Lemma 3  4  8  9) (ii) asynchronous updates together with distribution compression using
+operators which satisfy Deﬁnition 3  including our composed (Qsparse) operators. (see Lemma 11-14
+in appendix). Another useful technical observation is that the composition of a quantizer and a
+sparsiﬁer results in a compression operator (Lemma 1  2); see Appendix A for proofs on the same.
+We provide additional results in the appendices as part of the supplementary material. These include
+results on the asymptotic analysis for non-convex objectives in Theorem 5  8 along with precise
+statements of the convergence guarantees for the asynchronous operation Theorem 6  7 and numerics
+for the convex case for multi-class logistic classiﬁcation on MNIST [19] dataset in Appendix D  for
+both synchronous and asynchronous operations.
+We believe that our approach for combining different forms of compression and local computations
+can be extended to the decentralized case  where nodes are connected over an arbitrary graph  building
+on the ideas from [15  35]. Our numerics also incorporate momentum acceleration  whose analysis is
+a topic for future research  for example incorporating ideas from [42].
+Organization. In Section 2  we demonstrate that composing certain classes of quantization with
+sparsiﬁcation satisﬁes a certain regularity condition that is needed for several convergence proofs for
+our algorithms. We describe the synchronous implementation of Qsparse-local-SGD in Section 3 
+and outline the main convergence results for it in Section 3.1  brieﬂy giving the proof ideas in Section
+3.2. We describe our asynchronous implementation of Qsparse-local-SGD and provide the theoretical
+convergence results in Section 4. The experimental results are given in Section 5. Many of the proof
+details and additional results are given in the appendices provided with the supplementary material.
+
+2 Composition of Quantization and Sparsiﬁcation
+
+In this section  we consider composition of two different techniques used in the literature for mitigating
+the communication bottleneck in distributed optimization  namely  quantization and sparsiﬁcation.
+In quantization  we reduce precision of the gradient vector by mapping each of its components by
+a deterministic [7  15] or randomized [3  33  39  44] map to a ﬁnite number of quantization levels.
+In sparsiﬁcation  we sparsify the gradients vector before using it to update the parameter vector  by
+taking its Topk components or choosing k components uniformly at random  denoted by Randk  [30].
+Deﬁnition 1 (Randomized Quantizer [3  33  39  44]). We say that Qs : Rd ! Rd is a randomized
+quantizer with s quantization levels  if the following holds for every x 2 Rd: (i) EQ[Qs(x)] = x; (ii)
+EQ[kQs(x)k2]  (1 + d s)kxk2  where d s > 0 could be a function of d and s. Here expectation
+is taken over the randomness of Qs.
+Examples of randomized quantizers include (i) QSGD [3  39]  which independently quantizes compo-
+pd
+s )); (ii) Stochastic s-level Quantization [33 44] 
+nents of x 2 Rd into s levels  with d s = min( d
+s2  
+which independently quantizes every component of x 2 Rd into s levels between argmaxixi and
+2s2 ; and (iii) Stochastic Rotated Quantization [33]  which is a stochastic
+argminixi  with d s = d
+quantization  preprocessed by a random rotation  with d s = 2 log2(2d)
+
+.
+
+s2
+
+3
+
+2]  (1  )kxk2
+
+Instead of quantizing randomly into s levels  we can take a deterministic approach and round off to
+the nearest level. In particular  we can just take the sign  which has shown promise in [7  27  32].
+Deﬁnition 2 (Deterministic Sign Quantizer [7  15]). A deterministic quantizer Sign : Rd !
+{+1 1}d is deﬁned as follows: for every vector x 2 Rd  i 2 [d]  the i’th component of Sign(x) is
+deﬁned as {xi  0} {xi < 0}.
+As mentioned above  we consider two important examples of sparsiﬁcation operators: Topk and
+Randk  For any x 2 Rd  Topk(x) is equal to a d-length vector  which has at most k non-zero
+components whose indices correspond to the indices of the largest k components (in absolute value)
+of x. Similarly  Randk(x) is a d-length (random) vector  which is obtained by selecting k components
+of x uniformly at random. Both of these satisfy a so-called “compression” property as deﬁned below 
+with  = k/d [30]. Few other examples of such operators can be found in [30].
+Deﬁnition 3 (Sparsiﬁcation [30]). A (randomized) function Compk : Rd ! Rd is called a compres-
+sion operator  if there exists a constant  2 (0  1] (that may depend on k and d)  such that for every
+2  where expectation is taken over Compk.
+x 2 Rd  we have EC[kx  Compk(x)k2
+We can apply different compression operators to different coordinates of a vector  and the resulting
+operator is also a compression operator; see Corollary 3 in Appendix A. As an application  in the
+case of training neural networks  we can apply different compression operators to different layers.
+Composition of Quantization and Sparsiﬁcation. Now we show that we can compose determin-
+istic/randomized quantizers with sparsiﬁers and the resulting operator is a compression operator.
+Proofs are given in Appendix A.
+Lemma 1 (Composing sparsiﬁcation with stochastic quantization). Let Compk 2{ Topk  Randk}.
+Let Qs : Rd ! Rd be a stochastic quantizer with parameter s that satisﬁes Deﬁnition 1. Let
+QsCompk : Rd ! Rd be deﬁned as QsCompk(x) := Qs(Compk(x)) for every x 2 Rd. Then
+d(1+k s).
+Lemma 2 (Composing sparsiﬁcation with deterministic quantization). Let Compk 2
+{Topk  Randk}. Let SignCompk : Rd ! Rd be deﬁned as follows: for every x 2 Rd  the
+i’th component of SignCompk(x) is equal to {xi  0} {xi < 0}  if the i’th component is cho-
+sen in deﬁning Compk  otherwise  it is equal to 0. Then kCompk(x)k1 SignCompk(x)
+is a compression
+operator5 with the compression coefﬁcient being equal to  = max⇢ 1
+
+is a compression operator with the compression coefﬁcient being equal to  =
+
+pdkCompk(x)k2⌘2.
+d⇣ kCompk(x)k1
+
+QsCompk(x)
+
+d   k
+
+1+k s
+
+k
+
+k
+
+3 Qsparse-local-SGD
+
+Let I(r)
+T ✓ [T ] := {1  . . .   T} with T 2I (r)
+T denote a set of indices for which worker r 2 [R]
+synchronizes with the master. In a synchronous setting  I(r)
+is same for all the workers. Let
+IT := I(r)
+T for any r 2 [R]. Every worker r 2 [R] maintains a local parameterbx(r)
+t which is updated
+is a mini-batch of size b
+in each iteration t  using the stochastic gradient rf
+sampled uniformly in Dr. If t 2I T   the sparsiﬁed error-compensated update g(r)
+computed on the
+net progress made since the last synchronization is sent to the master node  and updates its local
+memory m(r)
+’s from every worker  master aggregates them  updates the global
+parameter vector  and sends the new model xt+1 to all the workers; upon receiving which  they set
+t+1 to be equal to the global parameter vector xt+1. Our algorithm is
+
+t ⌘  where i(r)
+
+t ⇣bx(r)
+
+. Upon receiving g(r)
+
+i(r)
+
+T
+
+t
+
+t
+
+t
+
+t
+
+summarized in Algorithm 1.
+
+their local parameter vectorbx(r)
+
+3.1 Main Results for Synchronous Operation
+All results in this paper use the following two standard assumptions. (i) Smoothness: The local
+function f (r) : Rd ! R at each worker r 2 [R] is L-smooth  i.e.  for every x  y 2 Rd  we have
+2 ky  xk2. (ii) Bounded second moment: For every
+f (r)(y)  f (r)(x) + hrf (r)(x)  y  xi + L
+  for any p 2 Z+ is provided in Appendix A.
+
+5The analysis for general p-norm  i.e. kCompk(x)kp SignCompk(x)
+
+k
+
+4
+
+0   8r 2 [R]. Suppose ⌘t follows a certain learning rate schedule.
+
+is a mini-batch of size b sampled uniformly in Dr
+
+t+ 1
+2
+
+t+1 bx(r)
+2⌘  send g(r)
+
+t
+
+t+1 xt+1
+
+to the master.
+
+Algorithm 1 Qsparse-local-SGD
+
+t
+
+t
+
+i(r)
+
+t+ 1
+
+0 = m(r)
+
+t  ⌘trf
+
+1: Initialize x0 =bx(r)
+t ⌘; i(r)
+t ⇣bx(r)
+2 bx(r)
+bx(r)
+if t + 1 /2I T then
+andbx(r)
+xt+1 xt  m(r)
+t+1 m(r)
+else
+t Q Compk⇣m(r)
+g(r)
+t + xt bx(r)
+2  g(r)
+m(r)
+t+1 m(r)
+t + xt bx(r)
+Receive xt+1 from the master and setbx(r)
+
+2: for t = 0 to T  1 do
+3: On Workers:
+for r = 1 to R do
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+19:
+end if
+20:
+21: end for
+
+xt+1 xt
+Receive g(r)
+Broadcast xt+1 to all workers.
+
+end if
+end for
+At Master:
+if t + 1 /2I T then
+else
+
+t+ 1
+
+t+ 1
+
+t
+
+t
+
+from R workers and compute xt+1 = xt  1
+
+r=1 g(r)
+
+t
+
+RPR
+
+t+ 1
+2
+
+is used to denote an intermediate variable between iterations t and t + 1.
+
+22: Comment: Note thatbx(r)
+bx(r)
+t 2 Rd  r 2 [R]  t 2 [T ]  we have E
+t )k2]  G2  for some constant G < 1. This is
+i⇠Dr
+a standard assumption in [4  12  16  23  25  26  29–31  43]. Relaxation of the uniform boundedness
+of the gradient allowing arbitrarily different gradients of local functions in heterogenous settings
+as done for SGD in [24  37] is left as future work. This also imposes a bound on the variance:
+r  G2 for every r 2 [R]. To state our results 
+E
+t )k2]  2
+i⇠Dr
+we need the following deﬁnition from [31].
+Deﬁnition 4 (Gap [31]). Let IT = {t0  t1  . . .   tk}  where ti < ti+1 for i = 0  1  . . .   k 1. The gap
+of IT is deﬁned as gap(IT ) := maxi2[k]{(ti  ti1)}  which is equal to the maximum difference
+between any two consecutive synchronization indices.
+
+t )  rf (r)(bx(r)
+
+[krfi(bx(r)
+
+[krfi(bx(r)
+
+r  where 2
+
+Then we have
+
+We leverage the perturbed iterate analysis as in [21  30] to provide convergence guarantees for
+Qsparse-local-SGD. Under assumptions (i) and (ii)  the following theorems hold when Algorithm 1 is
+run with any compression operator (including our composed operators).
+Theorem 1 (Convergence in the smooth (non-convex) case with ﬁxed learning rate). Let f (r)(x)
+be L-smooth for every i 2 [R]. Let QCompk : Rd ! Rd be a compression operator whose
+compression coefﬁcient is equal to  2 (0  1]. Let {bx(r)
+t }T1
+t=0 be generated according to Algorithm 1
+with QCompk  for step sizes ⌘ = bCpT
+2L) and gap(IT )  H.
+bR2 ⌘⌘ 4pT
+Ekrf (zT )k2 ⇣ E[f (x0)]f⇤
+
++ 8⇣4 (12)
+Here zT is a random variable which samples a previous parameterbx(r)
+Corollary 1. Let E[f (x0)]  f⇤  J 2  where J < 1 is a constant 6 max = maxr2[R] r  and
+bC2 = bR(E[f (x0)]f⇤)
+Ekrf (zT )k2 O ⇣ JmaxpbRT ⌘ + O⇣ J 2bRG2H2
+max2T ⌘ .
+
+(where bC is a constant such that bCpT  1
++ bCL⇣PR
+
+2 + 1⌘ bC2L2G2H2
+
+t with probability 1/RT .
+
+  we have
+
+r=1 2
+r
+
+maxL
+
+bC
+
+(1)
+
+(2)
+
+2
+
+2
+
+T
+
+.
+
+6Even classical SGD requires knowing an upper bound on kx0  x⇤k in order to choose the learning rate.
+
+Smoothness of f translates this to the difference of the function values.
+
+5
+
+In order to ensure that the compression does not affect the dominating terms while converging at a
+
+rate of O⇣1/pbRT⌘  we would require7 H = OT 1/4/(bR)3/4.
+
+1
+
+log T )  is provided in Theorem 5 in Appendix B.
+
+Theorem 1 is proved in Appendix B and provides non-asymptotic guarantees  where we observe that
+compression does not affect the ﬁrst order term. The corresponding asymptotic result (with decaying
+learning rate)  with a convergence rate of O(
+Theorem 2 (Convergence in the smooth and strongly convex case with a decaying learning rate). Let
+f (r) (x) be L-smooth and µ-strongly convex. Let QCompk : Rd ! Rd be a compression operator
+t=0 be generated according to
+Algorithm 1 with QCompk  for step sizes ⌘t = 8/µ(a+t) with gap(IT )  H  where a > 1 is such
+that we have a  max{4H/  32  H}   = L/µ. Then the following holds
+A + 128LT
+µ3ST
+
+whose compression coefﬁcient is equal to  2 (0  1]. Let {bx(r)
+Here (i) A = PR
+ST PT1
+
+  B = 4⇣ 3µ
+2 + 3L2G2H 2⌘  where C  4a(12)
+t=0 hwt⇣ 1
+RPR
+t=o wt  T 3
+r=1bx(r)
+3 .
+xT := 1
+   32  H}  max = maxr2[R] r  and using Ekx0  x⇤k2  4G2
+Corollary 2. For a > max{ 4H
+from Lemma 2 in [25]  we have
+E[f (xT )]  f⇤ O ⇣ G2H3
+
+2 + 3L CG2H 2
+t ⌘i  where wt = (a + t)2; and (iii) ST =PT1
+µ2bRT 2⌘ + O⇣ G2H2
+µ23T 3⌘ + O⇣ 2
+µ32T 2⌘ .
+
+E[f (xT )]  f⇤  La3
+r=1 2
+r
+bR2
+
+In order to ensure that the compression does not affect the dominating terms while converging at a
+
+4ST kx0  x⇤k2 + 8LT (T +2a)
+
+a4H ; (ii)
+
+µ2bRT + H 2
+
+t }T1
+
+µ2ST
+
+(4)
+
+(3)
+
+B.
+
+max
+
+max
+
+µ2
+
+rate of O (1/(bRT ))  we would require H = O⇣pT /(bR)⌘.
+
+Theorem 2 has been proved in Appendix B. For no compression and only local computations  i.e.  for
+ = 1  and under the same assumptions  we recover/generalize a few recent results from literature
+with similar convergence rates: (i) We recover [43  Theorem 1]  which is for non-convex case; (ii) We
+generalize [31  Theorem 2.2]  which is for a strongly convex case and requires that each worker has
+identical datasets  to the distributed case. We emphasize that unlike [31  43]  which only consider
+local computation  we combine quantization and sparsiﬁcation with local computation  which poses
+several technical challenges (e.g.  see proofs of Lemma 3  4 7 in Appendix B).
+
+3.2 Proof Outlines
+Maintain virtual sequences for every worker
+
+0
+
+0
+
+i(r)
+
+.
+
+t
+
+i(r)
+
+(5)
+
+⌘t
+4R
+
+⌘2
+t L
+
+and
+
+and
+
+r=1 rf
+
+t  ⌘trf
+
+Deﬁne (i) pt := 1
+
+2 kptk2. With some algebraic manipulations provided in Appendix B  for ⌘t  1/2L  we arrive at
+
+Proof outline of Theorem 1. Since f is L-smooth  we have f (ext+1)  f (ext)  ⌘thrf (ext)  pti +
+
+t ⇣bx(r)
+t ⌘
+ex(r)
+:=bx(r)
+ex(r)
+t+1 :=ex(r)
+t ⌘  pt := Eit [pt] = 1
+t ⇣bx(r)
+r=1 rf (r)⇣bx(r)
+t ⌘;
+RPR
+RPR
+RPR
+RPR
+r=1ex(r)
+r=1bx(r)
+(ii)ext+1 := 1
+t+1 =ext  ⌘tpt 
+bxt := 1
+RXr=1
+t LEkpt  ptk2 + 2⌘tL2Ekext bxtk2
+t )k2  E[f (ext)]  E[f (ext+1)] + ⌘2
+RXr=1
+Ekbxt bx(r)
+Under Assumptions 1 and 2  we have Ekpt  ptk2  PR
+RPR
+ﬁrst show (in Lemma 7 in Appendix B) thatbxt ext = 1
+  i.e.  the difference of the
+true and the virtual parameter vectors is equal to the average memory  and then we bound the local
+memory at each worker r 2 [R] below.
+the same rate of convergence after T =⌦ (bR)3/4. Analogous statements hold for Theorem 2-4.
+
+. To bound Ekext bxtk2 in (6)  we
+
+7Here we characterize the reduction in communication that can be afforded  however for a constant H we get
+
+Ekrf (bx(r)
+
+r=1 m(r)
+
++2⌘tL2 1
+R
+
+r=1 2
+r
+bR2
+
+t k2.
+
+(6)
+
+t
+
+6
+
+1
+RT
+
+⌘T
+
++ 4⌘L
+bR2
+
+2
+
+(7)
+
+Lemma 3 (Bounded Memory). For ⌘t = ⌘  gap(IT )  H  we have for every t 2 Z+ that
+
+RXr=1
+
+RXr=1
+
+T1Xt=0
+
+Ekm(r)
+
+2 H 2G2.
+
+2 H 2G2. We can bound the
+last term of (6) as 1
+t k2  ⌘2G2H 2 in Lemma 9 in Appendix B. Putting them back
+in (6)  performing a telescopic sum from t = 0 to T  1  and then taking an average over time  we get
+
+t k2  4 ⌘2(12)
+
+t k2  4 ⌘2(12)
+RPR
+r=1 Ekm(r)
+Using Lemma 3  we get Ekext bxtk2  1
+RPR
+r=1 Ekbxtbx(r)
+t )k2  4(E[f (ex0)]f⇤)
+Ekrf (bx(r)
+
+L2G2H 2 + 8⌘2L2G2H 2.
+
+r + 32 ⌘2(12)
+2
+
+2L  we arrive at Theorem 1.
+
+By letting ⌘ = bC/pT   where bC is a constant such that bCpT  1
+Proof outline of Theorem 2. Using the deﬁnition of virtual sequences (5)  we have kext+1  x⇤k2 =
+t kpt  ptk2  2⌘t hext  x⇤  ⌘tpt  pt  pti. With some algebraic manipu-
+kext  x⇤  ⌘tptk2 + ⌘2
+lations provided in Appendix B  for ⌘t  1/4L and letting et = E[f (bxt)]  f⇤  we get
+2 + 3L Ekbxt extk2
+RXr=1
+t PR
+RPR
+To bound the 3rd term on the RHS of (63)  ﬁrst we note thatbxt ext = 1
+bound the local memory at each worker r 2 [R] below.
+Lemma 4 (Memory Contraction). For a > 4H/  ⌘t = ⇠/a+t  gap(IT )  H  there exists a
+C  4a(12)
+
+2L et + ⌘t 3µ
+Ekbxt bx(r)
+t k2 + ⌘2
+
+Ekext+1  x⇤k2 1  µ⌘t
+
+2  Ekext  x⇤k2  ⌘tµ
+
+a4H such that the following holds for every t 2 Z+
+2 CH 2G2.
+
+(9)
+A proof of Lemma 4 is provided in Appendix B and is technically more involved than the proof
+of Lemma 3. This complication arises because of the decaying learning rate  combined with
+compression and local computation. We can bound the penultimate term on the RHS of (63) as
+t G2H 2. This can be shown along the lines of the proof of [31  Lemma
+1
+3.3] and we show it in Lemma 8 in Appendix B. Substituting all these in (63) gives
+
+t k2  4⌘2
+
+t k2  4 ⌘2
+
+  and then we
+
+r=1 m(r)
+
+Ekm(r)
+
+r=1 2
+r
+bR2
+
+.
+
++ 3⌘tL
+R
+
+(8)
+
+t
+
+t
+
+RPR
+r=1 Ekbxt bx(r)
+
+Ekext+1  x⇤k2 1  µ⌘t
+
+2  Ekext  x⇤k2  µ⌘t
+t PR
+
+t LG2H 2 + ⌘2
+
+r=1 2
+r
+bR2
+
+2L et + ⌘t 3µ
+
+2 + 3L C 4⌘2
+
+t
+
+(10)
+Since (10) is a contracting recurrence relation  with some calculation done in Appendix B  we
+complete the proof of Theorem 2.
+
++ (3⌘tL)4⌘2
+
+.
+
+2 G2H 2
+
+4 Asynchronous Qsparse-local-SGD
+
+We propose and analyze a particular form of asynchronous operation where the workers synchronize
+with the master at arbitrary times decided locally or by master picking a subset of nodes as in federated
+learning [17  22]. However  the local iterates evolve at the same rate  i.e. each worker takes the same
+number of steps per unit time according to a global clock. The asynchrony is therefore that updates
+occur after different number of local iterations but the local iterations are synchronous with respect to
+the global clock.8
+In this asynchronous setting  I(r)
+T ’s may be different for different workers. However  we assume that
+gap(I (r)
+T )  H holds for every r 2 [R]  which means that there is a uniform bound on the maximum
+delay in each worker’s update times. The algorithmic difference from Algorithm 1 is that  in this
+case  a subset of workers (including a single worker) can send their updates to the master at their
+synchronization time steps; master aggregates them  updates the global parameter vector  and sends
+that only to those workers. Our algorithm is summarized in Algorithm 2 in Appendix C. We give the
+simpliﬁed expressions of our main results below; more precise results are in Appendix C.
+
+8This is different from asynchronous algorithms studied for stragglers [26  41]  where only one gradient step
+
+is taken but occurs at different times due to delays.
+
+7
+
+t }T1
+
+(11)
+
+(12)
+
+t
+
+µ2bRT + H 2
+
+max
+
+max
+
+2
+
+1
+
+max.
+
+Theorem 3 (Convergence in the smooth non-convex case with ﬁxed learning rate). Under the
+T )  H  if {bx(r)
+same conditions as in Theorem 1 with gap(I (r)
+t=0 is generated according to
+Algorithm 2  the following holds  where E[f (x0)]  f⇤  J 2  max = maxr2[R] r  and bC2 =
+bR(E[f (x0)]f⇤)/2
+Ekrf (zT )k2 O ⇣ JmaxpbRT ⌘ + O⇣ J 2bRG2
+max2T (H 2 + H 4)⌘ .
+where zT is a random variable which samples a previous parameterbx(r)
+of O⇣1/pbRT⌘  we would require H = OpT 1/8/(bR)3/8.
+
+t with probability 1/RT . In
+order to ensure that the compression does not affect the dominating terms while converging at a rate
+
+t }T1
+
+t=0 is generated according to Algorithm 2  the following holds:
+
+E[f (xT )]  f⇤ O ⇣ G2H3
+
+µ23T 3⌘ + O⇣ 2
+
+where xT   ST are as deﬁned in Theorem 2. To ensure that the compression does not affect the dominat-
+
+We give a precise result in Theorem 6 in Appendix C. Note that Theorem 3 provides non-asymptotic
+guarantees  where compression is almost for “free”. The corresponding asymptotic result with
+log T )  is provided in Theorem 8 in Appendix C.
+decaying learning rate  with a convergence rate of O(
+Theorem 4 (Convergence in the smooth and strongly convex case with decaying learning rate).
+Under the same conditions as in Theorem 2 with gap(I(r)
+T )  H  a > max{4H/  32  H}  max =
+maxr2[R] r  if {bx(r)
+µ2bRT 2⌘ + O⇣ G2
+ing terms while converging at a rate of O (1/(bRT ))  we would require H = Op(T /(bR))1/4.
+We give a more precise result in Theorem 7 in Appendix C. If I(r)
+T ’s are the same for all the workers 
+then one would ideally require that the bounds on H in the asynchronous setting reduce to the bounds
+on H in the synchronous setting. This is not happening  as our bounds in the asynchronous setting
+are for the worst case scenario – they hold as long as gap(I (r)
+4.1 Proof Outlines
+Our proofs of these results follow the same outlines of the corresponding proofs in the synchronous
+setting  but some technical details change signiﬁcantly. This is because  in our asynchronous setting 
+workers are allowed to update the global parameter vector in between two consecutive synchronization
+r=1 m(r)
+and an
+
+time steps of other workers. For example  unlike the synchronous setting bxt ext = 1
+RPR
+does not hold here; however  we can show thatbxt ext is equal to the sum of 1
+additional term  which leads to potentially a weaker bound Ekbxt extk2 O ⌘2
+t/2G2(H 2 + H 4)
+t/2G2H 2 for the synchronous setting)  proved in Lemma 13-14 in Appendix C. Similarly 
+(vs. O⌘2
+the proof of the average true sequence being close to the virtual sequence requires carefully chosen
+reference points on the global parameter sequence lying within bounded steps of the local parameters.
+RPR
+r=1 Ekbxt bx(r)
+We show a bound on 1
+t G2(H 2 + H 4/2)  which is weaker than the
+corresponding bound O(⌘2
+5 Experiments
+
+t G2H 2) for the synchronous setting  in Lemma 11-12 in Appendix C.
+
+µ32T 2 (H 2 + H 4)⌘ .
+
+T )  H  for every r 2 [R].
+
+RPR
+
+r=1 m(r)
+
+t
+
+t k2 O (⌘2
+
+Experiment setup: We train ResNet-50 [13] (which has d = 25  610  216 parameters) on ImageNet
+dataset  using 8 NVIDIA Tesla V100 GPUs. We use a learning rate schedule consisting of 5 epochs of
+linear warmup  followed by a piecewise decay of 0.1 at epochs 30  60 and 80  with a batch size of 256
+per GPU. For experiments  we focus on SGD with momentum of 0.9  applied on the local iterations
+of the workers. We build our compression scheme into the Horovod framework [28].9 We use
+SignT opk (as in Lemma 2) as our composed operator. In T opk  we only update kt = min(dt  1000)
+elements per step for each tensor t  where dt is the number of elements in the tensor. For ResNet-50
+architecture  this amounts to updating a total of k = 99  400 elements per step. We also perform
+analogous experiments on the MNIST [19] handwritten digits dataset for softmax regression with a
+standard `2 regularizer  using the synchronous operation of Qsparse-local-SGD with 15 workers  and
+
+9Our implementation is available at https://github.com/karakusc/horovod/tree/qsparselocal.
+
+8
+
+a decaying learning rate as proposed in Theorem 2  the details of which are provided in Appendix D.10
+Results: Figure 1 compares the performance of SignT opk-SGD (which employs the 1 bit sign quan-
+tizer and the T opk sparsiﬁer) with error compensation (SignTopK) against (i) T opk SGD with error
+compensation (TopK-SGD)  (ii) SignSGD with error compensation (EF-SIGNSGD)  and (iii) vanilla
+SGD (SGD). All of these are specializations of Qsparse-local-SGD. Furthermore  SignTopK_hL
+uses a synchronization period of h; same applies for other schemes. From Figure 1a  we observe that
+quantization and sparsiﬁcation  both individually and combined  with error compensation  has almost
+no penalty in terms of convergence rate  with respect to vanilla SGD. We observe that SignTopK
+demonstrates superior performance over EF-SIGNSGD  TopK-SGD  as well as vanilla SGD  both
+in terms of the required number of communicated bits for achieving a certain target loss as well as
+test accuracy. This is because in SignTopK  we send only 1 bit for the sign of each T opk coordinate 
+along with its location. Observe that the incorporation of local iterations in Figure 1a has very little
+impact on the convergence rates  as compared to vanilla SGD with the same number of local iterations.
+Furthermore  this provides an added advantage over SignTopK  in terms of savings (by a factor of 6
+to 8 times on average) in communication bits for achieving a certain target loss; see Figure 1b.
+
+(a) Training loss vs epochs
+
+(b) Training loss vs log2 of
+
+communication budget
+
+(c) top-1 accuracy [18] for
+
+schemes in Figure 1a
+
+(d) top-5 accuracy [18] for
+
+schemes in Figure 1a
+
+Figure 1 Figure 1a-1d demonstrate performance gains of our of our scheme in comparison with local SGD [31] 
+EF-SIGNSGD [15] and TopK-SGD [4  30] in a non-convex setting for synchronous updates.
+Figure 1c and Figure 1d show the top-1  and top-5 convergence rates 11respectively  with respect
+to the total number of bits of communication used. We observe that Qsparse-local-SGD combines
+the bit savings of the deterministic sign based operator and aggressive sparsiﬁer  with infrequent
+communication; thereby  outperforming the cases where these techniques are individually used. In
+particular  the required number of bits to achieve the same loss or accuracy in the case of Qsparse-
+local-SGD is around 1/16 in comparison with TopK-SGD and over 1000⇥ less than vanilla SGD.
+
+(a) Training loss vs epochs
+
+(b) Training loss vs log2 of communication
+
+budget
+
+(c) top-1 accuracy [18] for schemes in
+
+Figure 2a
+
+Figure 2 Figure 2a-2c demonstrate the performance gains of our scheme in a convex setting.
+
+Figure 2b and 2c makes similar comparisons in the convex setting  and shows that for a test error
+approximately 0.1  Qsparse-local-SGD combines the beneﬁts of the composed operator SignT opk 
+with local computations  and needs 10-15 times less bits than TopK-SGD and 1000⇥ less bits than
+vanilla SGD. Also in Figure 2a  we observe that both TopK-SGD and SignTopK_8L (SignTopK with
+8 local iterations) converge at rates which are almost similar to that of their corresponding local SGD
+counterpart. Our experiments in both non-convex and convex settings verify that error compensation
+through memory can be used to mitigate not only the missing components from updates in previous
+synchronization rounds  but also explicit quantization error.
+
+10Further numerics demonstrating the performance of Qsparse-local-SGD for the composition of a stochastic
+
+quantizer with a sparsiﬁer  as compared to SignT opk and other standard baselines can be found in [6].
+
+11top-i refers to the accuracy of the top i predictions by the model from the list of possible classes; see [18].
+
+9
+
+Acknowledgments
+The authors gratefully thank Navjot Singh for his help with experiments in the early stages of this
+work. This work was partially supported by NSF grant #1514531  by UC-NL grant LFR-18-548554
+and by Army Research Laboratory under Cooperative Agreement W911NF-17-2-0196. The views
+and conclusions contained in this document are those of the authors and should not be interpreted as
+representing the ofﬁcial policies  either expressed or implied  of the Army Research Laboratory or
+the U.S. Government. The U.S. Government is authorized to reproduce and distribute reprints for
+Government purposes notwithstanding any copyright notation here on.
+
+References
+[1] M. Abadi  P. Barham  J. Chen  Z. Chen  A. Davis  J. Dean  M. Devin  S. Ghemawat  G. Irving 
+M. Isard  M. Kudlur  J. Levenberg  R. Monga  S. Moore  D. G. Murray  B. Steiner  P. A. Tucker 
+V. Vasudevan  P. Warden  M. Wicke  Y. Yu  and X. Zheng. Tensorﬂow: A system for large-scale
+machine learning. In OSDI  pages 265–283  2016.
+
+[2] Alham Fikri Aji and Kenneth Heaﬁeld. Sparse communication for distributed gradient descent.
+
+In EMNLP  pages 440–445  2017.
+
+[3] D. Alistarh  D. Grubic  J. Li  R. Tomioka  and M. Vojnovic. QSGD: communication-efﬁcient
+
+SGD via gradient quantization and encoding. In NIPS  pages 1707–1718  2017.
+
+[4] D. Alistarh  T. Hoeﬂer  M. Johansson  N. Konstantinov  S. Khirirat  and C. Renggli. The
+
+convergence of sparsiﬁed gradient methods. In NeurIPS  pages 5977–5987  2018.
+
+[5] Francis R. Bach and Eric Moulines. Non-asymptotic analysis of stochastic approximation
+
+algorithms for machine learning. In NIPS  pages 451–459  2011.
+
+[6] Debraj Basu  Deepesh Data  Can Karakus  and Suhas N. Diggavi. Qsparse-local-sgd: Distributed
+SGD with quantization  sparsiﬁcation  and local computations. CoRR  abs/1906.02367  2019.
+[7] J. Bernstein  Y. Wang  K. Azizzadenesheli  and A. Anandkumar. SignSGD: compressed
+
+optimisation for non-convex problems. In ICML  pages 559–568  2018.
+
+[8] L. Bottou. Large-scale machine learning with stochastic gradient descent. In COMPSTAT 
+
+pages 177–186  2010.
+
+[9] Kai Chen and Qiang Huo. Scalable training of deep learning machines by incremental block
+training with intra-block parallel optimization and blockwise model-update ﬁltering. In ICASSP 
+pages 5880–5884  2016.
+
+[10] Gregory F. Coppola.
+
+Iterative parameter mixing for distributed large-margin training of
+structured predictors for natural language processing. PhD thesis  University of Edinburgh 
+UK  2015.
+
+[11] R. Gitlin  J. Mazo  and M. Taylor. On the design of gradient algorithms for digitally implemented
+
+adaptive ﬁlters. IEEE Transactions on Circuit Theory  20(2):125–136  March 1973.
+
+[12] Elad Hazan and Satyen Kale. Beyond the regret minimization barrier: optimal algorithms for
+stochastic strongly-convex optimization. Journal of Machine Learning Research  15(1):2489–
+2512  2014.
+
+[13] K. He  X. Zhang  S. Ren  and J. Sun. Deep residual learning for image recognition. In CVPR 
+
+pages 770–778  2016.
+
+[14] Robbins Herbert and Sutton Monro. A stochastic approximation method. The Annals of
+
+Mathematical Statistics. JSTOR  22  no. 3:400–407  1951.
+
+[15] Sai Praneeth Karimireddy  Quentin Rebjock  Sebastian U. Stich  and Martin Jaggi. Error
+feedback ﬁxes signsgd and other gradient compression schemes. In ICML  pages 3252–3261 
+2019.
+
+[16] Anastasia Koloskova  Sebastian U. Stich  and Martin Jaggi. Decentralized stochastic opti-
+mization and gossip algorithms with compressed communication. In ICML  pages 3478–3487 
+2019.
+
+[17] Jakub Konecný. Stochastic  distributed and federated optimization for machine learning. CoRR 
+
+abs/1707.01155  2017.
+
+10
+
+[18] Maksim Lapin  Matthias Hein  and Bernt Schiele. Top-k multiclass SVM. In NIPS  pages
+
+325–333  2015.
+
+[19] Y. LeCun  L. Bottou  Y. Bengio  and P. Haffner. Gradient-based learning applied to document
+
+recognition. In Proceedings of the IEEE  86(11):2278-2324  1998.
+
+[20] Y. Lin  S. Han  H. Mao  Y. Wang  and W. J. Dally. Deep gradient compression: Reducing the
+
+communication bandwidth for distributed training. In ICLR  2018.
+
+[21] H. Mania  X. Pan  D. S. Papailiopoulos  B. Recht  K. Ramchandran  and M. I. Jordan. Perturbed
+iterate analysis for asynchronous stochastic optimization. SIAM Journal on Optimization 
+27(4):2202–2229  2017.
+
+[22] B. McMahan  E. Moore  D. Ramage  S. Hampson  and B. A. y Arcas. Communication-efﬁcient
+
+learning of deep networks from decentralized data. In AISTATS  pages 1273–1282  2017.
+
+[23] Arkadi Nemirovski  Anatoli Juditsky  Guanghui Lan  and Alexander Shapiro. Robust stochastic
+approximation approach to stochastic programming. SIAM Journal on Optimization  19(4):1574–
+1609  2009.
+
+[24] Lam M. Nguyen  Phuong Ha Nguyen  Marten van Dijk  Peter Richtárik  Katya Scheinberg  and
+Martin Takác. SGD and hogwild! convergence without the bounded gradients assumption. In
+ICML  pages 3747–3755  2018.
+
+[25] A. Rakhlin  O. Shamir  and K. Sridharan. Making gradient descent optimal for strongly convex
+
+stochastic optimization. In ICML  2012.
+
+[26] Benjamin Recht  Christopher Ré  Stephen J. Wright  and Feng Niu. Hogwild: A lock-free
+
+approach to parallelizing stochastic gradient descent. In NIPS  pages 693–701  2011.
+
+[27] F. Seide  H. Fu  J. Droppo  G. Li  and D. Yu. 1-bit stochastic gradient descent and its application
+to data-parallel distributed training of speech dnns. In INTERSPEECH  pages 1058–1062  2014.
+[28] A. Sergeev and M. D. Balso. Horovod: fast and easy distributed deep learning in tensorﬂow.
+
+CoRR  abs/1802.05799  2018.
+
+[29] Shai Shalev-Shwartz  Yoram Singer  and Nathan Srebro. Pegasos: Primal estimated sub-gradient
+
+solver for SVM. In ICML  pages 807–814  2007.
+
+[30] S. U. Stich  J. B. Cordonnier  and M. Jaggi. Sparsiﬁed SGD with memory. In NeurIPS  pages
+
+4452–4463  2018.
+
+[31] Sebastian U. Stich. Local SGD converges fast and communicates little. In ICLR  2019.
+[32] Nikko Strom. Scalable distributed DNN training using commodity GPU cloud computing. In
+
+INTERSPEECH  pages 1488–1492  2015.
+
+[33] A. Theertha Suresh  F. X. Yu  S. Kumar  and H. B. McMahan. Distributed mean estimation with
+
+limited communication. In ICML  pages 3329–3337  2017.
+
+[34] H. Tang  S. Gan  C. Zhang  T. Zhang  and Ji Liu. Communication compression for decentralized
+
+training. In NeurIPS  pages 7663–7673  2018.
+
+[35] Hanlin Tang  Shaoduo Gan  Ce Zhang  Tong Zhang  and Ji Liu. Communication compression
+
+for decentralized training. In NeurIPS  pages 7663–7673  2018.
+
+[36] H. Wang  S. Sievert  S. Liu  Z. B. Charles  D. S. Papailiopoulos  and S. Wright. ATOMO:
+communication-efﬁcient learning via atomic sparsiﬁcation. In NeurIPS  pages 9872–9883 
+2018.
+
+[37] Jianyu Wang and Gauri Joshi. Cooperative SGD: A uniﬁed framework for the design and
+
+analysis of communication-efﬁcient SGD algorithms. CoRR  abs/1808.07576  2018.
+
+[38] J. Wangni  J. Wang  J. Liu  and T. Zhang. Gradient sparsiﬁcation for communication-efﬁcient
+
+distributed optimization. In NeurIPS  pages 1306–1316  2018.
+
+[39] W. Wen  C. Xu  F. Yan  C. Wu  Y. Wang  Y. Chen  and H. Li. Terngrad: Ternary gradients to
+
+reduce communication in distributed deep learning. In NIPS  pages 1508–1518  2017.
+
+[40] J. Wu  W. Huang  J. Huang  and T. Zhang. Error compensated quantized SGD and its applications
+
+to large-scale distributed optimization. In ICML  pages 5321–5329  2018.
+
+[41] Tianyu Wu  Kun Yuan  Qing Ling  Wotao Yin  and Ali H. Sayed. Decentralized consensus
+optimization with asynchrony and delays. IEEE Trans. Signal and Information Processing over
+Networks  4(2):293–307  2018.
+
+11
+
+[42] Hao Yu  Rong Jin  and Sen Yang. On the linear speedup analysis of communication efﬁcient
+
+momentum sgd for distributed non-convex optimization. In ICML  pages 7184–7193  2019.
+
+[43] Hao Yu  Sen Yang  and Shenghuo Zhu. Parallel restarted SGD with faster convergence and less
+communication: Demystifying why model averaging works for deep learning. In AAAI  pages
+5693–5700  2019.
+
+[44] Y. Zhang  J. C. Duchi  M. I. Jordan  and M. J. Wainwright. Information-theoretic lower bounds
+for distributed statistical estimation with communication constraints. In NIPS  pages 2328–2336 
+2013.
+
+[45] Y. Zhang  J. C. Duchi  and M. J. Wainwright. Communication-efﬁcient algorithms for statistical
+
+optimization. Journal of Machine Learning Research  14(1):3321–3363  2013.
+
+12
+
+,Debraj Basu
+Deepesh Data
+Can Karakus
+Suhas Diggavi

@@ -1,0 +1,880 @@
+2016,Cyclades: Conflict-free Asynchronous Machine Learning,We present Cyclades  a general framework for parallelizing stochastic optimization algorithms in a shared memory setting. Cyclades is asynchronous during model updates  and requires no memory locking mechanisms  similar to Hogwild!-type algorithms. Unlike Hogwild!  Cyclades introduces no conflicts during parallel execution  and offers a black-box analysis for provable speedups across a large family of algorithms.  Due to its inherent cache locality and conflict-free nature   our multi-core implementation of Cyclades consistently outperforms Hogwild!-type algorithms on sufficiently sparse datasets  leading to up to 40% speedup gains compared to Hogwild!  and up to 5\times gains over asynchronous implementations of variance reduction algorithms.,Conﬂict-free Asynchronous Machine Learning
+
+CYCLADES:
+
+Xinghao Pan⇤  Maximilian Lam⇤ 
+
+Stephen Tu⇤  Dimitris Papailiopoulos⇤ 
+
+Ce Zhang†  Michael I. Jordan⇤‡  Kannan Ramchandran⇤  Chris Re†  Benjamin Recht⇤‡
+
+Abstract
+
+We present CYCLADES  a general framework for parallelizing stochastic optimiza-
+tion algorithms in a shared memory setting. CYCLADES is asynchronous during
+model updates  and requires no memory locking mechanisms  similar to HOG-
+WILD!-type algorithms. Unlike HOGWILD!  CYCLADES introduces no conﬂicts
+during parallel execution  and offers a black-box analysis for provable speedups
+across a large family of algorithms. Due to its inherent cache locality and conﬂict-
+free nature  our multi-core implementation of CYCLADES consistently outperforms
+HOGWILD!-type algorithms on sufﬁciently sparse datasets  leading to up to 40%
+speedup gains compared to HOGWILD!  and up to 5⇥ gains over asynchronous
+implementations of variance reduction algorithms.
+
+1
+
+Introduction
+
+Following the seminal work of HOGWILD! [17]  many studies have demonstrated that near linear
+speedups are achievable on several machine learning tasks via asynchronous  lock-free implemen-
+tations [25  13  8  16]. In all of these studies  classic algorithms are parallelized by simply running
+parallel and asynchronous model updates without locks. These lock-free  asynchronous algorithms
+exhibit speedups even when applied to large  non-convex problems  as demonstrated by deep learn-
+ing systems such as Google’s Downpour SGD [6] and Microsoft’s Project Adam [4]. While these
+techniques have been remarkably successful  many of the above papers require delicate and tailored
+analyses to quantify the beneﬁts of asynchrony for each particular learning task. Moreover  in
+non-convex settings  we currently have little quantitative insight into how much speedup is gained
+from asynchrony.
+In this work  we present CYCLADES  a general framework for lock-free  asynchronous machine
+learning algorithms that obviates the need for specialized analyses. CYCLADES runs asynchronously
+and maintains serial equivalence  i.e.  it produces the same outcome as the serial algorithm. Since
+it returns the same output as a serial implementation  any algorithm parallelized by our framework
+inherits the correctness proof of the serial counterpart without modiﬁcations. Additionally  if a
+particular serially run heuristic is popular  but does not have a rigorous analysis  CYCLADES still
+guarantees that its execution will return a serially equivalent output.
+CYCLADES achieves serial equivalence by partitioning updates among cores  in a way that ensures
+that there are no conﬂicts across partitions. Such a partition can always be found efﬁciently by
+leveraging a powerful result on graph phase transitions [12]. When applied to our setting  this result
+guarantees that a sufﬁciently small sample of updates will have only a logarithmic number of conﬂicts.
+This allows us to evenly partition model updates across cores  with the guarantee that all conﬂicts are
+localized within each core. Given enough problem sparsity  CYCLADES guarantees a nearly linear
+
+⇤Department of Electrical Engineering and Computer Science  UC Berkeley  Berkeley  CA.
+†Department of Computer Science  Stanford University  Palo Alto  CA.
+‡Department of Statistics  UC Berkeley  Berkeley  CA.
+
+30th Conference on Neural Information Processing Systems (NIPS 2016)  Barcelona  Spain.
+
+speedup  while inheriting all the qualitative properties of the serial counterpart of the algorithm  e.g. 
+proofs for rates of convergence. Enforcing a serially equivalent execution in CYCLADES comes with
+additional practical beneﬁts. Serial equivalence is helpful for hyperparameter tuning  or locating
+the best model produced by the asynchronous execution  since experiments are reproducible  and
+solutions are easily veriﬁable. Moreover  a CYCLADES program is easy to debug because bugs are
+repeatable and we can examine the step-wise execution to localize them.
+A signiﬁcant beneﬁt of the update partitioning in CYCLADES is that it induces considerable access
+locality compared to the more unstructured nature of the memory accesses during HOGWILD!. Cores
+will access the same data points and read/write the same subset of model variables. This has the addi-
+tional beneﬁt of reducing false sharing across cores. Because of these gains  CYCLADES can actually
+outperform HOGWILD! in practice on sufﬁciently sparse problems  despite appearing to require
+more computational overhead. Remarkably  because of the added locality  even a single threaded
+implementation of CYCLADES can actually be faster than serial SGD. In our SGD experiments for
+matrix completion and word embedding problems  CYCLADES can offer a speedup gain of up to 40%
+compared to that of HOGWILD!. Furthermore  for variance reduction techniques such as SAGA [7]
+and SVRG [11]  CYCLADES yields better accuracy and more signiﬁcant speedups  with up to 5⇥
+performance gains over HOGWILD!-type implementations.
+
+Algorithm 1 Stochastic Updates
+1: Input: x; f1  . . .   fn; T
+2: for t = 1 : T do
+sample i ⇠ D
+3:
+4:
+xSi = ui(xSi  fi)
+5: Output: x
+
+2 The Algorithmic Family of Stochastic-Updates
+We study parallel asynchronous iterative algorithms on the computational model used by [17]: several
+cores have access to the same shared memory  and each of them can read and update components of
+the shared memory. In this work  we consider a family of randomized algorithms that we refer to as
+Stochastic Updates (SU). The main algorithmic component of SU focuses on updating small subsets
+of a model variable x  according to preﬁxed access patterns  as sketched by Alg. 1.
+In Alg. 1  Si is a subset of the coordinates in x  each function
+fi operates on the subset Si of coordinates  and ui is a local
+update function that computes a vector with support on Si using
+as input xSi and fi. Moreover  T is the total number of iterations 
+and D is the distribution with support {1  . . .   n} from which we
+draw i. Several machine learning algorithms belong to the SU
+algorithmic family  such as stochastic gradient descent (SGD) 
+with or without weight decay and regularization  variance-reduced
+learning algorithms like SAGA and SVRG  and even some combinatorial graph algorithms. In our
+supplemental material  we explain how these algorithms can be phrased in the SU language.
+conﬂict graph
+The updates conﬂict graph A useful construct for our develop-
+ments is the conﬂict graph between updates  which can be generated
+from the bipartite graph between the updates and the model variables.
+We deﬁne these graphs below  and provide an illustrative sketch in
+Fig. 1.
+Deﬁnition 1. Let Gu denote the bipartite update-variable graph
+between the n updates and the d model variables. An update ui
+is linked to a variable xj  if ui requires to read/write xj. Let Eu
+denote the number of edges in the bipartite graph  L the max left
+degree of Gu  and L the average left degree. Finally  we denote
+by Gc the conﬂict graph on the n updates. Two vertices in Gc are
+linked  if the corresponding updates share at least one variable in
+Gu. We also denote as  the max vertex degree of Gc.
+
+Figure 1: In the bipartite graph 
+an update ui is linked to variable
+xj when it needs to read/write it.
+From Gu we obtain the conﬂict
+graph Gc  whose max degree is
+. If that is small  we expect that
+it is possible to parallelize updates
+without too many conﬂicts. CY-
+CLADES exploits this intuition.
+We stress that the conﬂict graph is never constructed  but is a useful for understanding CYCLADES.
+
+x1
+x2
+
+u1
+u2
+
+un
+
+...
+
+un
+
+...
+
+xd
+
+u1
+
+sample
+
+u2
+
+Our Main Result By exploiting the structure of the above graphs and through a light-weight
+sampling and allocation of updates  CYCLADES guarantees the following result for SU algorithms 
+which we establish in the following sections.
+Theorem 1 (informal). Let an SU algorithm A be deﬁned through n update rules  where the conﬂict
+max degree between the n updates is   and the sampling distribution D is uniform with (or without)
+replacement from {1  . . .   n}. Moreover  assume that we wish to run A for T = ⇥(n) iterations  and
+
+2
+
+·L
+
+i=1 `i(aT
+
+nPn
+
+L  pn. Then on up to P = ˜O( n
+
+) cores  CYCLADES guarantees ae⌦(P ) speedup over
+that L
+A  while outputting the same solution x as A would do after the same random set of T iterations.4
+We now provide two examples of how these guarantees translate for speciﬁc problem cases.
+Example 1. In many applications we seek to minimize: minx
+i x) where ai represents
+the ith data point  x is the parameter vector  and `i is a loss. Several problems can be formulated in
+this way  such as logistic regression  least squares  binary classiﬁcation  etc. If we tackle the above
+problem using SGD  or techniques like SVRG and SAGA  then (as we show in the supplemental) the
+update sparsity is determined by the gradient of a single sampled data point ai. Here  we will have
+L = maxi ||ai||0  and  will be equal to the maximum number of data points ai that share at least
+one feature. As a toy example  let n
+d = ⇥(1) and let the non-zero support of ai be of size n and
+uniformly distributed. Then  one can show that with high probability  = eO(n1/2+) and hence
+CYCLADES achieves ane⌦(P ) speedup on up to P = eO(n1/22) cores.
+Example 2. Consider the generic optimization minxi yj  i2[n]Pm
+i=1Pm
+
+j=1 i j(xi  yj)  which cap-
+tures several problems like matrix completion and factorization [17]  word embeddings [2]  graph
+k-way cuts [17]  etc. Assume that we aim to minimize the above by sampling a single function
+i j and then updating xi and yj using SGD. Here  the number of update functions is proportional
+to n = m2  and each gradient update with respect to the sampled function i j(xi  yj) is only
+interacting with the variables xi and yj  i.e.  only two variable vectors out of the 2m vectors (i.e. 
+L = 2). This also implies a conﬂict degree of at most  = 2m. Here  CYCLADES can provably
+
+1
+
+guarantee ane⌦(P ) speedup for up to P = O(m) cores.
+
+In our experiments we test CYCLADES on several problems including least squares  classiﬁcation
+with logistic models  matrix factorization  and word embeddings  and several algorithms including
+SGD  SVRG  and SAGA. We show that in most cases it can signiﬁcantly outperform the HOGWILD!
+implementation of these algorithms  if the data is sparse.
+Remark 1. We would like to note that there are several cases where there might be a few outlier
+updates with extremely high conﬂict degree. In the supplemental material  we prove that if there are
+no more than O(n) vertices of high conﬂict degree o  and the rest of the vertices have max degree
+at most   then the result of Theorem 1 still holds in expectation.
+
+In the following section  we establish the theory of CYCLADES and provide the details behind our
+parallelization framework.
+3 CYCLADES: Shattering Dependencies
+
+of
+
+three
+
+consists
+
+CYCLADES
+computational
+It starts by sampling (according to a distribution D) a
+number of B updates from the graph shown in Fig. 1 
+and assigns a label to each of them (a processing
+order). After sampling  it computes the connected
+components of the sampled subgraph induced by the
+B sampled updates  to determine the conﬂict groups.
+Once the conﬂicts groups are formed  it allocates
+them across P cores. Finally  each core processes
+locally the conﬂict groups of updates that it has been
+assigned  following the order that each update has
+been labeled with. The above process is then repeated 
+for as many iterations as needed. The key component
+of CYCLADES is to carry out the sampling in such
+a way that we have as many connected components
+as possible  and all of them of small size  provably.
+In the next subsections  we explain how each part
+is carried out  and provide theoretical guarantees for
+each of them individually  which we combine at the
+end of this section for our main theorem.
+
+4e⌦(·) and eO(·) hide polylog factors.
+
+3
+
+components
+
+as
+
+shown
+
+in
+
+Fig.
+
+2.
+
+Sample Batch + Connected Components
+
+conﬂict-graph
+
+sample
+
+C.C.
+
+Allocation
+
+Core1
+
+Core 2
+
+Core p
+
+Asynchronous and Lock-free Stochastic Updates
+
+SU
+Core1
+
+SU
+Core 2
+
+Batch Synchronization
+
+SU
+Core p
+
+Figure 2: CYCLADES samples updates  ﬁnds
+conﬂict-groups  and allocates them across cores.
+Each core asynchronously updates the model  with-
+out access conﬂicts. This is possible by processing
+the conﬂicting updates within the same core.
+
+A key technical aspect that we exploit in CYCLADES is that appropriate sampling and allocation of
+updates can lead to near optimal parallelization of SU algorithms. To do that we expand upon the
+following result established in [12].
+Theorem 2. Let G be a graph on n vertices  with max degree . Let us sample each vertex
+independently with probability p = 1✏
+ and deﬁne as G0 the induced subgraph on the sampled
+vertices. Then  the largest connected component of G0 has size at most 4
+✏2 log n  with high probability.
+The above result pays homage to the giant component phase transition phenomena in random
+Erdos-Renyi graphs. What is surprising is that similar phase transitions apply to any given graph!
+In practice  for most SU algorithms of interest  the sampling distribution of updates is either with or
+without replacement from the n updates. As it turns out  morphing Theorem 2 into a with-/without-
+replacement result is not straightforward. We defer the analysis needed to the supplemental material 
+and present our main theorem about graph sampling here.
+Theorem 3. Let G be a graph on n vertices  with max degree . Let us sample B = (1✏)n
+ vertices
+with or without replacement  and deﬁne as G0 the induced subgraph on the sampled vertices. Then 
+the largest connected component of G0 has size at most O( log n
+The key idea from the above is that if one samples no more than B = (1✏) n
+be at least O (✏2B/log n) conﬂict groups to allocate across cores  each of size at most Olog n/✏2.
+Since there are no conﬂicts between different conﬂict-groups  the processing of updates per any single
+group will never interact with the variables corresponding to the updates of another conﬂict group.
+The next step of CYCLADES is to form and allocate the connected components (CCs) across cores 
+efﬁciently. We address this in the following subsection. In the following  for brevity we focus on the
+with-replacement sampling case  but the results can be extended to the without-replacement case.
+
+✏2 )  with high probability.
+
+ updates  then there will
+
+) and let L
+1✏ batches  each of size B = (1  ✏) n
+
+Identifying groups of conﬂict
+In CYCLADES  we sample batches of updates of size B multiple
+times  and for each batch we need to identify the conﬂict groups across the updates. Let us refer
+to Gi
+u as the subgraph induced by the ith sampled batch of updates on the update-variable graph
+Gu. In the following we always assume that we sample nb = c · /(1  ✏) batches  where c  1 is
+a constant. This number of batches results in a constant number of passes over the dataset. Then 
+identifying the conﬂict groups in Gi
+u can be done with a connected components (CC) algorithm. The
+main question we need to address is what is the best way to parallelize this graph partitioning part. In
+the supplemental  we provide the details of this part  and prove the following result:
+L  pn. Then  the overall computation
+Lemma 1. Let the number of cores be P = O( n
+L
+  costs no more than O(Eu/P log2 n).
+of CCs for nb = c · 
+Allocating updates to cores Once we compute the CCs (i.e.  the conﬂicts groups of the sampled
+updates)  we have to allocate them across cores. Once a core has been assigned with CCs  it will
+process the updates included in these CCs  according to the order that each update has been labeled
+with. Due to Theorem 3  each connected component will contain at most O( log n
+✏2 ) updates. Assuming
+that the cost of the j-th update in the batch is wj  the cost of a single connected component C will be
+wC =Pj2C wj. To proceed with characterizing the maximum load among the P cores  we assume
+that the cost of a single update ui  for i 2 {1  . . .   n}  is proportional to the out-degree of that update
+—according to the update-variable graph Gu— times a constant cost which we shall refer to as .
+Hence  wj = O(dL j · )  where dL j is the degree of the j-th left vertex of Gu. In the supplemental
+material  we establish that a near-uniform allocation of CCs according to their weights leads to the
+following guarantee.
+L  pn. Then  computing
+Lemma 2. Let the number of cores by bounded as P = O( n
+L
+the stochastic updates across all nb = c · 
+· )  with
+high probability  where  is the per edge cost for computing one of the n updates deﬁned on Gu.
+
+1✏ batches can be performed in time O( E log2 n
+
+)  and let L
+
+P
+
+Stitching the pieces together Now that we have described the sampling  conﬂict computation  and
+allocation strategies  we are ready to put all the pieces together and detail CYCLADES in full. Let us
+  and that each
+assume that we sample a total number of nb = c · 
+update is sampled uniformly at random. For the i-th batch let us denote as Ci
+mi the connected
+
+1✏ batches of size B = (1  ✏) n
+1  . . .Ci
+
+4
+
+P
+
+components on the induced subgraph Gi
+u. Due to Theorem 3  each connected component C contains a
+number of at most O( log n
+✏2 ) updates; each update carries an ID (the order of which it would have been
+sampled by the serial algorithm). Using the above notation  we give the pseudocode for CYCLADES
+in Alg. 2. Note that the inner loop that is parallelized (i.e.  the SU processing loop in lines 6 – 9)  can
+be performed asynchronously; cores do not have to synchronize  and do not need to lock any memory
+variables  as they are all accessing non-overlapping subset of x. This also provides for better cache
+coherence. Moreover  each core potentially accesses the same coordinates several times  leading to
+good cache locality. These improved cache locality and coherence properties experimentally lead to
+substantial performance gains as we see in the next section. We can now combine the results of the
+previous subsection to obtain our main theorem for CYCLADES.
+Theorem 4. Let us assume any given update-variable graph Gu with L and L  such that
+L  pn  and with induced max conﬂict degree . Then  CYCLADES on P = O( n
+) cores  with
+L
+ can execute T = c · n updates  for any constant c  1  selected uniformly
+batch sizes B = (1  ✏) n
+at random with replacement  in time O Eu·
+
+· log2 n   with high probability.
+
+Allocation of Ci
+for each core in parallel do
+
+Algorithm 2 CYCLADES
+1: Input: Gu  nb.
+u from Gu
+2: Sample nb subgraphs G1
+3: Compute in parallel CCs for sampled graphs
+4: for batch i = 1 : nb do
+5:
+6:
+7:
+8:
+9:
+10: Output: x
+
+Observe that CYCLADES bypasses the need to es-
+tablish convergence guarantees for the parallel algo-
+rithm. Hence  it could be the case for an applications
+of interest that we cannot analyze how a serial SU al-
+gorithm performs in terms of say the accuracy of the
+solution  but CYCLADES can still provide black box
+guarantees for speedup  since our analysis is com-
+pletely oblivious to the qualitative performance of
+the serial algorithm. This is in contrast to recent stud-
+ies similar to [5]  where the authors provide speedup
+guarantees via a convergence-to-optimal proof for an
+asynchronous SGD on a nonconvex problem. Unfor-
+tunately these proofs can become complicated on a wider range of nonconvex objectives.
+In the following section we show that CYCLADES is not only useful theoretically  but can consistently
+outperform HOGWILD! on sufﬁciently sparse datasets.
+4 Evaluation
+We implemented CYCLADES5 in C++ and tested it on a variety of problems  and a number of
+stochastic updates algorithms  and compared against their HOGWILD! (i.e.  asynchronous  lock-free)
+implementations. Since CYCLADES is intended to be a general SU parallelization framework  we
+do not compare against algorithms tailored to speciﬁc applications  nor do we expect CYCLADES
+to outperform every such highly-tuned  well-designed  speciﬁc algorithms. Our experiments were
+conducted on a machine with 72 CPUs (Intel(R) Xeon(R) CPU E7-8870 v3  2.10 GHz) on 4 NUMA
+nodes  each with 18 CPUs  and 1TB of memory. We ran CYCLADES and HOGWILD! with 1  4  8  16
+and 18 threads pinned to CPUs on a single NUMA node (i.e.  the maximum physical number of cores
+per single node)  to can avoid well-known cache coherence and scaling issues across nodes [24].
+
+mi to P cores
+
+for each allocated component C do
+
+for each ordered update j from C do
+
+xSj = uj(xSj   fj)
+
+·L
+
+u  . . .   Gnb
+
+1  . . .Ci
+
+Dataset
+NH2010
+DBLP
+
+MovieLens
+EN-Wiki
+
+# datapoints
+
+48 838
+5 425 964
+⇠10M
+20 207 156
+
+# features
+48 838
+5 425 964
+82 250
+213 272
+
+av. sparsity / datapoint
+
+Comments
+
+4.8026
+3.1880
+200
+200
+
+Topological graph
+Authorship network
+10M movie ratings
+
+Subset of english Wikipedia dump.
+
+Table 1: Details of datasets used in our experiments.
+
+In our experiments  we measure overall running times which include the overheads for computing
+connected components and allocating work in CYCLADES. We also compute the objective value at
+the end of each epoch (i.e.  one full pass over the data). We measure the speedups for each algorithm
+as time of the parallel algorithm to reach ✏ objective
+time of the serial algorithm to reach ✏ objective where ✏ was chosen to be the smallest objective value that is
+achievable by all parallel algorithms on every choice of number of threads. The serial algorithm used
+for comparison is HOGWILD! running serially on one thread. In Table 1 we list some details of the
+datasets that we use in our experiments. We tune our constant stepsizes so to maximize convergence
+
+5Code is available at https://github.com/amplab/cyclades.
+
+5
+
+without diverging  and use one random data reshufﬂing across all epochs. Batch sizes are picked to
+optimize performance for CYCLADES.
+
+(a) Least Sq.  DBLP 
+SAGA
+
+(b) Graph Eig.  nh2010 
+SVRG
+
+(c) Mat. Comp.  10M  `2-
+SGD
+
+(d) Word2Vec  EN-Wiki 
+SGD
+
+Figure 3: Convergence of CYCLADES and HOGWILD! in terms of overall running time with 1  8  16  18 threads.
+CYCLADES is initially slower  but ultimately reaches convergence faster than HOGWILD!.
+
+(a) Least Sq.  DBLP 
+SAGA
+
+(b) Graph Eig.  nh2010 
+SVRG
+
+(c) Mat. Comp.  10M  `2-
+SGD
+
+(d) Word2Vec  EN-Wiki 
+SGD
+
+Figure 4: Speedup of CYCLADES and HOGWILD! versus number of threads. On multiple threads  CYCLADES
+always reaches ✏ objective faster than HOGWILD!. In some cases CYCLADES is faster than HOGWILD! even
+on 1 thread  due to better cache locality. In Figs. 4(a) and 4(b)  CYCLADES exhibits signiﬁcant gains since
+HOGWILD! suffers from asynchrony noise  and we had to use comparatively smaller stepsizes to prevent it from
+diverging.
+
+1
+
+nPn
+
+i=1(aT
+
+Least squares via SAGA The ﬁrst problem we consider is least
+squares: minx minx
+i x bi)2 which we will solve using
+the SAGA algorithm [7]  an incrimental gradient algorithm with
+faster than SGD rates on convex  or strongly convex functions. In
+SAGA  we initialize gi = rfi(x0) and iterate the following two
+nPn
+steps xk+1 = xk   · (rfsk (xk)  gsk + 1
+i=1 gi) and gsk =
+rfsk (xk)  where fi(x) = (aT
+i x  bi)2. In the above iteration it is
+useful to observe that the updates can be performed in a sparse and
+“lazy” way  as we explain in detail in our supplemental material.
+The stepsizes chosen for each of CYCLADES and HOGWILD! were
+largest such that the algorithms did not diverge. We used the DBLP
+and NH2010 datasets for this experiment  and set A as the adjacency
+matrix of each graph. For NH2010  the values of b were set to
+population living in the Census Block. For DBLP we used synthetic
+values: we set b = A˜x + 0.1˜z  where ˜x and ˜z were generated
+randomly. The SAGA algorithm was run for 500 epochs for each
+dataset. When running SAGA for least squares  we found that
+HOGWILD! was divergent with the large stepsizes that we were
+using for CYCLADES (Fig. 5). Thus  in the multi-thread setting 
+we were only able to use smaller stepsizes for HOGWILD!  which
+resulted in slower convergence than CYCLADES  as seen in Fig. 3(a). The effects of a smaller stepsize
+for HOGWILD! are also manifested in terms of speedups in Fig. 4(a)  since HOGWILD! takes a longer
+time to converge to an ✏ objective value.
+
+Figure 5: Convergence of CY-
+CLADES and HOGWILD! on least
+squares using SAGA  with 16
+threads  on DBLP dataset. HOG-
+WILD! diverges with  > 105;
+thus  we were only able to use a
+smaller step size  = 105 for
+HOGWILD! on multiple threads.
+For HOGWILD! on 1 thread (and
+CYCLADES on any number of
+threads)  we could use a larger
+stepsize of  = 3 ⇥ 104.
+
+Graph eigenvector via SVRG Given an adjacency matrix A  the top eigenvector of AT A is useful
+in several applications such as spectral clustering  principle component analysis  and others. In a
+
+6
+
+n I  aiaT
+
+n I  aiaT
+
+n b.
+
+2 (kUk2
+
+F + kVk2
+
+i x  1
+
+i=1 1
+
+2 xT 
+
+i x  1
+
+recent work  [10] proposes an algorithm for computing the top eigenvector of AT A by running
+intermediate SVRG steps to approximate the shift-and-invert iteration. Speciﬁcally  at each step
+
+n bT x  where ai is the i-th column of
+SVRG is used to solve: minPn
+A. According to [10]  if we initialize y = x0 and assume kaik = 1  we have to iterate the following
+updates xk+1 = xk   · n · (rfsk (xk)  rfsk (y)) +  · rf (y) where after every T iterations we
+update y = xk  and the stochastic gradients are of the form rfi(x) = 
+We apply CYCLADES to the above SVRG iteration (see supplemental) for parallelizing this problem.
+We run experiments on two graphs: DBLP and and NH2010. We ran SVRG for 50 and 100 epochs
+for NH2010 and DBLP respectively. The convergence of SVRG for graph eigenvectors is shown
+in Fig. 3(b). CYCLADES starts off slower than HOGWILD!  but always produces results equivalent
+to the convergence on a single thread. HOGWILD! does not exhibit the same behavior on multiple
+threads as it does serially; due to asynchrony causes HOGWILD! to converge slower on multiple
+threads. This effect is clearly seen on Figs. 4(b)  where HOGWILD! fails to converge faster than the
+serial counterpart  and CYCLADES attains a signiﬁcantly better speedup on 16 threads.
+Matrix completion and word embeddings via SGD In matrix completion we are given a partially
+observed matrix M  and wish to factorize it as M ⇡ UV where U and V are low rank matrices with
+dimensions n⇥ r and r⇥ m respectively. This may be achieved by optimizing minP(i j)2⌦(Mi j 
+F ) where ⌦ is the set of observed entries  which can be approximated
+Ui ·V· j)2 + 
+by SGD on the observed samples. The regularized objective can be optimized by weighted SGD. In
+our experiments  we chose a rank of r = 100  and ran SGD and weighted SGD for 200 epochs. We
+used the MovieLens 10M dataset containing 10M ratings for 10K movies by 72K users.
+Our second task that uses SGD is word embeddings  which aim to represent
+the mean-
+ing of a word w via a vector vw 2 Rd. A recent work by [2] proposes to solve:
+min{vw} CPw w0 Aw w0(log(Aw w0)  kvw + vw0k2
+2  C)2  where Aw w0 is the number of times
+words w and w0 co-occur within ⌧ words in the corpus. In our experiments we set ⌧ = 10 following
+the suggested recipe of the aforementioned paper. We can approximate the solution to the above
+problem  by obtaining one using SGD: we can repeatedly sample entries Aw w0 from A and update
+the corresponding vectors vw  vw0. Then  at the end of each full pass over the data  we update the
+constant C by its locally optimal value  which can be calculated in closed form. In our experiments 
+we optimized for a word embedding of dimension d = 100  and tested on a 80MB subset of the
+English Wikipedia dump. For our experiments  we run SGD for 200 epochs.
+Figs. 3(c) and 3(d) show the convergence for the matrix completion and word embeddings prob-
+lems. CYCLADES is initially slower than HOGWILD! due to the overhead of computing connected
+components. However  due to better cache locality and convergence properties  CYCLADES is able
+to reach a lower objective value in less time than HOGWILD!. In fact  we observe that CYCLADES
+is faster than HOGWILD! when both are run serially  demonstrating that the gains from (temporal)
+cache locality outweigh the coordination overhead of CYCLADES. These results are reﬂected in the
+speedups of CYCLADES and HOGWILD! (Figs. 4(c) and 4(d)). CYCLADES consistently achieves a
+better speedup (up to 11⇥ on 18 threads) compared to that of HOGWILD! (up to 9⇥ on 18 threads).
+Partitioning and allocation costs5 The cost of partitioning and allocation5 for CYCLADES is given
+in Table 2  relatively to the time that HOGWILD! takes to complete a single pass over the dataset. For
+matrix completion and the graph eigenvector problem  on 18 threads  CYCLADES takes the equivalent
+of 4-6 epochs of HOGWILD! to complete its partitioning  as the problem is either very sparse or the
+updates are expensive. For solving least squares using SAGA and word embeddings using SGD  the
+cost of partitioning is equivalent to 11-14 epochs of HOGWILD! on 18 threads. However  we point
+out that partitioning and allocation5 is a one-time cost which becomes cheaper with more stochastic
+update epochs. Additionally  note that this cost can become amortized due to the extra experiments
+one has to run for hyperparameter tuning  since the graph partitioning is identical across different
+stepsizes one might want to test.
+Binary classiﬁcation and dense coordinates Here we explore settings where CYCLADES is ex-
+pected to perform poorly due to the inherent density of updates (i.e.  for data sets with dense features).
+In particular  we test CYCLADES on a classiﬁcation problem for text based data. Speciﬁcally  we run
+classiﬁcation for the URL dataset [15] contains ⇠ 2.4M URLs  labeled as either benign or malicious 
+5It has come to our attention post submission that parts of our partitioning and allocation code could be
+
+further parallelized. We refer the reader to our arXiv paper 1605.09721 for the latest results.
+
+7
+
+#
+
+Least Squares
+threads SAGA  DBLP
+
+Graph Eig.
+
+SVRG  NH2010
+
+Mat. Comp.
+
+`2-SGD  MovieLens
+
+Word2Vec
+
+SGD  EN-Wiki
+
+1
+18
+
+2.2245
+14.1792
+
+0.9039
+4.7639
+
+0.5507
+5.5270
+
+0.5299
+3.9362
+
+Table 2: Ratio of the time that CYCLADES consumes for partition and allocation over the time that HOGWILD!
+takes for 1 full pass over the dataset. On 18 threads  CYCLADES takes between 4-14 HOGWILD! epochs to
+perform partitioning. Note however  this computational effort is only required once per dataset.
+
+Figure 6: Speedups of CYCLADES and
+HOGWILD! on 16 threads  for differ-
+ent percentage of dense features ﬁltered.
+When only a very small number of fea-
+tures are ﬁltered  CYCLADES is almost
+serial. However  as we increase the per-
+centage from 0.016% to 0.048%  the
+speedup of CYCLADES improves and
+almost catches up with HOGWILD!.
+
+and 3.2M features  including bag-of-words representation of tokens in the URL. For this classiﬁcation
+task  we used a logistic regression model  trained using SGD. By its power-law nature  the dataset
+consists of a small number of extremely dense features which occur in nearly all updates. Since
+CYCLADES explicitly avoids conﬂicts  it has a schedule of SGD updates that leads to poor speedups.
+However  we observe that most conﬂicts are caused by a small
+percentage of the densest features. If these features are removed
+from the dataset  CYCLADES is able to obtain much better
+speedups. The speedups that are obtained by CYCLADES and
+HOGWILD! on 16 threads for different ﬁltering percentages are
+shown in Figure 6. Full results of the experiment are presented
+in the supplemental material. CYCLADES fails to get much
+speedup when nearly all the features are used. However  as
+more dense features are removed  CYCLADES obtains a better
+speedup  almost equalling HOGWILD!’s speedup when 0.048%
+of the densest features are ﬁltered.
+5 Related work
+The end of Moore’s Law coupled with recent advances in par-
+allel and distributed computing technologies have triggered re-
+newed interest in parallel stochastic optimization [26  9  1  22].
+Much of this contemporary work is built upon the foundational
+work of Bertsekas  Tsitsiklis et al. [3  23].
+Inspired by HOGWILD!’s success at achieving nearly linear speedups for a variety of machine learning
+tasks  several authors developed other lock-free and asynchronous optimization algorithms  such as
+parallel stochastic coordinate descent [13]. Additional work in ﬁrst order optimization and beyond
+[8  21  5]  has further demonstrated that linear speedups are generically possible in the asynchronous
+shared-memory setting.
+Other machine learning algorithms that have been parallelized using concurrency control  including
+non-parametric clustering [18]  submodular maximization [19]  and correlation clustering [20].
+Sparse  graph-based parallel computation are supported by systems like GraphLab [14]. These
+frameworks require computation to be written in a speciﬁc programming model with associative 
+commutative operations. GraphLab and PowerGraph support serializable execution via locking
+mechanisms  this is in contrast to our partition-and-allocate coordination which allows us to provide
+guarantees on speedup.
+6 Conclusion
+We presented CYCLADES  a general framework for lock-free parallelization of stochastic optimization
+algorithms  while maintaining serial equivalence. Our framework can be used to parallelize a
+large family of stochastic updates algorithms in a conﬂict-free manner  thereby ensuring that the
+parallelized algorithm produces the same result as its serial counterpart. Theoretical properties  such
+as convergence rates  are therefore preserved by the CYCLADES-parallelized algorithm  and we
+provide a single uniﬁed theoretical analysis that guarantees near linear speedups.
+By eliminating conﬂicts across processors within each batch of updates  CYCLADES is able to avoid
+all asynchrony errors and conﬂicts  and leads to better cache locality and cache coherence than
+HOGWILD!. These features of CYCLADES translate to near linear speedups in practice  where it can
+outperform HOGWILD!-type of implementations by up to a factor of 5⇥  in terms of speedups.
+In the future  we intend to explore hybrids of CYCLADES with HOGWILD!  pushing the boundaries
+of what is possible in a shared-memory setting. We are also considering solutions for scaling out in a
+distributed setting  where the cost of communication is signiﬁcantly higher.
+
+8
+
+References
+[1] A. Agarwal and J. C. Duchi. Distributed delayed stochastic optimization. In NIPS  pages 873–881  2011.
+[2] S. Arora  Y. Li  Y. Liang  T. Ma  and A. Risteski. Rand-walk: A latent variable model approach to word
+
+embeddings. arXiv:1502.03520  2015.
+
+[3] D. P. Bertsekas and J. N. Tsitsiklis. Parallel and distributed computation: numerical methods  volume 23.
+
+Prentice hall Englewood Cliffs  NJ  1989.
+
+[4] T. Chilimbi  Y. Suzue  J. Apacible  and K. Kalyanaraman. Project adam: Building an efﬁcient and scalable
+
+deep learning training system. In USENIX OSDI  2014.
+
+[5] C. De Sa  C. Zhang  K. Olukotun  and C. Ré. Taming the wild: A uniﬁed analysis of hogwild!-style
+
+algorithms. arXiv:1506.06438  2015.
+
+[6] J. Dean  G. Corrado  R. Monga  K. Chen  M. Devin  M. Mao  A. Senior  P. Tucker  K. Yang  Q. V. Le  et al.
+
+Large scale distributed deep networks. In NIPS 2012.
+
+[7] A. Defazio  F. Bach  and S. Lacoste-Julien. Saga: A fast incremental gradient method with support for
+
+non-strongly convex composite objectives. In NIPS  pages 1646–1654  2014.
+
+[8] J. Duchi  M. I. Jordan  and B. McMahan. Estimation  optimization  and parallelism when data is sparse. In
+
+NIPS  pages 2832–2840  2013.
+
+[9] R. Gemulla  E. Nijkamp  P. J. Haas  and Y. Sismanis. Large-scale matrix factorization with distributed
+In Proceedings of the 17th ACM SIGKDD international conference on
+
+stochastic gradient descent.
+Knowledge discovery and data mining  pages 69–77. ACM  2011.
+
+[10] C. Jin  S. M. Kakade  C. Musco  P. Netrapalli  and A. Sidford. Robust shift-and-invert preconditioning:
+
+Faster and more sample efﬁcient algorithms for eigenvector computation. arXiv:1510.08896  2015.
+
+[11] R. Johnson and T. Zhang. Accelerating stochastic gradient descent using predictive variance reduction. In
+
+NIPS  pages 315–323  2013.
+
+[12] M. Krivelevich. The phase transition in site percolation on pseudo-random graphs. The Electronic Journal
+
+of Combinatorics  23(1):1–12  2016.
+
+[13] J. Liu and S. J. Wright. Asynchronous stochastic coordinate descent: Parallelism and convergence
+
+properties. SIAM Journal on Optimization  25(1):351–376  2015.
+
+[14] Y. Low  J. E. Gonzalez  A. Kyrola  D. Bickson  C. E. Guestrin  and J. Hellerstein. Graphlab: A new
+
+framework for parallel machine learning. arXiv:1408.2041  2014.
+
+[15] J. Ma  L. K. Saul  S. Savage  and G. M. Voelker. Identifying suspicious urls: an application of large-scale
+online learning. In Proceedings of the 26th Annual International Conference on Machine Learning  pages
+681–688. ACM  2009.
+
+[16] H. Mania  X. Pan  D. Papailiopoulos  B. Recht  K. Ramchandran  and M. I. Jordan. Perturbed iterate
+
+analysis for asynchronous stochastic optimization. arXiv:1507.06970  2015.
+
+[17] F. Niu  B. Recht  C. Re  and S. Wright. Hogwild: A lock-free approach to parallelizing stochastic gradient
+
+descent. In NIPS  pages 693–701  2011.
+
+[18] X. Pan  J. E. Gonzalez  S. Jegelka  T. Broderick  and M. I. Jordan. Optimistic concurrency control for
+
+distributed unsupervised learning. In NIPS 26. 2013.
+
+[19] X. Pan  S. Jegelka  J. E. Gonzalez  J. K. Bradley  and M. I. Jordan. Parallel double greedy submodular
+
+maximization. In NIPS 27. 2014.
+
+[20] X. Pan  D. Papailiopoulos  S. Oymak  B. Recht  K. Ramchandran  and M. I. Jordan. Parallel correlation
+
+clustering on big graphs. In NIPS  pages 82–90  2015.
+
+[21] S. J. Reddi  A. Hefny  S. Sra  B. Póczos  and A. Smola. On variance reduction in stochastic gradient
+
+descent and its asynchronous variants. arXiv:1506.06840  2015.
+
+[22] P. Richtárik and M. Takáˇc. Parallel coordinate descent methods for big data optimization. arXiv:1212.0873 
+
+2012.
+
+[23] J. N. Tsitsiklis  D. P. Bertsekas  and M. Athans. Distributed asynchronous deterministic and stochastic
+
+gradient optimization algorithms. IEEE transactions on automatic control  31(9):803–812  1986.
+
+[24] C. Zhang and C. Ré. Dimmwitted: A study of main-memory statistical analytics. Proceedings of the VLDB
+
+Endowment  7(12):1283–1294  2014.
+
+[25] Y. Zhuang  W.-S. Chin  Y.-C. Juan  and C.-J. Lin. A fast parallel sgd for matrix factorization in shared
+memory systems. In Proceedings of the 7th ACM conference on Recommender systems  pages 249–256.
+ACM  2013.
+
+[26] M. Zinkevich  J. Langford  and A. J. Smola. Slow learners are fast. In NIPS  pages 2331–2339  2009.
+
+9
+
+,Xinghao Pan
+Maximilian Lam
+Stephen Tu
+Dimitris Papailiopoulos
+Ce Zhang
+Michael Jordan
+Kannan Ramchandran

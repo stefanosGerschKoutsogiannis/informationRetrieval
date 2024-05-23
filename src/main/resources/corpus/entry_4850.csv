@@ -1,0 +1,1396 @@
+2019,Sampling Sketches for Concave Sublinear Functions of Frequencies,We consider massive distributed datasets that consist of elements modeled as key-value pairs and the task of computing statistics or aggregates where the contribution of each key is weighted by a function of its frequency (sum of values of its elements). This fundamental problem has a wealth of applications in data analytics and machine learning  in particular  with concave sublinear functions of the frequencies that mitigate the disproportionate effect of keys with high frequency. The family of concave sublinear functions includes low frequency moments ($p \leq 1$)  capping  logarithms  and their compositions. A common approach is to sample keys  ideally  proportionally to their contributions and estimate statistics from the sample. A simple but costly way to do this is by aggregating the data to produce a table of keys and their frequencies  apply our function to the frequency values  and then apply a weighted sampling scheme. Our main contribution is the design of composable sampling sketches that can be tailored to any concave sublinear function of the frequencies. Our sketch structure size is very close to the desired sample size and our samples provide statistical guarantees on the estimation quality that are very close to that of an ideal sample of the same size computed over aggregated data. Finally  we demonstrate experimentally the simplicity and effectiveness of our methods.,Sampling Sketches for
+
+Concave Sublinear Functions of Frequencies
+
+Edith Cohen
+
+Google Research  CA
+
+Tel Aviv University  Israel
+edith@cohenwang.com
+
+Oﬁr Geri
+
+Stanford University  CA
+
+ofirgeri@cs.stanford.edu
+
+Abstract
+
+We consider massive distributed datasets that consist of elements modeled as key-
+value pairs and the task of computing statistics or aggregates where the contribution
+of each key is weighted by a function of its frequency (sum of values of its elements).
+This fundamental problem has a wealth of applications in data analytics and
+machine learning  in particular  with concave sublinear functions of the frequencies
+that mitigate the disproportionate effect of keys with high frequency. The family
+of concave sublinear functions includes low frequency moments (𝑝 ≤ 1)  capping 
+logarithms  and their compositions. A common approach is to sample keys  ideally 
+proportionally to their contributions and estimate statistics from the sample. A
+simple but costly way to do this is by aggregating the data to produce a table of keys
+and their frequencies  apply our function to the frequency values  and then apply
+a weighted sampling scheme. Our main contribution is the design of composable
+sampling sketches that can be tailored to any concave sublinear function of the
+frequencies. Our sketch structure size is very close to the desired sample size and
+our samples provide statistical guarantees on the estimation quality that are very
+close to that of an ideal sample of the same size computed over aggregated data.
+Finally  we demonstrate experimentally the simplicity and effectiveness of our
+methods.
+
+1
+
+Introduction
+
+sum of values of the elements with that key  i.e.  𝜈𝑥 :=∑︀
+
+We consider massive distributed datasets that consist of elements that are key-value pairs 𝑒 =
+(𝑒.key  𝑒.val ) with 𝑒.val > 0. The elements are generated or stored on a large number of servers
+or devices. A key 𝑥 may repeat in multiple elements  and we deﬁne its frequency 𝜈𝑥 to be the
+𝑒|𝑒.key=𝑥 𝑒.val. For example  the keys
+can be search queries  videos  terms  users  or tuples of entities (such as video co-watches or term
+co-occurrences) and each data element can correspond to an occurrence or an interaction involving
+this key: the search query was issued  the video was watched  or two terms co-occurred in a typed
+sentence. An instructive common special case is when all elements have the same value 1 and the
+frequency 𝜈𝑥 of each key 𝑥 in the dataset is simply the number of elements with key 𝑥.
+A common task is to compute statistics or aggregates  which are sums over key contributions.
+The contribution of each key 𝑥 is weighted by a function of its frequency 𝜈𝑥. One example of
+𝑥∈𝐻 𝜈𝑥 for some domain (subset of keys)
+𝐻. The domains of interest are often overlapping and speciﬁed at query time. Sum aggregates
+also arise as components of a larger pipeline  such as the training of a machine learning model
+with parameters 𝜃  labeled examples 𝑥 ∈ 𝒳 with frequencies 𝜈𝑥  and a loss objective of the form
+𝑥 𝑓 (𝜈𝑥)𝐿(𝑥; 𝜃). The function 𝑓 that is applied to the frequencies can be any concave
+sublinear function. Concave sublinear functions  which we discuss further below  are used in
+
+such sum aggregates are queries of domain statistics∑︀
+ℓ(𝒳 ; 𝜃) =∑︀
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+applications to mitigate the disproportionate effect of keys with very high frequencies. The training
+of the model typically involves repeated evaluation of the loss function (or of its gradient that also
+has a sum form) for different values of 𝜃. We would like to compute these aggregates on demand 
+without needing to go over the data many times.
+When the number of keys is very large it is often helpful to compute a smaller random sample
+𝑆 ⊆ 𝒳 of the keys from which aggregates can be efﬁciently estimated. In some applications 
+obtaining a sample can be the end goal. For example  when the aggregate is a gradient  we can use
+the sample itself as a stochastic gradient. To provide statistical guarantees on our estimate quality 
+the sampling needs to be weighted (importance sampling)  with heavier keys sampled with higher
+probability  ideally  proportional to their contribution (𝑓 (𝜈𝑥)). When the weights of the keys are
+known  there are classic sampling schemes that provide estimators with tight worst-case variance
+bounds [28  13  6  10  32  33].
+The datasets we consider here are presented in an unaggregated form: each key can appear multiple
+times in different locations. The focus of this work is designing composable sketch structures
+(formally deﬁned below) that allow to compute a sample over unaggregated data with respect to
+the weights 𝑓 (𝜈𝑥). One approach to compute a sample from unaggregated data is to ﬁrst aggregate
+the data to produce a table of key-frequency pairs (𝑥  𝜈𝑥)  compute the weights 𝑓 (𝜈𝑥)  and apply a
+weighted sampling scheme. This aggregation can be performed using composable structures that are
+essentially a table with an entry for each distinct key that occurred in the data. The number of distinct
+keys  however  and hence the size of that sketch  can be huge. For our sampling application  we
+would hope to use sketches of size that is proportional to the desired sample size  which is generally
+much smaller than the number of unique keys  and still provide statistical guarantees on the estimate
+quality that are close to that of a weighted sample computed according to 𝑓 (𝜈𝑥).
+
+Concave Sublinear Functions. Typical datasets have a skewed frequency distribution  where
+a small fraction of the keys have very large frequencies and we can get better results or learn a
+better model of the data by suppressing their effect. The practice is to apply a concave sublinear
+function 𝑓 to the frequency  so that the importance weight of the key is 𝑓 (𝜈𝑥) instead of simply its
+𝑥 for 𝑝 ≤ 1  ln(1 + 𝜈𝑥) 
+frequency 𝜈𝑥. This family of functions includes the frequency moments 𝜈𝑝
+cap𝑇 (𝜈𝑥) = min{𝑇  𝜈𝑥} for a ﬁxed 𝑇 ≥ 0  their compositions  and more. A formal deﬁnition
+appears in Section 2.3.
+Two hugely popular methods for producing word embeddings from word co-occurrences use this form
+of mitigation: word2vec [25] uses 𝑓 (𝜈) = 𝜈0.5 and 𝑓 (𝜈) = 𝜈0.75 for positive and negative examples 
+respectively  and GloVe [30] uses 𝑓 (𝜈) = min{𝑇  𝜈0.75} to mitigate co-occurrence frequencies.
+When the data is highly distributed  for example  when it originates or resides at millions of mobile
+devices (as in federated learning [24])  it is useful to estimate the loss or compute a stochastic gradient
+update efﬁciently via a weighted sample.
+The suppression of higher frequencies may also directly arise in applications. One example is
+campaign planning for online advertising  where the value of showing an ad to a user diminishes
+with the number of views. Platforms allow an advertiser to specify a cap value 𝑇 on the number of
+times the same ad can be presented to a user [19  29]. In this case  the number of opportunities to
+display an ad to a user 𝑥 is a cap function of the frequency of the user 𝑓 (𝜈𝑥) = min{𝑇  𝜈𝑥}  and
+𝑥∈𝐻 𝑓 (𝜈𝑥). When planning a campaign  we
+need to quickly estimate the statistics for different segments  and this can be done from a sample that
+ideally is weighted by 𝑓 (𝜈𝑥).
+
+the number for a segment of users 𝐻 is the statistics∑︀
+
+Our Contribution.
+In this work  we design composable sketches that can be tailored to any concave
+sublinear function 𝑓  and allow us to compute a weighted sample over unaggregated data with respect
+to the weights 𝑓 (𝜈𝑥). Using the sample  we will be able to compute unbiased estimators for the
+aggregates mentioned above. In order to compute the estimators  we need to make a second pass over
+the data: In the ﬁrst pass  we compute the set of sampled keys  and in the second pass we compute
+their frequencies. Both passes can be done in a distributed manner.
+A sketch 𝑆(𝐷) is a data structure that summarizes a set 𝐷 of data elements  so that the output of
+interest for 𝐷 (in our case  a sample of keys) can be recovered from the sketch 𝑆(𝐷). A sketch
+structure is composable if we can obtain a sketch 𝑆(𝐷1 ∪ 𝐷2) of two sets of elements 𝐷1 and 𝐷2
+from the sketches 𝑆(𝐷1) and 𝑆(𝐷2) of the sets. This property alone gives us full ﬂexibility to
+
+2
+
+parallelize or distribute the computation. The size of the sketch determines the communication and
+storage needs of the computation.
+We provide theoretical guarantees on the quality (variance) of the estimators. The baseline for our
+analysis is the bounds on the variance that are guaranteed by PPSWOR on aggregated data. PPSWOR
+[32  33] is a sampling scheme with tight worst-case variance bounds. The estimators provided by our
+sketch have variance at most 4/((1 − 𝜀)2) times the variance bound for PPSWOR. The parameter
+𝜀 ≤ 1/2 mostly affects the run time of processing a data element  which grows near-linearly in 1/𝜀.
+Thus  our sketch allows us to get approximately optimal guarantees on the variance while avoiding
+the costly aggregation of the data. We remark that these guarantees are for soft concave sublinear
+functions and the extension to any concave sublinear function incurs a factor of (1 + 1/(𝑒 − 1))2 in
+the variance. The space required by our sketch signiﬁcantly improves upon the previous methods
+(which all require aggregating the data). In particular  if the desired sample size is 𝑘  we show that
+the space required by the sketch at any given time is 𝑂(𝑘) in expectation and is well concentrated.
+We complement our work with a small-scale experimental study. We use a simple implementation of
+our sampling sketch to study the actual performance in terms of estimate quality and sketch size. In
+particular  we show that the estimate quality is even better than the (already adequate) guarantees
+provided by our worst-case bounds. We additionally compare the estimate quality to that of two
+popular sampling schemes for aggregated data  PPSWOR [32  33] and priority (sequential Poisson)
+sampling [28  13]. In the experiments  we see that the estimate quality of our sketch is close to what
+achieved by PPSWOR and priority sampling  while our sketch uses much less space by eliminating
+the need for aggregation. This paper presents our sketch structures and states our results. The full
+version (including proofs and additional details) can be found in the supplementary material.
+
+Related Work. Composable weighted sampling schemes with tight worst-case variance for aggre-
+gated datasets (where keys are unique to elements) include priority (sequential Poisson) sampling
+[28  13]  VarOpt sampling [6  10]  and PPSWOR [32  33]. We use PPSWOR as our base scheme
+because it extends to unaggregated datasets  where multiple elements can additively contribute to the
+frequency/weight of each key. A proliﬁc line of research developed sketch structures for different
+tasks over streamed or distributed unaggregated data [26  16  1]. Composable sampling sketches
+for unaggregated datasets have the goal of meeting the quality of samples computed on aggregated
+frequencies while using a sketch structure that can only hold a ﬁnal-sample-size number of distinct
+keys. Prior work includes a folklore sketch for distinct sampling (𝑓 (𝜈) = 1 when 𝜈 > 0) [22  34] 
+sum sampling (𝑓 (𝜈) = 𝜈) [9  18  14  11] based on PPSWOR  cap functions (𝑓 (𝜈) = min{𝑇  𝜈}) [7] 
+and universal (multi-objective) samples with a logarithmic overhead that simultaneously support all
+concave sublinear 𝑓. In the current work we propose sampling sketches that can be tailored to any
+concave sublinear function and only have a small constant overhead. An important line of work uses
+random linear projections to estimate frequency statistics and to sample. In particular  ℓ𝑝 sampling
+sketches [17  27  2  21  20] sample (roughly) according to 𝑓 (𝜈) = 𝜈𝑝. These sketches have higher
+overhead than sample-based sketches and are more limited in their application. Their advantage is that
+they can be used with super-linear (e.g.  moments with 𝑝 ∈ (1  2]) functions of frequencies and can
+also support signed element values (the turnstile model). For the more basic problem of sketches that
+estimate frequency statistics over the full data  a characterization of sketchable frequency functions is
+provided in [5  3]. Universal sketches for estimating ℓ𝑝 norms of subsets were recently considered in
+[4]. A double logarithmic size sketch (extending [15] for distinct counting) that computes statistics
+over the entire dataset for all soft concave sublinear functions is provided in [8]. Our design builds on
+components of that sketch.
+
+2 Preliminaries
+
+Sum𝐷(𝑧) := ∑︀
+sum and the max-distinct statistics of 𝐷 are deﬁned  respectively  as Sum𝐷 :=∑︀
+
+Consider a set 𝐷 of data elements of the form 𝑒 = (𝑒.key  𝑒.val ) where 𝑒.val > 0. We denote
+the set of possible keys by 𝒳 . For a key 𝑧 ∈ 𝒳   we let Max𝐷(𝑧) := max𝑒∈𝐷|𝑒.key=𝑧 𝑒.val and
+𝑒∈𝐷|𝑒.key=𝑧 𝑒.val denote the maximum value of a data element in 𝐷 with key
+𝑧 and the sum of values of data elements in 𝐷 with key 𝑧  respectively. Each key 𝑧 ∈ 𝒳 that
+appears in 𝐷 is called active. If there is no element 𝑒 ∈ 𝐷 with 𝑒.key = 𝑧  we say that 𝑧 is
+inactive and deﬁne Max𝐷(𝑧) := 0 and Sum𝐷(𝑧) := 0. When 𝐷 is clear from context  it is omitted.
+For a key 𝑧  we use the shorthand 𝜈𝑧 := Sum𝐷(𝑧) and refer to it as the frequency of 𝑧. The
+𝑒∈𝐷 𝑒.val and
+
+3
+
+MxDistinct𝐷 :=∑︀
+
+𝑧∈𝒳 Max𝐷(𝑧). For a function 𝑓  𝑓𝐷 :=∑︀
+
+𝑧∈𝒳 𝑓 (Sum𝐷(𝑧)) =∑︀
+
+𝑧∈𝒳 𝑓 (𝜈𝑧) is
+
+the 𝑓-frequency statistics of 𝐷.
+
+2.1 The Composable Bottom-𝑘 Structure
+
+In this work  we will use composable sketch struc-
+tures in order to efﬁciently summarize streamed or dis-
+tributed data elements. A composable sketch structure
+is speciﬁed by three operations: The initialization of an
+empty sketch structure 𝑠  the processing of a data ele-
+ment 𝑒 into a structure 𝑠  and the merging of two sketch
+structures 𝑠1 and 𝑠2. To sketch a stream of elements  we
+start with an empty structure and sequentially process
+data elements while storing only the sketch structure.
+The merge operation is useful with distributed or par-
+allel computation and allows us to compute the sketch
+𝑖 𝐷𝑖 of data elements by merg-
+ing the sketches of the parts 𝐷𝑖. In particular  one of
+the main building blocks that we use is the bottom-𝑘
+structure [12]  speciﬁed in Algorithm 1. The structure
+maintains 𝑘 data elements: For each key  consider only
+the element with that key that has the minimum value.
+Of these elements  the structure keeps the 𝑘 elements
+that have the lowest values.
+
+of a large set 𝐷 = ⋃︀
+
+2.2 The PPSWOR Sampling Sketch
+
+Algorithm 1: Bottom-𝑘 Sketch Structure
+// Initialize structure
+Input: the structure size 𝑘
+𝑠.𝑠𝑒𝑡 ← ∅ // Set of ≤ 𝑘 key-value
+pairs
+// Process element
+Input: element 𝑒 = (𝑒.key  𝑒.val )  a
+if 𝑒.key ∈ 𝑠.𝑠𝑒𝑡 then
+
+bottom-𝑘 structure 𝑠
+
+replace the current value 𝑣 of 𝑒.key in
+𝑠.𝑠𝑒𝑡 with min{𝑣  𝑒.val}
+
+else
+
+insert (𝑒.key  𝑒.val ) to 𝑠.𝑠𝑒𝑡
+if |𝑠.𝑠𝑒𝑡| = 𝑘 + 1 then
+
+Remove the element 𝑒′ with
+maximum value from 𝑠.𝑠𝑒𝑡
+// Merge two bottom-𝑘 structures
+Input: 𝑠1 𝑠2 // Bottom-𝑘 structures
+Output: 𝑠 // Bottom-𝑘 structure
+𝑃 ← 𝑠1.𝑠𝑒𝑡 ∪ 𝑠2.𝑠𝑒𝑡
+𝑠.𝑠𝑒𝑡 ← the (at most) 𝑘 elements of 𝑃 with
+lowest values (at most one element per key)
+
+bility 𝑤𝑥/∑︀
+
+Algorithm 2: PPSWOR Sampling Sketch
+// Initialize structure
+Input: the sample size 𝑘
+Initialize a bottom-𝑘 structure 𝑠.sample
+// Algorithm 1
+// Process element
+Input: element 𝑒 = (𝑒.key  𝑒.val )  PPSWOR
+𝑣 ∼ Exp[𝑒.val ]
+Process the element (𝑒.key  𝑣) into the bottom-𝑘
+structure 𝑠.sample
+// Merge two structures 𝑠1  𝑠2 to obtain 𝑠
+𝑠.sample ← Merge the bottom-𝑘 structures
+𝑠1.sample and 𝑠2.sample
+
+In this subsection  we describe a scheme to pro-
+duce a sample of 𝑘 keys  where at each step the
+probability that a key is selected is proportional
+to its weight. That is  the sample we produce
+will be equivalent to performing the following
+𝑘 steps. At each step we select one key and
+add it to the sample. At the ﬁrst step  each key
+𝑥 ∈ 𝒳 (with weight 𝑤𝑥) is selected with proba-
+𝑦 𝑤𝑦. At each subsequent step  we
+choose one of the remaining keys  again with
+probability proportional to its weight. This pro-
+cess is called probability proportional to size
+and without replacement (PPSWOR) sampling.
+A classic method for PPSWOR sampling is the
+following scheme [32  33]. For each key 𝑥 with weight 𝑤𝑥  we independently draw seed(𝑥) ∼
+Exp(𝑤𝑥). The output sample will include the 𝑘 keys with smallest seed(𝑥). This method together
+with a bottom-𝑘 structure can be used to implement PPSWOR sampling over a set of data elements
+𝐷 according to 𝜈𝑥 = Sum𝐷(𝑥). The sampling sketch is presented here as Algorithm 2. This sketch
+is due to [9] (based on [18  14  11]).
+
+sample structure 𝑠
+
+2.3 Concave Sublinear Functions
+A function 𝑓 : [0 ∞) → [0 ∞) is soft concave sublinear if for some 𝑎(𝑡) ≥ 0 it can be expressed as
+
+∫︁ ∞
+
+𝑓 (𝜈) = ℒc[𝑎](𝜈) :=
+
+𝑎(𝑡)(1 − 𝑒−𝜈𝑡)𝑑𝑡 .
+
+(1)
+
+ℒc[𝑎](𝜈) is called the complement Laplace transform of 𝑎 at 𝜈. The sampling schemes we present in
+this work will be deﬁned for soft concave sublinear functions of the frequencies. However  this will
+allow us to estimate well any function that is within a small multiplicative constant of a soft concave
+sublinear function. In particular  we can estimate concave sublinear functions. These functions can
+
+0
+
+4
+
+Algorithm 3: Sampling Sketch Structure for 𝑓
+// Initialize empty structure 𝑠
+Input: 𝑘: Sample size  𝜀  𝑎(𝑡) ≥ 0
+Initialize 𝑠. SumMax // SumMax sketch of
+size 𝑘 (Algorithm 5)
+Initialize 𝑠.𝑝𝑝𝑠𝑤𝑜𝑟 // PPSWOR sketch of size
+𝑘 (Algorithm 2)
+Initialize 𝑠.𝑠𝑢𝑚 ← 0 // A sum of all the
+elements seen so far
+Initialize 𝑠.𝛾 ← ∞ // Threshold
+Initialize 𝑠.Sideline // A composable
+max-heap/priority queue
+// Merge two structures 𝑠1 and 𝑠2 to 𝑠 (with
+
+𝑠.𝑠𝑢𝑚
+
+same 𝑘  𝜀  𝑎 and same ℎ in SumMax
+sub-structures)
+
+𝑠.𝑠𝑢𝑚 ← 𝑠1.𝑠𝑢𝑚 + 𝑠2.𝑠𝑢𝑚
+𝑠.𝛾 ← 2𝜀
+𝑠.Sideline ← merge 𝑠1.Sideline and 𝑠2.Sideline
+// merge priority queues.
+𝑠. SumMax ← merge 𝑠1. SumMax and
+𝑠2. SumMax // Merge SumMax structures
+(Algorithm 5)
+while 𝑠.Sideline contains an element
+𝑔 = (𝑔.key  𝑔.val ) with 𝑔.val ≥ 𝑠.𝛾 do
+
+Remove 𝑔 from 𝑠.Sideline
+
+if∫︀ ∞
+Process element (𝑔.key ∫︀ ∞
+
+𝑔.val 𝑎(𝑡)𝑑𝑡 > 0 then
+
+𝑔.val 𝑎(𝑡)𝑑𝑡) by
+
+𝑠. SumMax
+
+be expressed as
+
+∫︁ ∞
+
+// Process element
+Input: Element 𝑒 = (𝑒.key  𝑒.val )  structure 𝑠
+Process 𝑒 by 𝑠.𝑝𝑝𝑠𝑤𝑜𝑟
+𝑠.𝑠𝑢𝑚 ← 𝑠.𝑠𝑢𝑚 + 𝑒.val
+𝑠.𝛾 ← 2𝜀
+foreach 𝑖 ∈ [𝑟] do // 𝑟 = 𝑘/𝜀
+
+𝑠.𝑠𝑢𝑚
+
+𝑦 ∼ Exp[𝑒.val ] // exponentially
+distributed with parameter 𝑒.val
+// Process in Sideline
+if The key (𝑒.key  𝑖) appears in 𝑠.Sideline then
+
+Update the value of (𝑒.key  𝑖) to be the
+minimum of 𝑦 and the current value
+
+else
+
+Add the element ((𝑒.key  𝑖)  𝑦) to 𝑠.Sideline
+
+while 𝑠.Sideline contains an element
+𝑔 = (𝑔.key  𝑔.val ) with 𝑔.val ≥ 𝑠.𝛾 do
+
+Remove 𝑔 from 𝑠.Sideline
+
+if∫︀ ∞
+Process element (𝑔.key ∫︀ ∞
+
+𝑔.val 𝑎(𝑡)𝑑𝑡 > 0 then
+
+𝑠. SumMax
+
+𝑔.val 𝑎(𝑡)𝑑𝑡) by
+
+𝑎(𝑡) min{1  𝜈𝑡}𝑑𝑡
+
+𝑓 (𝜈) =
+
+(2)
+for 𝑎(𝑡) ≥ 0. The concave sublinear family includes all functions such that 𝑓 (0) = 0  𝑓 is monotoni-
+cally non-decreasing  𝜕+𝑓 (0) < ∞  and 𝜕2𝑓 ≤ 0.
+Any concave sublinear function 𝑓 can be approximated by a soft concave sublinear function as
+follows. Consider the corresponding soft concave sublinear function ˜𝑓 using the same coefﬁcients
+𝑎(𝑡). The function ˜𝑓 closely approximates 𝑓 pointwise [8]:
+
+0
+
+(1 − 1/𝑒)𝑓 (𝜈) ≤ ˜𝑓 (𝜈) ≤ 𝑓 (𝜈) .
+
+𝐷). The statistics 𝑓𝐷 =∑︀
+
+Our weighted sample for ˜𝑓 will respectively approximate a weighted sample for 𝑓.
+𝑥 𝑓 (Sum𝐷(𝑥)) =∑︀
+Consider a soft concave sublinear 𝑓 and a set of data elements 𝐷 with the respective frequency
+function 𝑊 : (0 ∞) → N ∪ {0} (for every 𝜈 > 0  𝑊 (𝜈) is the number of keys with frequency 𝜈 in
+∫︁ 𝑏
+𝑥 𝑓 (𝜈𝑥) can then be expressed as 𝑓𝐷 = ℒc[𝑊 ][𝑎]∞
+𝑎(𝑡)ℒc[𝑊 ](𝑡)𝑑𝑡 .
+
+with the notation
+
+ℒc[𝑊 ][𝑎]𝑏
+
+(3)
+
+0
+
+𝛾 :=
+
+𝛾
+
+3 Sketch Overview
+
+Given a set 𝐷 of elements 𝑒 = (𝑒.key  𝑒.val )  we wish to maintain a sample of 𝑘 keys  that will be
+close to PPSWOR according to a soft concave sublinear function of their frequencies 𝑓 (𝜈𝑥). At a high
+∫︀ ∞
+level  our sampling sketch is guided by the sketch for estimating the statistics 𝑓𝐷 due to Cohen [8].
+Recall that a soft concave sublinear function 𝑓 can be represented as 𝑓 (𝑤) = ℒc[𝑎](𝑤)∞
+0 =
+0 𝑎(𝑡)(1 − 𝑒−𝑤𝑡)𝑑𝑡 for 𝑎(𝑡) ≥ 0. Using this representation  we express 𝑓 (𝜈𝑥) as a sum of two
+contributions for each key 𝑥:
+
+𝑓 (𝜈𝑥) = ℒc[𝑎](𝜈𝑥)𝛾
+
+0 + ℒc[𝑎](𝜈𝑥)∞
+𝛾  
+
+5
+
+seed pairs
+
+𝑠. SumMax
+
+if∫︀ 𝛾
+
+if∫︀ ∞
+
+𝛾 𝑎(𝑡)𝑑𝑡) by sketch
+
+foreach 𝑒 ∈ 𝑠. SumMax .sample do
+
+𝑒.val ← 𝑟 * 𝑒.val // scale
+sample by 𝑟
+
+𝛾 𝑎(𝑡)𝑑𝑡 > 0 then
+foreach 𝑒 ∈ 𝑠.Sideline do
+
+(𝑒.key ∫︀ ∞
+
+Process element
+
+Algorithm 4: Produce a Final Sam-
+ple from a Sampling Sketch Structure
+(Algorithm 3)
+Input: sampling sketch structure 𝑠 for 𝑓
+Output: sample of size 𝑘 of key and
+
+0 𝑡𝑎(𝑡)𝑑𝑡 > 0 then
+foreach 𝑒 ∈ 𝑠.ppswor.sample do
+∫︀ 𝛾
+𝑒.val ← 𝑒.val
+sample ← merge
+𝑠. SumMax .sample and
+𝑠.ppswor.sample // bottom-𝑘
+merge (Algorithm 1)
+sample ← 𝑠. SumMax .sample
+
+where 𝛾 is a value we will set adaptively while processing the elements. Our sampling sketch is
+described in Algorithm 3. It maintains a separate sampling sketch for each set of contributions. In
+order to produce a sample from the sketch  these separate sketches need to be combined. Algorithm 4
+describes how to produce a ﬁnal sample from the sketch.
+Running Algorithm 3 and then Algorithm 4 requires one
+pass over the data. In order to use the ﬁnal sample to esti-
+mate statistics  we need to compute the Horvitz-Thompson
+inverse-probability estimator (cid:92)𝑓 (𝜈𝑥) for each of the sam-
+pled keys. Informally  the estimator for key 𝑥 in the sam-
+ple is 𝑓 (𝜈𝑥)/ Pr[𝑥 in sample] (and 0 for keys not in the
+sample). To compute the estimator  we need to know the
+values 𝑓 (𝜈𝑥) for the keys in the sample  which we get
+from a second pass over the data  and the conditional in-
+clusion probabilities (the denominator)  that have a closed
+form and can be computed. The parameter 𝜀 trades off the
+running time of processing an element with the bound on
+the variance of the inverse-probability estimator.
+We continue with an overview of the different compo-
+nents of the sketch. As mentioned above  we represent
+𝑓 (𝜈𝑥) = ℒc[𝑎](𝜈𝑥)𝛾
+0 + ℒc[𝑎](𝜈𝑥)∞
+𝛾   and for each sum-
+mand we maintain a separate sample of size 𝑘 (which
+will later be merged). For ℒc[𝑎](𝜈𝑥)𝛾
+0  we maintain a stan-
+dard PPSWOR sketch. For ℒc[𝑎](𝜈𝑥)∞
+𝛾   we build on a
+result from [8]  which shows a way to map each input
+element into an temporary “output” element with a ran-
+dom value  such that if we look at all the output elements 
+E[Max(𝑥)] = ℒc[𝑎](𝜈𝑥)∞
+𝛾 . These components were used
+in [8] to estimate the 𝑓-statistics of the data.
+However  in this work we need to produce a sample according to ℒc[𝑎](𝜈𝑥)∞
+𝛾 (as opposed to
+estimating the sum of these quantities for all keys). In particular  when we look at the output elements 
+we only see their random value  but we are interested in producing a weighted sample according to
+their expected value. For that  we introduce the analysis of PPSWOR with stochastic inputs  which
+appears in Section 4. In that analysis  we establish the conditions that are needed in order for the
+sample according to the random values to be close to a sample according to the expected values.
+The conditions in the analysis of stochastic PPSWOR require creating 𝑘/𝜀 independent output
+elements for each element we see  and subsequently  the sample we need for the range ℒc[𝑎](𝜈𝑥)∞
+𝛾
+is a PPSWOR sample of the output elements according to the weights SumMax(𝑥) (deﬁned in
+Section 5). That is the purpose of the SumMax sketch structure  which is presented in Section 5.
+Each of the two samples we maintain (the PPSWOR and SumMax samples) has a ﬁxed size and
+stores at most 𝑘 keys at any time. The 𝛾 threshold is chosen to guarantee that we get the desired
+approximation ratio. The only structure that can use more space is the Sideline structure. As part
+of the analysis  we bound the size of the Sideline and show that in expectation  it is 𝑂(𝑘) and also
+provide worst case bounds on its maximum size during the run of the algorithm. The output elements
+that are processed by the SumMax sketch have a value that depends on 𝛾 (which changes as we
+process the data)  and the purpose of the Sideline structure is to store elements until 𝛾 decreases
+enough that their value is ﬁxed (and then they are removed from the Sideline and processed by the
+SumMax sketch).
+The analysis results in the following main theorem.
+Theorem 3.1. Let 𝑘 ≥ 3 and 0 < 𝜀 ≤ 1
+of size 𝑘 − 1  where each key 𝑥 has weight 𝑉𝑥 that satisﬁes 𝑓 (𝜈𝑥) ≤ E[𝑉𝑥] ≤ 1
+per-key inverse-probability estimator of 𝑓 (𝜈𝑥) is unbiased and has variance
+
+2 . Algorithms 3 and 4 produce a stochastic PPSWOR sample
+(1−𝜀) 𝑓 (𝜈𝑥). The
+
+else
+
+return sample
+
+0 𝑡𝑎(𝑡)𝑑𝑡
+
+[︁(cid:92)𝑓 (𝜈𝑥)
+
+]︁ ≤ 4𝑓 (𝜈𝑥)∑︀
+
+Var
+
+𝑧∈𝒳 𝑓 (𝜈𝑧)
+
+(1 − 𝜀)2(𝑘 − 2)
+
+.
+
+6
+
+The space required by the sketch at any given time is 𝑂(𝑘) in expectation. Additionally  with proba-
+bility at least 1 − 𝛿  the space will not exceed 𝑂
+at any time while processing 𝐷  where 𝑚 is the number of elements in 𝐷  Min(𝐷) is the minimum
+value of an element in 𝐷  and Sum(𝑊 ) is the sum of frequencies of all keys.
+
+𝑘 + min{log 𝑚  log log
+
+𝛿
+
+(︁ Sum(𝑊 )
+
+Min(𝐷)
+
+)︁} + log(︀ 1
+
+)︀)︁
+
+(︁
+
+4 Stochastic PPSWOR Sampling
+
+In the PPSWOR sampling scheme described in Section 2.2  the weights 𝑤𝑥 of the keys were part
+of the deterministic input to the algorithm. In this section  we consider PPSWOR sampling when
+the weights are random variables. We will show that under certain assumptions  PPSWOR sampling
+according to randomized inputs is close to sampling according to the expected values of these random
+inputs.
+Formally  let 𝒳 be a set of keys. Each key 𝑥 ∈ 𝒳 is associated with 𝑟𝑥 ≥ 0 independent random
+variables 𝑆𝑥 1  . . .   𝑆𝑥 𝑟𝑥 in the range [0  𝑇 ] (for some constant 𝑇 > 0). The weight of key 𝑥 is the
+𝑖=1 𝑆𝑥 𝑖. We additionally denote its expected weight by 𝑣𝑥 := E[𝑆𝑥]  and
+
+random variable 𝑆𝑥 :=∑︀𝑟𝑥
+the expected sum statistics by 𝑉 :=∑︀
+
+𝑥 𝑣𝑥.
+
+A stochastic PPSWOR sample is a PPSWOR sample computed for the key-value pairs (𝑥  𝑆𝑥). That
+is  we draw the random variables 𝑆𝑥  then we draw for each 𝑥 a random variable seed(𝑥) ∼ Exp[𝑆𝑥] 
+and take the 𝑘 keys with lowest seed values.
+The following result bounds the variance of estimating 𝑣𝑥 using a stochastic PPSWOR sample. We
+consider the conditional inverse-probability estimator of 𝑣𝑥. Note that even though the PPSWOR
+
+sample was computed using the random weight 𝑆𝑥  the estimator ̂︀𝑣𝑥 is computed using 𝑣𝑥 and will
+
+be
+Pr[seed(𝑥)<𝜏 ] for keys 𝑥 in the sample. It sufﬁces to bound the per-key variance and relate it to
+the per-key variance bound for a PPSWOR sample computed directly for 𝑣𝑥. We show that when
+𝑉 ≥ 𝑇 𝑘  the overhead due to the stochastic sample is at most 4 (that is  the variance grows by a
+multiplicative factor of 4). The proof details would also reveal that when 𝑉 ≫ 𝑇 𝑘  the worst-case
+bound on the overhead is actually closer to 2.
+Theorem 4.1. Let 𝑘 ≥ 3. In a stochastic PPSWOR sample  if 𝑉 ≥ 𝑇 𝑘  then for every key 𝑥 ∈ 𝒳  
+the variance Var [ˆ𝑣𝑥] of the bottom-𝑘 inverse probability estimator of 𝑣𝑥 is bounded by
+
+𝑣𝑥
+
+Var [ˆ𝑣𝑥] ≤ 4𝑣𝑥𝑉
+𝑘 − 2
+
+.
+
+5 SumMax Sampling Sketch
+
+We present an auxiliary sketch that processes elements 𝑒 = (𝑒.key  𝑒.val ) with keys 𝑒.key =
+(𝑒.key.𝑝  𝑒.key.𝑠) that are structured to have a primary key 𝑒.key.𝑝 and a secondary key 𝑒.key.𝑠. For
+each primary key 𝑥  we deﬁne
+
+SumMax𝐷(𝑥) :=
+
+Max𝐷(𝑧)
+
+∑︁
+
+𝑧|𝑧.𝑝=𝑥
+
+where Max is as deﬁned in Section 2. If there are no elements 𝑒 ∈ 𝐷 such that 𝑒.key.𝑝 = 𝑥  then
+by deﬁnition Max𝐷(𝑧) = 0 for all 𝑧 with 𝑧.𝑝 = 𝑥 (as there are no elements in 𝐷 with key 𝑧) and
+therefore SumMax𝐷(𝑥) = 0. The SumMax sampling sketch (Algorithm 5) produces a PPSWOR
+sample of primary keys 𝑥 according to weights SumMax𝐷(𝑥). Note that while the key space of the
+input elements contains structured keys of the form 𝑒.key = (𝑒.key.𝑝  𝑒.key.𝑠)  the key space for the
+output sample will be the space of primary keys only. The sketch structure consists of a bottom-𝑘
+structure and a hash function ℎ. We assume we have a perfectly random hash function ℎ such that
+for every key 𝑧 = (𝑧.𝑝  𝑧.𝑠)  ℎ(𝑧) ∼ Exp[1] independently (in practice  we assume that the hash
+function is provided by the platform on which we run). We process an input element 𝑒 by generating
+a new data element with key 𝑒.key.𝑝 (the primary key of the key of the input element) and value
+
+ElementScore(𝑒) := ℎ(𝑒.key)/𝑒.val
+
+and then processing that element by our bottom-𝑘 structure. The bottom-𝑘 structure holds our current
+sample of primary keys. By deﬁnition  the bottom-𝑘 structure retains the 𝑘 primary keys 𝑥 with
+
+7
+
+Algorithm 5: SumMax sampling sketch
+// Initialize empty structure 𝑠
+Input: Sample size 𝑘
+𝑠.ℎ ← independent random hash with range Exp[1]
+Initialize 𝑠.sample // A bottom-𝑘 structure (Algorithm 1)
+// Process element 𝑒 = (𝑒.key  𝑒.val ) where 𝑒.key = (𝑒.key.𝑝  𝑒.key.𝑠)
+Process element (𝑒.key.𝑝  𝑠.ℎ(𝑒.key)/𝑒.val ) to structure 𝑠.sample // bottom-𝑘 process element
+// Merge structures 𝑠1  𝑠2 (with 𝑠1.ℎ = 𝑠2.ℎ) to get 𝑠
+𝑠.ℎ ← 𝑠1.ℎ // 𝑠1.ℎ = 𝑠2.ℎ
+𝑠.sample ← Merge 𝑠1.sample  𝑠2.sample// bottom-𝑘 merge (Algorithm 1)
+
+minimum
+
+seed𝐷(𝑥) :=
+
+min
+
+𝑒∈𝐷|𝑒.key.𝑝=𝑥
+
+ElementScore(𝑒) .
+
+To establish that this is a PPSWOR sample according to SumMax𝐷(𝑥)  we study the distribution of
+seed𝐷(𝑥).
+Lemma 5.1. For all primary keys 𝑥 that appear in elements of 𝐷  seed𝐷(𝑥) ∼
+Exp[SumMax𝐷(𝑥))]. The random variables seed𝐷(𝑥) are independent.
+
+Note that the distribution of seed𝐷(𝑥)  which is Exp[SumMax𝐷(𝑥)]  does not depend on the
+particular structure of 𝐷 or the order in which elements are processed  but only on the parameter
+SumMax𝐷(𝑥). The bottom-𝑘 sketch structure maintains the 𝑘 primary keys with smallest seed𝐷(𝑥)
+values. We therefore get the following corollary.
+Corollary 5.2. Given a stream or distributed set of elements 𝐷  the sampling sketch Algorithm 5
+produces a PPSWOR sample according to the weights SumMax𝐷(𝑥).
+
+6 Experiments
+
+We implemented our sampling sketch in Python and report here the results of experiments on real
+and synthetic datasets. The implementation follows the pseudocode except that we incorporated
+two practical optimizations: removing redundant keys from the PPSWOR subsketch and removing
+redundant elements from Sideline. These optimizations do not affect the outcome of the computation
+or the worst-case analysis  but reduce the sketch size in practice. We used the following datasets:
+
+tag  and the value is the number of times it appeared in a certain folder.
+
+∙ abcnews [23]: News headlines. For each word  we created an element with value 1.
+∙ flicker [31]: Tags used by Flickr users to annotate images. The key of each element is a
+∙ Three synthetic generated datasets that contain 2 × 106 data elements. Each element has
+value 1  and the key was chosen according to the Zipf distribution (numpy.random.zipf) 
+with Zipf parameter values 𝛼 ∈ {1.1  1.2  1.5}. The Zipf family in this range is often a good
+model to real-world frequency distributions.
+
+repetitions where we used the ﬁnal sample to estimate the sum∑︀
+
+We applied our sampling sketch with sample size parameter values 𝑘 ∈ {25  50  75  100} and set the
+parameter 𝜀 = 0.5 in all experiments. We sampled according to two concave sublinear functions: the
+frequency moment 𝑓 (𝜈) = 𝜈0.5 and 𝑓 (𝜈) = ln(1 + 𝜈). Tables 1 reports aggregated results of 200
+√
+𝑥∈𝒳 𝑓 (𝜈𝑥). For error bounds  we
+list the worst-case bound on the CV (which depends only on 𝑘 and 𝜀 and is ∝ 1/
+𝑘) and report the
+actual normalized root of the average squared error (NRMSE). In addition  we report the NRMSE that
+we got from 200 repetitions of estimating the same statistics using two common sampling schemes
+for aggregated data  PPSWOR and priority sampling  which we use as benchmarks. We also consider
+the size of the sketch after processing each element. Since the representation of each key can be
+explicit and require a lot of space  we separately consider the number of distinct keys and the number
+of elements stored in the sketch. We report the maximum number of distinct keys stored in the sketch
+at any point (the average and the maximum over the 200 repetitions) and the respective maximum
+number of elements stored in the sketch at any point during the computations (again  the average
+and the maximum over the 200 repetitions). We can see that the actual error reported is signiﬁcantly
+
+8
+
+Table 1: Experimental Results: 𝑓 (𝜈) = 𝜈0.5   ln(1 + 𝜈)
+max #elem
+ave
+
+Benchmark
+Pri.
+
+max #keys
+ave
+
+NRMSE
+
+bound
+
+actual
+
+ppswor
+
+max
+
+𝑘
+
+max
+
+Dataset: abcnews (7.07 × 106 elements  91.7 × 103 keys)
+
+𝑓 (𝜈) = 𝜈0.5  200 reps
+
+25
+50
+75
+100
+
+25
+50
+75
+100
+
+25
+50
+75
+100
+
+25
+50
+75
+100
+
+25
+50
+75
+100
+
+25
+50
+75
+100
+
+25
+50
+75
+100
+
+25
+50
+75
+100
+
+25
+50
+75
+100
+
+25
+50
+75
+100
+
+0.213
+0.142
+0.120
+0.105
+
+0.200
+0.144
+0.123
+0.115
+
+0.215
+0.123
+0.109
+0.106
+
+0.199
+0.144
+0.122
+0.098
+
+0.201
+0.152
+0.115
+0.098
+
+0.208
+0.138
+0.130
+0.102
+
+0.227
+0.144
+0.119
+0.097
+
+0.201
+0.127
+0.116
+0.107
+
+0.209
+0.147
+0.120
+0.098
+
+0.213
+0.128
+0.111
+0.098
+
+0.190
+0.147
+0.114
+0.095
+
+0.198
+0.137
+0.115
+0.103
+
+0.208
+0.138
+0.116
+0.109
+
+0.217
+0.136
+0.099
+0.115
+
+0.199
+0.151
+0.121
+0.104
+
+0.204
+0.132
+0.122
+0.106
+
+0.195
+0.144
+0.111
+0.106
+
+0.217
+0.137
+0.110
+0.103
+
+0.208
+0.142
+0.110
+0.099
+
+0.217
+0.131
+0.114
+0.097
+
+0.214
+0.145
+0.124
+0.096
+
+0.194
+0.142
+0.117
+0.103
+
+0.180
+0.129
+0.109
+0.095
+
+0.234
+0.129
+0.110
+0.104
+
+0.218
+0.139
+0.113
+0.102
+
+31.7
+58.5
+85.4
+111.2
+
+31.2
+57.8
+83.7
+108.9
+
+31.8
+58.7
+84.7
+111.2
+
+31.1
+57.9
+83.9
+109.6
+
+29.5
+54.9
+80.0
+104.9
+
+28.0
+53.3
+78.2
+102.7
+
+29.2
+54.4
+79.6
+104.5
+
+28.5
+53.7
+78.8
+103.9
+
+37
+66
+94
+120
+
+37
+64
+91
+116
+
+39
+66
+91
+119
+
+38
+65
+90
+115
+
+35
+60
+86
+113
+
+34
+60
+85
+109
+
+31
+59
+83
+106
+
+34
+58
+84
+109
+
+33
+57
+84
+108
+
+0.834
+0.577
+0.468
+0.404
+
+0.834
+0.577
+0.468
+0.404
+
+0.834
+0.577
+0.468
+0.404
+
+0.834
+0.577
+0.468
+0.404
+
+0.834
+0.577
+0.468
+0.404
+
+0.834
+0.577
+0.468
+0.404
+
+0.834
+0.577
+0.468
+0.404
+
+0.834
+0.577
+0.468
+0.404
+
+0.834
+0.577
+0.468
+0.404
+
+0.834
+0.577
+0.468
+0.404
+
+Dataset: flickr (7.64 × 106 elements  572.4 × 103 keys)
+
+Dataset: zipf1.1 (2.00 × 106 elements  652.2 × 103 keys)
+
+Dataset: zipf1.2 (2.00 × 106 elements  237.3 × 103 keys)
+
+Dataset: zipf1.5 (2.00 × 106 elements  22.3 × 103 keys)
+
+0.207
+0.139
+0.115
+0.094
+𝑓 (𝜈) = ln(1 + 𝜈)  200 reps
+
+0.194
+0.142
+0.112
+0.086
+
+30.1
+56.1
+81.6
+107.1
+
+Dataset: abcnews (7.07 × 106 elements  91.7 × 103 keys)
+
+Dataset: flickr (7.64 × 106 elements  572.4 × 103 keys)
+
+Dataset: zipf1.1 (2.00 × 106 elements  652.2 × 103 keys)
+
+Dataset: zipf1.2 (2.00 × 106 elements  237.3 × 103 keys)
+
+Dataset: zipf1.5 (2.00 × 106 elements  22.3 × 103 keys)
+
+0.210
+0.141
+0.124
+0.100
+
+0.197
+0.146
+0.112
+0.101
+
+0.226
+0.149
+0.106
+0.099
+
+27.2
+52.1
+76.9
+101.9
+
+30
+55
+79
+104
+
+50.9
+95.1
+134.8
+171.1
+
+53.1
+94.6
+131.7
+173.4
+
+52.5
+95.0
+135.2
+176.3
+
+53.2
+98.4
+138.2
+179.2
+
+53.4
+101.5
+151.8
+196.3
+
+49.1
+80.9
+111.1
+140.7
+
+41.4
+72.2
+99.8
+130.3
+
+48.8
+80.4
+110.9
+139.8
+
+48.0
+80.5
+111.4
+140.3
+
+45.2
+78.9
+110.5
+139.1
+
+76
+136
+181
+256
+
+77
+130
+175
+223
+
+75
+130
+186
+221
+
+83
+139
+173
+227
+
+74
+136
+199
+248
+
+71
+110
+152
+184
+
+69
+101
+135
+166
+
+71
+119
+142
+165
+
+72
+113
+143
+173
+
+66
+104
+146
+173
+
+lower than the worst-case bound. Furthermore  the error that our sketch gets is close to the error
+achieved by the two benchmark sampling schemes. We can also see that the maximum number of
+distinct keys stored in the sketch at any time is relatively close to the speciﬁed sample size of 𝑘 and
+that the total sketch size in terms of elements rarely exceeded 3𝑘  with the relative excess seeming to
+decrease with 𝑘. In comparison  the benchmark schemes require space that is the number of distinct
+keys (for the aggregation)  which is signiﬁcantly higher than the space required by our sketch.
+
+7 Conclusion
+
+We presented composable sampling sketches for weighted sampling of unaggregated data tailored
+to a concave sublinear function of the frequencies of keys. We experimentally demonstrated the
+simplicity and efﬁcacy of our design: Our sketch size is nearly optimal in that it is not much larger
+than the ﬁnal sample size  and the estimate quality is close to that provided by a weighted sample
+computed directly over the aggregated data.
+
+9
+
+Acknowledgments
+
+Oﬁr Geri was supported by NSF grant CCF-1617577  a Simons Investigator Award for Moses
+Charikar  and the Google Graduate Fellowship in Computer Science in the School of Engineering
+at Stanford University. The computing for this project was performed on the Sherlock cluster. We
+would like to thank Stanford University and the Stanford Research Computing Center for providing
+computational resources and support that contributed to these research results.
+
+References
+[1] N. Alon  Y. Matias  and M. Szegedy. The space complexity of approximating the frequency
+
+moments. J. Comput. System Sci.  58:137–147  1999.
+
+[2] A. Andoni  R. Krauthgamer  and K. Onak. Streaming algorithms via precision sampling. In
+2011 IEEE 52nd Annual Symposium on Foundations of Computer Science  pages 363–372  Oct
+2011.
+
+[3] V. Braverman  S. R. Chestnut  D. P. Woodruff  and L. F. Yang. Streaming space complexity of
+
+nearly all functions of one variable on frequency vectors. In PODS. ACM  2016.
+
+[4] V. Braverman  R. Krauthgamer  and L. F. Yang. Universal streaming of subset norms. CoRR 
+
+abs/1812.00241  2018.
+
+[5] V. Braverman and R. Ostrovsky. Zero-one frequency laws. In STOC. ACM  2010.
+
+[6] M. T. Chao. A general purpose unequal probability sampling plan. Biometrika  69(3):653–656 
+
+1982.
+
+[7] E. Cohen. Stream sampling for frequency cap statistics. In KDD. ACM  2015. full version:
+
+http://arxiv.org/abs/1502.05955.
+
+[8] E. Cohen. Hyperloglog hyperextended: Sketches for concave sublinear frequency statistics. In
+
+KDD. ACM  2017. full version: https://arxiv.org/abs/1607.06517.
+
+[9] E. Cohen  G. Cormode  and N. Dufﬁeld. Don’t let the negatives bring you down: Sampling
+
+from streams of signed updates. In Proc. ACM SIGMETRICS/Performance  2012.
+
+[10] E. Cohen  N. Dufﬁeld  H. Kaplan  C. Lund  and M. Thorup. Efﬁcient stream sampling for
+
+variance-optimal estimation of subset sums. SIAM J. Comput.  40(5)  2011.
+
+[11] E. Cohen  N. Dufﬁeld  H. Kaplan  C. Lund  and M. Thorup. Algorithms and estimators for
+
+accurate summarization of unaggregated data streams. J. Comput. System Sci.  80  2014.
+
+[12] E. Cohen and H. Kaplan. Summarizing data using bottom-k sketches. In ACM PODC  2007.
+
+[13] N. Dufﬁeld  M. Thorup  and C. Lund. Priority sampling for estimating arbitrary subset sums. J.
+
+Assoc. Comput. Mach.  54(6)  2007.
+
+[14] C. Estan and G. Varghese. New directions in trafﬁc measurement and accounting. In SIGCOMM.
+
+ACM  2002.
+
+[15] P. Flajolet  E. Fusy  O. Gandouet  and F. Meunier. Hyperloglog: The analysis of a near-optimal
+
+cardinality estimation algorithm. In Analysis of Algorithms (AofA). DMTCS  2007.
+
+[16] P. Flajolet and G. N. Martin. Probabilistic counting algorithms for data base applications. J.
+
+Comput. System Sci.  31:182–209  1985.
+
+[17] G. Frahling  P. Indyk  and C. Sohler. Sampling in dynamic data streams and applications.
+
+International Journal of Computational Geometry & Applications  18(01n02):3–28  2008.
+
+[18] P. Gibbons and Y. Matias. New sampling-based summary statistics for improving approximate
+
+query answers. In SIGMOD. ACM  1998.
+
+[19] Google. Frequency capping: AdWords help  December 2014. https://support.google.
+
+com/adwords/answer/117579.
+
+10
+
+[20] R. Jayaram and D. P. Woodruff. Perfect lp sampling in a data stream. In 2018 IEEE 59th Annual
+
+Symposium on Foundations of Computer Science (FOCS)  pages 544–555  Oct 2018.
+
+[21] H. Jowhari  M. Sa˘glam  and G. Tardos. Tight bounds for lp samplers  ﬁnding duplicates in
+streams  and related problems. In Proceedings of the Thirtieth ACM SIGMOD-SIGACT-SIGART
+Symposium on Principles of Database Systems  PODS ’11  pages 49–58  2011.
+
+[22] D. E. Knuth. The Art of Computer Programming  Vol 2  Seminumerical Algorithms. Addison-
+
+Wesley  1st edition  1968.
+
+[23] R. Kulkarni. A million news headlines [csv data ﬁle]. https://www.kaggle.com/therohk/
+
+million-headlines/home  2017.
+
+[24] B. McMahan  E. Moore  D. Ramage  S. Hampson  and B. Aguera y Arcas. Communication-
+Efﬁcient Learning of Deep Networks from Decentralized Data. In Aarti Singh and Jerry Zhu 
+editors  Proceedings of the 20th International Conference on Artiﬁcial Intelligence and Statistics 
+volume 54 of Proceedings of Machine Learning Research  pages 1273–1282. PMLR  2017.
+
+[25] T. Mikolov  I. Sutskever  K. Chen  G. S. Corrado  and J. Dean. Distributed representations
+of words and phrases and their compositionality. In Proceedings of the 26th International
+Conference on Neural Information Processing Systems - Volume 2  NIPS’13  pages 3111–3119 
+2013.
+
+[26] J. Misra and D. Gries. Finding repeated elements. Technical report  Cornell University  1982.
+
+[27] M. Monemizadeh and D. P. Woodruff. 1-pass relative-error lp-sampling with applications. In
+
+Proc. 21st ACM-SIAM Symposium on Discrete Algorithms. ACM-SIAM  2010.
+
+[28] E. Ohlsson. Sequential poisson sampling. J. Ofﬁcial Statistics  14(2):149–162  1998.
+
+[29] M. Osborne. Facebook Reach and Frequency Buying  October 2014. http://citizennet.
+
+com/blog/2014/10/01/facebook-reach-and-frequency-buying/.
+
+[30] J. Pennington  R. Socher  and C. D. Manning. GloVe: Global vectors for word representation.
+
+In EMNLP  2014.
+
+[31] A. Plangprasopchok  K. Lerman  and L. Getoor. Growing a tree in the forest: Constructing
+folksonomies by integrating structured metadata. In Proceedings of the 16th ACM SIGKDD
+International Conference on Knowledge Discovery and Data Mining  KDD ’10  pages 949–958 
+2010.
+
+[32] B. Rosén. Asymptotic theory for successive sampling with varying probabilities without
+
+replacement  I. The Annals of Mathematical Statistics  43(2):373–397  1972.
+
+[33] B. Rosén. Asymptotic theory for order sampling. J. Statistical Planning and Inference 
+
+62(2):135–158  1997.
+
+[34] J.S. Vitter. Random sampling with a reservoir. ACM Trans. Math. Softw.  11(1):37–57  1985.
+
+11
+
+,Arun Venkatraman
+Nicholas Rhinehart
+Wen Sun
+Martial Hebert
+Byron Boots
+Kris Kitani
+J. Bagnell
+Edith Cohen
+Ofir Geri

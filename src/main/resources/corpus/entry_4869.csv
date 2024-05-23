@@ -1,0 +1,1502 @@
+2013,Scalable Inference for Logistic-Normal Topic Models,Logistic-normal topic models can effectively discover correlation structures among latent topics. However  their inference remains a challenge because of the non-conjugacy between the logistic-normal prior and multinomial topic mixing proportions. Existing algorithms either make restricting mean-field assumptions or are not scalable to large-scale applications. This paper presents a partially collapsed Gibbs sampling algorithm that approaches the provably correct distribution by exploring the ideas of data augmentation. To improve time efficiency  we further present a parallel implementation that can deal with large-scale applications and learn the correlation structures of thousands of topics from millions of documents. Extensive empirical results demonstrate the promise.,Scalable Inference for Logistic-Normal Topic Models
+
+Jianfei Chen  Jun Zhu  Zi Wang  Xun Zheng and Bo Zhang
+
+State Key Lab of Intelligent Tech. & Systems; Tsinghua National TNList Lab;
+
+Department of Computer Science and Technology  Tsinghua University  Beijing 100084  China
+
+{chenjf10 wangzi10}@mails.tsinghua.edu.cn;
+
+{dcszj dcszb}@mail.tsinghua.edu.cn; xunzheng@cs.cmu.edu
+
+Abstract
+
+Logistic-normal
+topic models can effectively discover correlation structures
+among latent topics. However  their inference remains a challenge because of the
+non-conjugacy between the logistic-normal prior and multinomial topic mixing
+proportions. Existing algorithms either make restricting mean-ﬁeld assumptions
+or are not scalable to large-scale applications. This paper presents a partially col-
+lapsed Gibbs sampling algorithm that approaches the provably correct distribution
+by exploring the ideas of data augmentation. To improve time efﬁciency  we fur-
+ther present a parallel implementation that can deal with large-scale applications
+and learn the correlation structures of thousands of topics from millions of docu-
+ments. Extensive empirical results demonstrate the promise.
+
+1
+
+Introduction
+
+In Bayesian models  though conjugate priors normally result in easier inference problems  non-
+conjugate priors could be more expressive in capturing desired model properties. One popular ex-
+ample is admixture topic models which have obtained much success in discovering latent semantic
+structures from data. For the most popular latent Dirichlet allocation (LDA) [5]  a Dirichlet dis-
+tribution is used as the conjugate prior for multinomial mixing proportions. But a Dirichlet prior
+is unable to model topic correlation  which is important for understanding/visualizing the semantic
+structures of complex data  especially in large-scale applications. One elegant extension of LDA
+is the logistic-normal topic models (aka correlated topic models  CTMs) [3]  which use a logistic-
+normal prior to capture the correlation structures among topics effectively. Along this line  many
+subsequent extensions have been developed  including dynamic topic models [4] that deal with time
+series via a dynamic linear system on the Gaussian variables and inﬁnite CTMs [11] that can resolve
+the number of topics from data.
+
+The modeling ﬂexibility comes with computational cost. Although signiﬁcant progress has been
+made on developing scalable inference algorithms for LDA using either distributed [10  16  1] or on-
+line [7] learning methods  the inference of logistic-normal topic models still remains a challenge  due
+to the non-conjugate priors. Existing algorithms on learning logistic-normal topic models mainly
+rely on approximate techniques  e.g.  variational inference with unwarranted mean-ﬁeld assump-
+tions [3]. Although variational methods have a deterministic objective to optimize and are usually
+efﬁcient  they could only achieve an approximate solution. If the mean-ﬁeld assumptions are not
+made appropriately  the approximation could be unsatisfactory. Furthermore  existing algorithms
+can only deal with small corpora and learn a limited number of topics. It is important to develop
+scalable algorithms in order to apply the models to large collections of documents  which are be-
+coming increasingly common in both scientiﬁc and engineering ﬁelds.
+
+To address the limitations listed above  we develop a scalable Gibbs sampling algorithm for logistic-
+normal topic models  without making any restricting assumptions on the posterior distribution. Tech-
+nically  to deal with the non-conjugate logistic-normal prior  we introduce auxiliary Polya-Gamma
+
+1
+
+variables [13]  following the statistical ideas of data augmentation [17  18  8]; and the augmented
+posterior distribution leads to conditional distributions from which we can draw samples easily with-
+out accept/reject steps. Moreover  the auxiliary variables are locally associated with each individual
+document  and this locality naturally allows us to develop a distributed sampler by splitting the doc-
+uments into multiple subsets and allocating them to multiple machines. The global statistics can
+be updated asynchronously without sacriﬁcing the predictive ability on unseen testing documents.
+We successfully apply the scalable inference algorithm to learning a correlation graph of thousands
+of topics on large corpora with millions of documents. These results are the largest automatically
+learned topic correlation structures to our knowledge.
+
+2 Logistic-Normal Topic Models
+
+d=1 be a set of documents  where wd = {wdn}Nd
+
+Let W = {wd}D
+n=1 denote the words appearing
+in document d of length Nd. A hierarchical Bayesian topic model posits each document as an
+admixture of K topics  where each topic Φk is a multinomial distribution over a V -word vocabulary.
+For a logistic-normal topic model (e.g.  CTM)  the generating process of document d is:
+
+d
+
+eηk
+PK
+j=1 eη
+
+ηd ∼ N (µ  Σ)  θk
+
+d =
+
+  ∀n ∈ {1  · · ·   Nd} : zdn ∼ Mult(θd)  wdn ∼ Mult(Φzdn ) 
+
+j
+d
+
+where Mult(·) denotes the multinomial distribution; zdn is a K-binary vector with only one nonzero
+element; and Φzdn denotes the topic selected by the non-zero entry of zdn. For Bayesian CTM  the
+topics are samples drawn from a prior  e.g.  Φk ∼ Dir(β)  where Dir(·) is a Dirichlet distribution.
+Note that for identiﬁability  normally we assume ηK
+
+d = 0.
+
+Given a set of documents W  CTM infers the posterior distribution p(η  Z  Φ|W) ∝
+p0(η  Z  Φ)p(W|Z  Φ) by the Bayes’ rule. This problem is generally hard because of the non-
+conjugacy between the normal prior and the logistic transformation function (can be seen as a like-
+lihood model for θ). Existing approaches resort to variational approximate methods [3] with strict
+factorization assumptions. To avoid mean-ﬁeld assumptions and improve the inference accuracy 
+below we present a partially collapsed Gibbs sampler  which is simple to implement and can be
+naturally parallelized for large-scale applications.
+
+3 Gibbs Sampling with Data Augmentation
+
+We now present a block-wise Gibbs sampling algorithm for logistic-normal topic models. To
+improve mixing rates  we ﬁrst integrate out the Dirichlet variables Φ  by exploring the conjugacy
+between a Dirichlet prior and multinomial likelihood. Speciﬁcally  we can integrate out Φ and
+perform Gibbs sampling for the marginalized distribution:
+
+D
+
+Nd
+
+p(η  Z|W) ∝ p(W|Z)
+
+d (cid:17)N (ηd|µ  Σ) 
+k is the number of times topic k being assigned to the term t over the whole corpus; Ck =
+
+d (cid:17)N (ηd|µ  Σ) ∝
+θzdn
+
+Yd=1(cid:16)
+
+Yd=1(cid:16)
+
+Yn=1
+
+Yn=1
+
+Yk=1
+
+δ(β)
+
+j
+
+K
+
+δ(Ck + β)
+
+D
+
+Nd
+
+zdn
+d
+
+eη
+PK
+j=1 eη
+
+is a function deﬁned with the Gamma function Γ(·).
+
+where C t
+{C t
+
+k}V
+
+t=1; and δ(x) = Qdim(x)
+Γ(Pdim(x)
+
+i=1
+
+Γ(xi)
+xi)
+
+i=1
+
+3.1 Sampling Topic Assignments
+
+When the variables η = {ηd}D
+In our Gibbs
+sampler  this is done by iteratively drawing a sample for each word in each document. The local
+conditional distribution is:
+
+d=1 are given  we draw samples from p(Z|η  W).
+
+p(zk
+
+dn = 1|Z¬n  wdn  W¬dn  η) ∝ p(wdn|zk
+
+dn = 1  Z¬n  W¬dn)eηk
+
+d ∝
+
+k ¬n + PV
+· ¬n indicates that term n is excluded from the corresponding document or topic.
+
+j=1 βj
+
+where C ·
+
+k ¬n + βwdn
+
+C wdn
+PV
+j=1 C j
+
+eηk
+
+d   (1)
+
+3.2 Sampling Logistic-Normal Parameters
+
+When the topic assignments Z are given  we draw samples from the posterior distribution
+
+p(η|Z  W) ∝ QD
+
+d=1 (cid:16)QNd
+
+n=1
+
+ηd
+
+zn
+
+e
+PK
+
+j=1 e
+
+j (cid:17)N (ηd|µ  Σ)  which is a Bayesian logistic regression model
+
+ηd
+
+2
+
+with Z as the multinomial observations. Though it is hard to draw samples directly due to non-
+conjugacy  we can leverage recent advances in data augmentation to solve this inference task efﬁ-
+ciently  with analytical local conditionals for Gibbs sampling  as detailed below.
+
+Speciﬁcally  we have the likelihood of “observing” the topic assignments zd for document d 1 as
+p(zd|ηd) = QNd
+η¬k
+
+. Following Homes & Held [8]  the likelihood for ηd
+
+k conditioned on
+
+eη
+j=1 eη
+PK
+
+zdn
+d
+
+n=1
+
+is:
+
+j
+d
+
+d
+
+ℓ(ηk
+
+d
+
+Nd
+
+d ) =
+
+Yn=1(cid:16) eρk
+d |η¬k
+1 + eρk
+d = log(Pj6=k eηj
+
+d (cid:17)zk
+dn(cid:16)
+d ); and C k
+
+dn
+
+1
+
+d (cid:17)1−zk
+1 + eρk
+d = PNd
+n=1 zk
+
+where ρk
+to topic k in document d. Therefore  we have the conditional distribution
+
+d = ηk
+
+d − ζ k
+
+d ; ζ k
+
+=
+
+(eρk
+
+d )Ck
+
+d
+
+(1 + eρk
+
+d )Nd
+
+ 
+
+dn is the number of words assigned
+
+p(ηk
+
+d |η¬k
+
+d   Z  W) ∝ ℓ(ηk
+
+d |η¬k
+
+d )N (ηk
+
+d |µk
+
+d  σ2
+
+k) 
+
+(2)
+
+where µk
+Gaussian distribution.
+
+d = µk − Λ−1
+
+kk
+
+Λk¬k(η¬k
+
+d − µ¬k) and σ2
+
+k = Λ−1
+
+kk . Λ = Σ−1 is the precision matrix of a
+
+This is a posterior distribution of a Bayesian logistic model with a Gaussian prior  where zk
+dn are
+binary response variables. Due to the non-conjugacy between the normal prior and logistic likeli-
+hood  we do not have analytical form of this posterior distribution. Although standard Monte Carlo
+methods (e.g.  rejection sampling) can be applied  they normally require a good proposal distribu-
+tion and may have the trouble to deal with accept/reject rates. Data augmentation techniques have
+been developed  e.g.  [8] presented a two layer data augmentation representation with logistic dis-
+tributions and [9] applied another data augmentation with uniform variables and truncated Gaussian
+distributions  which may involve sophisticated accept/reject strategies [14]. Below  we develop a
+simple exact sampling method without a proposal distribution.
+
+Our method is based on a new data augmentation representation  following the recent developments
+in Bayesian logistic regression [13]  which is a direct data augmentation scheme with only one layer
+of auxiliary variables and does not need to tune in order to get optimal performance. Speciﬁcally 
+for the above posterior inference problem  we can show the following lemma.
+Lemma 1 (Scale Mixture Representation). The likelihood ℓ(ηk
+
+d ) can be expressed as
+
+d |η¬k
+
+where κk
+
+d = C k
+
+(1 + eρk
+
+d )Nd
+d − Nd/2 and p(λk
+
+(eρk
+
+d )Ck
+
+d
+
+=
+
+1
+2Nd
+
+d ρk
+
+eκk
+
+d Z ∞
+
+0
+
+d (ρk
+λk
+2
+
+d )2
+
+e−
+
+p(λk
+
+d|Nd  0)dλk
+d 
+
+d|Nd  0) is the Polya-Gamma distribution PG(Nd  0).
+
+The lemma suggest that p(ηk
+
+d |η¬k
+
+d   Z  W) is a marginal distribution of the complete distribution
+
+p(ηk
+
+d   λk
+
+d|η−k
+
+d   Z  W) ∝
+
+1
+2Nd
+
+exp(cid:16)κk
+dρk
+
+d −
+
+d)2
+
+d(ρk
+λk
+2
+
+(cid:17)p(λk
+
+d|Nd  0)N (ηk
+
+d |µk
+
+d  σ2
+
+k).
+
+d   Z  W).
+(cid:1)N (ηk
+
+Therefore  we can draw samples from the complete distribution. By discarding the augmented
+variable λk
+
+d |η¬k
+d  we get the samples of the posterior distribution p(ηk
+d )2
+d(ηk
+2
+
+d |η¬k
+
+d − λk
+dηk
+dζ k
+d + λk
+
+k µk
+
+d |µ  σ2) = N (γk
+
+d : we have p(ηk
+
+d   Z  W  λk
+d = (τ k
+
+d) ∝ exp(cid:0)κk
+d )2(σ−2
+d + κk
+
+the conditional distribution of the augmented variable is p(λk
+d|Nd  0) = PG(cid:0)λk
+
+For ηk
+d ) and the variance is (τ k
+where the posterior mean is γk
+d)−1. Therefore  we can easily draw a sample from a univariate Gaussian distribution.
+λk
+For λk
+d:
+λk
+d)2
+d(ρk
+(cid:1)p(λk
+2
+
+d|Z  W  η) ∝ exp(cid:0) −
+d(cid:1)  which is again a Polya-Gamma distribution by using the
+construction deﬁnition of the general PG(a  b) class through an exponential tilting of the PG(a  0)
+density [13]. To draw samples from the Polya-Gamma distribution  note that a naive implementation
+of the sampling using the inﬁnite sum-of-Gamma representation is not efﬁcient and it also involves
+a potentially inaccurate step of truncating the inﬁnite sum. Here we adopt the exact method pro-
+posed in [13]  which draws the samples through drawing Nd samples from PG(1  ηk
+d ). Since Nd is
+normally large  we will develop a fast and effective approximation in the next section.
+
+d   (τ k
+d )2 = (σ−2
+
+d )2) 
+k +
+
+d; Nd  ρk
+
+1Due to the independence  we can treat documents separately.
+
+3
+
+x 104
+
+2.5
+
+y
+c
+n
+e
+u
+q
+e
+r
+F
+
+2
+
+1.5
+
+1
+
+0.5
+
+ 
+
+0
+120
+
+130
+
+ 
+
+10000
+
+m=1
+m=2
+m=4
+m=8
+m=n (exact)
+
+8000
+
+y
+c
+n
+e
+u
+q
+e
+r
+F
+
+6000
+
+4000
+
+2000
+
+0
+ 
+−1
+
+150
+
+140
+z ∼ PG(z ; m  ρ)
+
+160
+
+170
+
+180
+
+(a)
+
+3.3 Fully-Bayesian Models
+
+ 
+
+m=1
+m=2
+m=4
+m=8
+m=n (exact)
+
+2
+1
+0
+¬ k  Z  W )
+η
+k ∼ P(η
+k | η
+d
+d
+d
+
+3
+
+(b)
+
+d ∼ p(ηk
+
+d |η¬k
+
+Figure 3: (a) frequency of f (z) with z ∼
+PG(m  ρ); and (b) frequency of samples
+from ηk
+d   Z  W). Though z
+is not from the exact distribution  the dis-
+tribution of ηk
+d is very accurate. The pa-
+rameters ρk
+d = 19  Nd =
+1155  µk
+d = 0.31  and ζ = 5.35
+are from a real distribution when training
+on the NIPS data set.
+
+d = −4.19  C k
+
+d = 0.40  σ2
+
+We can treat µ and Σ as random variables and perform fully-Bayesian inference  by using the
+conjugate Normal-Inverse-Wishart prior  p0(µ  Σ) = N IW(µ0  ρ  κ  W )  that is
+
+Σ|κ  W ∼ IW(Σ; κ  W −1)  µ|Σ  µ0  ρ ∼ N (µ; µ0  Σ/ρ) 
+
+where IW(Σ; κ  W −1) =
+
+2
+
+|W |κ/2
+
+κM
+2 ΓM ( κ
+
+2 )|Σ|
+
+κ+M +1
+
+2
+
+exp(− 1
+
+2 Tr(W Σ−1)) is the inverse Wishart
+
+distribution and (µ0  ρ  κ  W ) are hyper-parameters. Then  the conditional distribution is
+
+p(µ  Σ|η  Z  W) ∝ p0(µ  Σ)Yd
+
+p(ηd|µ  Σ) = N IW(µ′
+
+0  ρ′  κ′  W ′) 
+
+(3)
+
+which is still a Normal-Inverse-Wishart distribution due to the conjugate property and the parameters
+0 = ρ
+ρ+D ( ¯η − µ0)( ¯η − µ0)⊤ 
+are µ′
+where ¯η = 1
+
+ρ+D µ0 + D
+D Pd ηd is the empirical mean of the data and Q = Pd(ηd − ¯η)(ηd − ¯η)⊤.
+
+ρ+D ¯η  ρ′ = ρ + D  κ′ = κ + D and W ′ = W + Q + ρD
+
+4 Parallel Implementation and Fast Approximate Sampling
+
+The above Gibbs sampler can be naturally parallelized to extract large correlation graphs from mil-
+lions of documents  due to the following observations:
+
+First  both ηd and λd are conditionally independent given µ and Σ  which makes it natural to dis-
+tribute documents over machines and infer local ηd and λd. No communication is needed for this
+sampling step. Second  the global variables µ and Σ can be inferred and broadcast to every machine
+after each iteration. As mentioned in Section 3.3  this involves: 1) computing N IW posterior pa-
+0  W ′
+rameters  and 2) sampling from Eq. 3. Notice that ηd contribute to the posterior parameters µ′
+through the simple summation operator  so that we can perform local summation on each machine 
+followed by a global aggregation. Similarly  N IW sample can be drawn distributively  by com-
+puting sample covariance of x1  · · ·   xκ′   drawn from N (x|0  W ′) distributively after broadcasting
+W ′. Finally  the topic assignments zd are conditionally independent given the topic counts Ck. We
+synchronize Ck globally by leveraging the recent advances on scalable inference of LDA [1  16] 
+which implemented a general framework to synchronize such counts.
+
+To further speed up the inference algorithm  we designed a fast approximate sampling method to
+draw PG(n  ρ) samples  reducing the time complexity from O(n) in [13] to O(1). Speciﬁcally 
+Polson et al. [13] show how to efﬁciently generate PG(1  ρ) random variates. Due to additive prop-
+erty of Polya-Gamma distribution  y ∼ PG(n  ρ) if xi ∼ PG(1  ρ) and y = Pn
+i=1 xi. However 
+this sampler can be slow when n is large. For our Gibbs sampler  n is the document length  often
+around hundreds. Fortunately  an effective approximation can be developed to achieve constant time
+sampling of PG. Since n is relatively large  the sum variable y should be almost normally dis-
+tributed  according to the central limit theorem. Fig. 3(a) conﬁrms this intuition. Consider another
+PG variable z ∼ PG(m  ρ). If both m and n are large  y and z should be both samples from normal
+distribution. Hence  we can do a simple linear transformation of z to approximate y. Speciﬁcally 
+we have f (z) = pV ar(y)/V ar(z)(z − E[z]) + E[y]  where E[y] = n
+2ρ tanh(ρ/2) from [12]  and
+V ar(y) = m
+n since both y and z are sum of PG(1  ρ) variates. It can be shown that f (z) and y
+have the same mean and variance. In practice  we found that even when m = 1  the algorithm
+still can draw good samples from p(ηk
+d   Z  W) (See Fig. 3(b)). Hence  we are able to speed up
+the Polya-Gamma sampling process signiﬁcantly by applying this approximation. More empirical
+analysis can be found in the appendix.
+
+d |η¬k
+
+V ar(z)
+
+4
+
+Furthermore  we can perform sparsity-aware fast sampling [19] in the Gibbs sampler. Speciﬁcally 
+
+wdn
+k ¬n
+
+C
+j=1 Cj
+k ¬n+PV
+
+PV
+
+eηk
+
+d   Bk =
+
+let Ak =
+
+d   then Eq. (1) can be written as
+dn = 1|Z¬n  wdn  W¬dn  η) ∝ Ak + Bk. Let ZA = Pk Ak and ZB = Pk Bk. We can show
+
+p(zk
+that the sampling of zdn can be done by sampling from Mult( A
+ZA
+
+) or Mult( B
+ZB
+
+)  due to the fact:
+
+j=1 βj
+
+PV
+
+j=1 Cj
+
+j=1 βj
+
+βwdn
+k ¬n+PV
+
+eηk
+
+p(zk
+
+dn = 1|Z¬n  wdn  W¬dn  η) =
+
+Ak
+
+ZA + ZB
+
++
+
+Bk
+
+ZA + ZB
+
+= (1 − p)
+
+Ak
+ZA
+
++ p
+
+Bk
+ZB
+
+ 
+
+(4)
+
+ZA+ZB
+
+where p = ZB
+. Note that Eq. (4) is a marginalization with respect to an auxiliary binary
+variable. Thus a sample of zdn can be drawn by ﬂipping a coin with probability p being head. If
+it is tail  we draw zdn from Mult( A
+). The advantage is that we only
+ZA
+need to consider all non-zero entries of A to sample from Mult( A
+). In fact  A has few non-zero
+ZA
+entries due to the sparsity of the topic counts Ck. Thus  the time complexity would be reduced from
+O(K) to O(s(K))  where s(K) is the average number of non-zero entries in Ck. In practice  Ck is
+very sparse  hence s(K) ≪ K when K is large. To sample from Mult( B
+)  we iterate over all K
+ZB
+potential assignments. But since p is typically small  O(K) time complexity is acceptable.
+
+); otherwise from Mult( B
+ZB
+
+With the above techniques  the time complexity per document of the Gibbs sampler is O(Nds(K))
+for sampling zd  O(K 2) for computing (µk
+(2) 
+where S is the number of sub-burn-in steps over sampling ηk
+d . Thus the overall time complexity
+is O(Nds(K) + K 2 + SK)  which is higher than the O(Nds(K)) complexity of LDA [1] when K
+is large  indicating a cost for the enriched representation of CTM comparing to LDA.
+
+k)  and O(SK) for sampling ηd with Eq.
+
+d  σ2
+
+5 Experiments
+
+We now present qualitative and quantitative evaluation to demonstrate the efﬁcacy and scalability of
+the Gibbs sampler for CTM (denoted by gCTM). Experiments are conducted on a 40-node cluster 
+where each node is equipped with two 6-core CPUs (2.93GHz). For all the experiments  if not
+explicitly mentioned  we set the hyper-parameters as β = 0.01  T = 350  S = 8  m = 1  ρ = κ =
+0.01D  µ0 = 0  and W = κI  where T is the number of burn-in steps. We will use M to denote
+the number of machines and P to denote the number of CPU cores. For baselines  we compare
+with the variational CTM (vCTM) [3] and the state-of-the-art LDA implementation  Yahoo! LDA
+(Y!LDA) [1]. In order to achieve fair comparison  for both vCTM and gCTM we select T such that
+the models converge sufﬁciently  as we shall discuss later in Section 5.3.
+
+Data Sets: Experiments are conducted on several benchmark data sets  including NIPS paper ab-
+stracts  20Newsgroups  and NYTimes (New York Times) corpora from [2] and the Wikipedia corpus
+from [20]. All the data sets are randomly split into training and testing sets. Following the settings
+in [3]  we partition each document in the testing set into an observed part and a held-out part.
+
+5.1 Qualitative Evaluation
+
+We ﬁrst examine the correlation structure of 1 000 topics learned by CTM using our scalable sampler
+on the NYTimes corpus with 285 000 documents. Since the entire correlation graph is too large  we
+build a 3-layer hierarchy by clustering the learned topics  with their learned correlation strength
+as the similarity measure. Fig. 4 shows a part of the hierarchy2  where the subgraph A represents
+the top layer with 10 clusters. The subgraphs B and C are two second layer clusters; and D and
+E are two correlation subgraphs consisting of leaf nodes (i.e.  learned topics). To represent their
+semantic meanings  we present 4 most frequent words for each topic; and for each topic cluster 
+we also show most frequent words by building a hyper-topic that aggregates all the included topics.
+On the top layer  the font size of each word in a word cloud is proportional to its frequency in the
+hyper-topic. Clearly  we can see that many topics have strong correlations and the structure is useful
+to help humans understand/browse the large collection of topics. With 40 machines  our parallel
+Gibbs sampler ﬁnishes the training in 2 hours  which means that we are able to process real world
+corpus in considerable speed. More details on scalability will be provided below.
+
+2The entire correlation graph can be found on http://ml-thu.net/˜scalable-ctm
+
+5
+
+B
+
+47
+
+130
+
+31
+
+4
+
+6
+
+6
+
+22
+
+27
+
+113 denotes the number of topics a cluster contains.
+
+113
+
+A
+
+5
+
+82
+
+12
+
+248
+
+C
+
+41
+
+48
+
+17
+
+42
+
+4
+
+13
+
+12
+
+17
+
+6
+
+7
+
+12
+
+5
+
+4
+
+3
+
+7
+
+3
+
+4
+
+3
+
+314
+
+D
+
+E
+
+Figure 4: A hierarchical visualization of the correlation graph with 1 000 topics learned from
+285 000 articles of the NYTimes. A denotes the top-layer subgraph with 10 big clusters; B and
+C denote two second-layer clusters; and D and E are two subgraphs with leaf nodes (i.e.  topics).
+We present most frequent words of each topic cluster. Edges denote a correlation (above some
+threshold) and the distance between two nodes represents the strength of their correlation. The node
+size of a cluster is determined by the number of topics included in that cluster.
+
+6
+
+ 
+
+vCTM
+gCTM (M=1  P=1)
+gCTM (M=1  P=12)
+
+104
+
+)
+s
+(
+ 
+
+e
+m
+
+i
+t
+
+102
+
+2200
+
+2000
+
+1800
+
+1600
+
+y
+t
+i
+x
+e
+p
+r
+e
+p
+
+l
+
+1400
+
+ 
+
+20
+
+40
+
+80 100
+
+60
+K
+
+100
+
+ 
+
+20
+
+ 
+
+4500
+
+y
+t
+i
+x
+e
+p
+r
+e
+p
+
+l
+
+4000
+
+3500
+
+3000
+
+2500
+
+ 
+
+vCTM
+gCTM (M=1  P=1)
+gCTM (M=1  P=12)
+40
+
+80 100
+
+60
+K
+
+ 
+
+gCTM (M=1  P=12)
+gCTM (M=40  P=480)
+Y!LDA (M=40  P=480)
+
+200 400 600 800 1000
+
+K
+
+)
+s
+(
+ 
+
+e
+m
+
+i
+t
+
+106
+
+104
+
+102
+
+100
+
+ 
+
+ 
+
+gCTM (M=1  P=12)
+gCTM (M=40  P=480)
+Y!LDA (M=40  P=480)
+
+200 400 600 800 1000
+
+K
+
+(a)
+
+(b)
+
+(c)
+
+(d)
+
+Figure 5: (a)(b): Perplexity and training time of vCTM  single-core gCTM  and multi-core gCTM
+on the NIPS data set; (c)(d): Perplexity and training time of single-machine gCTM  multi-machine
+gCTM  and multi-machine Y!LDA on the NYTimes data set.
+
+5.2 Performance
+
+We begin with an empirical assessment on the small NIPS data set  whose training set contains
+1.2K documents. Fig. 5(a)&(b) show the performance of three single-machine methods: vCTM
+(M = 1  P = 1)  sequential gCTM (M = 1  P = 1)  and parallel gCTM (M = 1  P = 12).
+Fig. 5(a) shows that both versions of gCTM produce similar or better perplexity  compared to vCTM.
+Moreover  Fig. 5(b) shows that when K is large  the advantage of gCTM becomes salient  e.g. 
+sequential gCTM is about 7.5 times faster than vCTM; and multi-core gCTM achieves almost two
+orders of magnitude of speed-up compared to vCTM.
+
+data set
+NIPS
+20NG
+
+NYTimes
+
+Wiki
+
+In Table 1  we compare the efﬁciency
+of vCTM and gCTM on different sized
+data sets. It can be observed that vCTM
+immediately becomes impractical when
+the data size reaches 285K  while by uti-
+lizing additional computing resources 
+gCTM is able to process larger data sets
+with considerable speed  making it ap-
+plicable to real world problems. Note
+that gCTM has almost the same training time on NIPS and 20Newsgroups data sets  due to their
+small sizes. In such cases  the algorithm is dominated by synchronization rather than computation.
+
+Table 1: Training time of vCTM and gCTM (M = 40)
+on various datasets.
+
+vCTM gCTM
+8.9 min
+1.9 hr
+9 min
+16 hr
+N/A*
+0.5 hr
+17 hr
+N/A*
+
+D
+
+K
+100
+1.2K
+200
+11K
+400
+285K
+6M 1000
+
+*not ﬁnished within 1 week.
+
+Fig. 5(c)&(d) show the results on the NYTimes corpus  which contains over 285K training docu-
+ments and cannot be handled well by non-parallel methods. Therefore we concentrate on three par-
+allel methods — single-machine gCTM (M = 1  P = 12)  multi-machine gCTM (M = 40  P =
+480)  and multi-machine Y!LDA (M = 40  P = 480). We can see that: 1) both versions of gCTM
+obtain comparable perplexity to Y!LDA; and 2) gCTM (M = 40) is over an order of magnitude
+faster than the single-machine method  achieving considerable speed-up with additional computing
+resources. These observations suggest that gCTM is able to handle large data sets without sacriﬁcing
+the quality of inference. Also note that Y!LDA is faster than gCTM because of the model differ-
+ence — LDA does not learn correlation structure among topics. As analyzed in Section 4  the time
+complexity of gCTM is O(K 2 + SK + Nds(K)) per document  while for LDA it is O(Nds(K)).
+
+5.3 Sensitivity
+
+Burn-In and Sub-Burn-In: Fig. 6(a)&(b) show the effect of burn-in steps and sub-burn-in steps on
+the NIPS data set with K = 100. We also include vCTM for comparison. For vCTM  T denotes
+the number of iteration of its EM loop in variational context. Our main observations are twofold:
+1) despite various S  all versions of gCTMs reach a similar level of perplexity that is better than
+vCTM; and 2) a moderate number of sub-iterations  e.g. S = 8  leads to the fastest convergence.
+
+This experiment also provides insights on determining the number of outer iterations T that assures
+convergence for both models. We adopt Cauchy’s criterion [15] for convergence: given an ǫ > 0  an
+algorithm converges at iteration T if ∀i  j ≥ T  |Perpi − Perpj| < ǫ  where Perpi and Perpj are
+perplexity at iteration i and j respectively. In practice  we set ǫ = 20 and run experiments with very
+large number of iterations. As a result  we obtained T = 350 for gCTM and T = 8 for vCTM  as
+pointed out with corresponing verticle line segments in Fig. 6(a)&(b).
+
+7
+
+2500
+
+y
+t
+i
+x
+e
+p
+r
+e
+p
+
+l
+
+2000
+
+gCTM (S=1)
+gCTM (S=2)
+gCTM (S=4)
+gCTM (S=8)
+gCTM (S=16)
+gCTM (S=32)
+vCTM
+
+ 
+
+2500
+
+y
+t
+i
+x
+e
+p
+r
+e
+p
+
+l
+
+2000
+
+ 
+
+gCTM (S=1)
+gCTM (S=2)
+gCTM (S=4)
+gCTM (S=8)
+gCTM (S=16)
+gCTM (S=32)
+vCTM
+
+1500
+
+ 
+
+100
+
+101
+
+102
+
+103
+
+T
+
+(a)
+
+1500
+
+ 
+
+101
+
+102
+
+103
+
+time (s)
+
+104
+
+105
+
+(b)
+
+y
+t
+i
+x
+e
+p
+r
+e
+p
+
+l
+
+2000
+
+1800
+
+1600
+
+1400
+
+1200
+
+1000
+ 
+1
+
+ 
+
+K=50
+K=100
+
+4
+
+16
+
+64
+
+256
+
+1024
+
+a
+
+(c)
+
+Figure 6: Sensitivity analysis with respect to key hyper-parameters: (a) perplexity at each iteration
+with different S; (b) convergence speed with different S; (c) perplexity tested with different prior.
+
+Prior: Fig. 6(c) shows perplexity under different prior settings. To avoid expensive search in a huge
+space  we set (µ0  ρ  W  κ) = (0  a  aI  a) to test the effect of N IW prior  where a larger a implies
+more pseudo-observations of µ = 0  Σ = I. We can see that for both K = 50 and K = 100  the
+perplexity is invariant under a wide range of prior settings. This suggests that gCTM is insensitive
+to prior values.
+
+x 104
+
+5.4 Scalability
+
+Fig. 7 shows the scalability of gCTM on the large
+Wikipedia data set with K = 500. A practical problem
+in real world machine learning is that when computing
+resources are limitted  as the data size grows  the run-
+ning time soon upsurges to an untolerable level. Ideally 
+this problem can be solved by adding the same ratio
+of computing nodes. Our experiment demonstrates that
+gCTM performs well in this scenario — as we pour in
+the same proportion of data and machines  the training
+time is almost kept constant. In fact  the largest differ-
+ence from ideal curve is about 1 000 seconds  which is
+almost unobservable in the ﬁgure. This suggests that
+parallel gCTM enjoys nice scalability.
+
+6 Conclusions and Discussions
+
+ 
+
+Fixed M=8
+Linearly scaling M
+Ideal
+
+15
+
+10
+
+5
+
+)
+s
+(
+ 
+e
+m
+
+i
+t
+
+ 
+
+1.2M
+
+2.4M
+
+3.6M
+#docs
+
+4.8M
+
+6M
+
+Figure 7: Scalability analysis. We set
+M = 8  16  24  32  40 so that each ma-
+chine processes 150K documents.
+
+We present a scalable Gibbs sampling algorithm for logistic-normal topic models. Our method
+builds on a novel data augmentation formulation and addresses the non-conjugacy without making
+strict mean-ﬁeld assumptions. The algorithm is naturally parallelizable and can be further boosted
+by approximate sampling techniques. Empirical results demonstrate signiﬁcant improvement in time
+efﬁciency over existing variational methods  with slightly better perplexity. Our method enjoys good
+scalability  suggesting the ability to extract large structures from massive data.
+
+In the future  we plan to study the performance of Gibbs CTM on industry level clusters with thou-
+sands of machines. We are also interested in developing scalable sampling algorithms of other
+logistic-normal topic models  e.g.  inﬁnite CTM and dynamic topic models. Finally  the fast sam-
+pler of Poly-Gamma distributions can be used in relational and supervised topic models [6  21].
+
+Acknowledgments
+
+This work is supported by the National Basic Research Program (973 Program) of China (Nos.
+2013CB329403  2012CB316301)  National Natural Science Foundation of China (Nos. 61322308 
+61305066)  Tsinghua University Initiative Scientiﬁc Research Program (No. 20121088071)  and
+Tsinghua National Laboratory for Information Science and Technology  China.
+
+8
+
+References
+
+[1] A. Ahmed  M. Aly  J. Gonzalez  S. Narayanamurthy  and A. Smola. Scalable inference in
+latent variable models. In International Conference on Web Search and Data Mining (WSDM) 
+2012.
+
+[2] K. Bache and M. Lichman. UCI machine learning repository  2013.
+
+[3] D. Blei and J. Lafferty. Correlated topic models. In Advances in Neural Information Processing
+
+Systems (NIPS)  2006.
+
+[4] D. Blei and J. Lafferty. Dynamic topic models.
+
+In International Conference on Machine
+
+Learning (ICML)  2006.
+
+[5] D.M. Blei  A.Y. Ng  and M.I. Jordan. Latent Dirichlet allocation. Journal of Machine Learning
+
+Research  3:993–1022  2003.
+
+[6] N. Chen  J. Zhu  F. Xia  and B. Zhang. Generalized relational topic models with data augmen-
+
+tation. In International Joint Conference on Artiﬁcial Intelligence (IJCAI)  2013.
+
+[7] M. Hoffman  D. Blei  and F. Bach. Online learning for latent Dirichlet allocation. In Advances
+
+in Neural Information Processing Systems (NIPS)  2010.
+
+[8] C. Holmes and L. Held. Bayesian auxiliary variable models for binary and multinomial regres-
+
+sion. Bayesian Analysis  1(1):145–168  2006.
+
+[9] D. Mimno  H. Wallach  and A. McCallum. Gibbs sampling for logistic normal topic models
+
+with graph-based priors. In NIPS Workshop on Analyzing Graphs  2008.
+
+[10] D. Newman  A. Asuncion  P. Smyth  and M. Welling. Distributed algorithms for topic models.
+
+Journal of Machine Learning Research  (10):1801–1828  2009.
+
+[11] J. Paisley  C. Wang  and D. Blei. The discrete inﬁnite logistic normal distribution for mixed-
+In International Conference on Artiﬁcial Intelligence and Statistics
+
+membership modeling.
+(AISTATS)  2011.
+
+[12] N. G. Polson and J. G. Scott. Default bayesian analysis for multi-way tables: a data-
+
+augmentation approach. arXiv:1109.4180  2011.
+
+[13] N. G. Polson  J. G. Scott  and J. Windle. Bayesian inference for logistic models using Polya-
+
+Gamma latent variables. arXiv:1205.0310v2  2013.
+
+[14] C. P. Robert. Simulation of truncated normal variables. Statistics and Compuating  5:121–125 
+
+1995.
+
+[15] W. Rudin. Principles of mathematical analysis. McGraw-Hill Book Co.  1964.
+
+[16] A. Smola and S. Narayanamurthy. An architecture for parallel topic models. Very Large Data
+
+Base (VLDB)  2010.
+
+[17] M. A. Tanner and W. H. Wong. The calculation of posterior distributions by data augmentation.
+
+Journal of the Americal Statistical Association  82(398):528–540  1987.
+
+[18] D. van Dyk and X. Meng. The art of data augmentation. Journal of Computational and
+
+Graphical Statistics  10(1):1–50  2001.
+
+[19] L. Yao  D. Mimno  and A. McCallum. Efﬁcient methods for topic model inference on stream-
+In International Conference on Knowledge Discovery and Data
+
+ing document collections.
+mining (SIGKDD)  2009.
+
+[20] A. Zhang  J. Zhu  and B. Zhang. Sparse online topic models. In International Conference on
+
+World Wide Web (WWW)  2013.
+
+[21] J. Zhu  X. Zheng  and B. Zhang. Improved bayesian supervised topic models with data aug-
+mentation. In Annual Meeting of the Association for Computational Linguistics (ACL)  2013.
+
+9
+
+,Jianfei Chen
+Jun Zhu
+Zi Wang
+Xun Zheng
+Bo Zhang

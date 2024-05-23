@@ -1,0 +1,860 @@
+2019,PIDForest: Anomaly Detection via Partial Identification,We consider the problem of detecting anomalies in a large dataset. We propose a framework called Partial Identification which captures the intuition that anomalies are easy to distinguish from the overwhelming majority of points by relatively few attribute values. Formalizing this intuition  we propose a geometric anomaly measure for a point that we call PIDScore  which measures the minimum density of data points over all subcubes containing the point. We present PIDForest: a random forest based algorithm that finds anomalies based on this definition. We show that it performs favorably in comparison to several popular anomaly detection methods  across a broad range of benchmarks. PIDForest also provides a succinct explanation for why a point is labelled anomalous  by providing a set of features and ranges for them which are relatively uncommon in the dataset.,PIDForest: Anomaly Detection via Partial
+
+Identiﬁcation
+
+Parikshit Gopalan
+VMware Research
+
+pgopalan@vmware.com
+
+Vatsal Sharan
+
+Stanford University
+
+vsharan@stanford.edu
+
+Udi Wieder
+
+VMware Research
+
+uwieder@vmware.com
+
+Abstract
+
+We consider the problem of detecting anomalies in a large dataset. We propose a
+framework called Partial Identiﬁcation which captures the intuition that anomalies
+are easy to distinguish from the overwhelming majority of points by relatively
+few attribute values. Formalizing this intuition  we propose a geometric anomaly
+measure for a point that we call PIDScore  which measures the minimum density
+of data points over all subcubes containing the point. We present PIDForest: a
+random forest based algorithm that ﬁnds anomalies based on this deﬁnition. We
+show that it performs favorably in comparison to several popular anomaly detection
+methods  across a broad range of benchmarks. PIDForest also provides a succinct
+explanation for why a point is labelled anomalous  by providing a set of features
+and ranges for them which are relatively uncommon in the dataset.1
+
+1
+
+Introduction
+
+An anomaly in a dataset is a point that does not conform to what is normal or expected. Anomaly
+detection is a ubiquitous machine learning task with diverse applications including network mon-
+itoring  medicine and ﬁnance [1  Section 3]. There is an extensive body of research devoted to it 
+see [1  2] and the references therein. Our work is primarily motivated by the emergence of large
+distributed systems  like the modern data center which produce massive amounts of heterogeneous
+data. Operators need to constantly monitor this data  and use it to identify and troubleshoot problems.
+The volumes of data involved are so large that a lot of the analysis has to be automated. Here we
+highlight some of the challenges that an anomaly detection algorithm must face.
+
+1. High dimensional  heterogeneous data: The data collected could contains measurements
+of metrics like cpu usage  memory  bandwidth  temperature  in addition to categorical data
+such as day of the week  geographic location  OS type. This makes ﬁnding an accurate
+generative model for the data challenging. The metrics might be captured in different units 
+hence algorithms that are unit-agnostic are preferable. The algorithm needs to scale to high
+dimensional data.
+
+2. Scarce labels: Most of the data are unlabeled. Generating labels is time and effort intensive
+and requires domain knowledge. Hence supervised methods are a non-starter  and even
+tuning too many hyper-parameters of unsupervised algorithms could be challenging.
+
+3. Irrelevant attributes: Often an anomaly manifests itself in a relatively small number of
+attributes among the large number being monitored. For instance  a single machine in a
+large datacenter might be compromised and behave abnormally.
+
+4. Interpretability of results: When we alert a datacenter administrator to a potential
+anomaly  it helps to point to a few metrics that might have triggered it  to help in trou-
+bleshooting.
+
+1The full version of this paper is available at https://arxiv.org/abs/1912.03582.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+In the generative model setting  anomalies come with a simple explanation: a model that ﬁts the
+data  under which the anomalous observation is unlikely. Interpretability is more challenging for
+algorithms that do not assume a generative model. In this work  we are particularly interested in
+random forest based methods for anomaly detection  namely the inﬂuential work on Isolation Forests
+[3] (we refer to this algorithm as iForest) and subsequent work [4  5]. iForest is a remarkably simple
+and efﬁcient algorithm  that has been found to outperform other anomaly detection methods in several
+domains [6]. Yet  there is no crisp deﬁnition of ground truth for what constitutes an anomaly: the
+anomaly score is more or less deﬁned as the output of the algorithm. We believe that a necessary
+step for interpretability is a clear articulation of what is an anomaly  separate from the algorithmic
+question of how it is found.
+
+Our contributions. We summarize the main contributions of this work:
+
+1. In Section 2  we motivate and propose a new anomaly measure that we call PIDScore.
+Our deﬁnition corresponds to an intuitive notion of what is an anomaly and has a natural
+geometric interpretation. It is inspired by the notion of Partial Identiﬁcation introduced
+by Wigderson and Yehudayoff [7] can be viewed as a natural generalization of teaching
+dimension [8  9].
+
+2. Our deﬁnition sheds light on the types of points likely to be labeled as anomalies by the
+iForest algorithm  and also on the types of points it might miss. We build on this intuition
+to design an efﬁcient random forest based algorithm—PIDForest  which ﬁnds anomalies
+according to PIDScore  in Section 3.
+
+3. We present extensive experiments on real and synthetic data sets showing that our algorithm
+consistently outperforms or matches six popular anomaly detection algorithms. PIDForest
+is the top performing algorithm in 6 out of 12 benchmark real-world datasets  while no
+other algorithm is the best in more than 3. PIDForest is also resilient to noise and irrelevant
+attributes. These results are in Section 4 and 5.
+
+We begin by describing our proposed anomaly measure  PIDScore at a high level. Let the sparsity of
+a dataset T in a subcube of the attribute space be the volume of the subcube divided by the number
+of points from T that it contains. For a dataset T and a point x  PIDScore(x T ) measures the
+maximum sparsity of T in all subcubes C containing x. A point x is labelled anomalous if it belongs
+to a region of the attribute space where data points are sparse.
+Given this deﬁnition  one could aim for an algorithm that preprocesses T   then takes a point x and
+computes PIDScore(x T ). Such an algorithm is likely to suffer from the curse of dimensionality
+like in Nearest Neighbor based methods  and not scale to high volumes of data. Instead we adopt the
+approach of iForest [3] which focuses on what is anomalous  rather than the entire dataset. We call
+the resulting algorithm PIDForest. Like in iForest  PIDForest builds a collection of decision trees that
+partition space into subcubes. In PIDForest  the choice of the splits at each node favors partitions
+of greatly varying sparsity  the variance in the sparsity is explicitly the quantity we optimize when
+choosing a split. In contrast  previous work either choose splits randomly [3] or based on the range
+[4]. Choosing coordinates that have greater variance in their marginal distribution lets us hone in on
+the important coordinates  and makes our algorithm robust to irrelevant/noisy attributes  which are
+unlikely to be chosen. Secondly  we label each leaf by its sparsity rather than depth in the tree. The
+score of a point is the maximum sparsity over all leaves reached in the forest.
+While notions of density have been used in previous works on clustering and anomaly detection  our
+approach differs from prior work in important ways.
+
+1. Dealing with heterogeneous attributes: Dealing with subcubes and volumes allows us to
+handle heterogeneous data where some columns are real  some are categorical and possibly
+unordered. All we need is to specify two things for each coordinate: what constitutes an
+interval  and how length is measured. Subcubes and volumes are then deﬁned as products
+over coordinates. This is in sharp contrast to methods that assume a metric. Notions like
+(cid:96)1/(cid:96)2 distance add different coordinates and might not be natural in heterogeneous settings.
+2. Scale invariance: For a subcube  we only care about the ratio of its volume to the volume
+
+of the entire attribute space. Hence we are not sensitive to the units of measurement.
+
+3. Considering subcubes at all scales: In previous works  density is computed using balls of
+a ﬁxed radius  this radius is typically a hyperparameter. This makes the algorithm susceptible
+
+2
+
+to masking  since there may be a dense cluster of points  all of which are anomalous. We
+take the minimum over subcubes at all scales.
+
+Organization. We present the deﬁnition of PIDScore in Section 2  and the PIDForest algorithm
+(with a detailed comparison to iForest) in Section 3. We present experiments on real world data
+in Section 4 and synthetic data in Section 5. We further discuss related work in Section A in the
+Appendix (which is included in the supplementary material).
+
+2 Partial Identiﬁcation and PIDScore
+
+A motivating example: Anomalous Animals. Imagine a tabular data set that contains a row for
+every animal on the planet. Each row then contains attribute information about the animal such as the
+species  color  weight  age and so forth. The rows are ordered. Say that Alice wishes to identify a
+particular animal in the table unambiguously to Bob  using the fewest number of bits.
+If the animal happens to be a white elephant  then Alice is in luck. Just specifying the species and
+color narrows the list of candidates down to about ﬁfty (as per Wikipedia). At this point  specifying
+one more attribute like weight or age will probably pin the animal down uniquely. Or she can just
+specify its order in the list.
+If the animal in question happens to be a white rabbit  then it might be far harder to uniquely identify 
+since there are tens of millions of white rabbits  unless that animal happens to have some other
+distinguishing features. Since weight and age are numeric rather than categorical attributes  if one
+could measure them to arbitrary precision  one might be able to uniquely identify each specimen.
+However  the higher the precision  the more bits Alice needs to communicate to specify the animal.
+We will postulate a formal deﬁnition of anomaly score  drawing on the following intuitions:
+1. Anomalies have short descriptions. The more exotic/anomalous the animal Alice has in mind 
+the more it stands out from the crowd and the easier it is for her to convey it to Bob. Constraining
+just a few carefully chosen attributes sets anomalies apart from the vast majority of the population.
+2. Precision matters in real values. For real-valued attributes  it makes sense to specify a range in
+which the value lies. For anomalous points  this range might not need to be very narrow  but for
+normal points  we might need more precision.
+
+3. Isolation may be overkill. The selected attributes need not sufﬁce for complete isolation. Partial
+identiﬁcation aka narrowing the space down to a small list can be a good indicator of an anomaly.
+First some notation: let T denote a dataset of n points in d dimensions. Given indices S ⊆ [d] and
+x ∈ Rd  let xS denote the projection of x onto coordinates in S. Logarithms are to base 2.
+
+2.1 The Boolean setting
+We ﬁrst consider the Boolean setting where the set of points is T ⊆ {0  1}d. Assume that T has
+no duplicates. We deﬁne idLength(x T ) to be the minimum number of co-ordinates that must be
+revealed to uniquely identify x among all points in T . Since there are no duplicates  revealing all
+coordinates sufﬁces  so idLength(x T ) ≤ d 
+Deﬁnition 1. (IDs for a point) We say that S ⊆ [d] is an ID for x ∈ T if xS (cid:54)= yS for all y ∈ T \{x}.
+Let ID(x T ) be the smallest ID for x breaking ties arbitrarily. Let idLength(x T ) = |ID(x T )|.
+While on ﬁrst thought idLength is an appealing measure of anomaly  it does not deal with duplicates 
+and further  the requirement of unique identiﬁcation is fairly stringent. Even in simple settings points
+might not have short IDs. For example  if H is the Hamming ball consisting of 0d and all d unit
+vectors  then idLength(0d H) = d  since we need to reveal all the coordinates to separate 0d from
+every unit vector. One can construct examples where even the average value of idLength(x T ) over
+all points can be surprisingly high [9].
+We relax the deﬁnition to allow for partial identiﬁcation. Given x ∈ T and S ⊆ [d]  the set of
+impostors of x in T are all points that equal x on all coordinates in S. Formally Imp(x T   S) =
+{y ∈ T s.t. xS = yS}. We penalize sets that do not identify x uniquely by the logarithm of the
+number of impostors. The intuition is that this penalty measures how many bits it costs Alice to
+specify x from the list of impostors.
+
+3
+
+Deﬁnition 2. (Partial ID) We deﬁne
+
+PID(x T ) = arg min
+S⊆[d]
+(|S| + log2(|Imp(x T   S)|)).
+
+(|S| + log2(|Imp(x T   S)|)) 
+
+pidLength(x T ) = min
+S⊆[d]
+
+(1)
+
+(2)
+
+It follows from the deﬁnition that pidLength(x T ) ≤ min(log2(n)  idLength(x T )). The ﬁrst
+inequality follows by taking S to be empty so that every point in T is an impostor  the second by
+taking S = ID(x T ) so that the only impostor is x itself. Returning to the Hamming ball example  it
+follows that pidLength(0d T ) = log2(d + 1) where we take the empty set as the PID.
+We present an alternate geometric view of pidLength  which generalizes naturally to other settings.
+A subcube C of {0  1}d is the set of points obtained by ﬁxing some subset S ⊆ [d] coordinates
+to values in 0  1. The sparsity of T in a subcube C is ρ0 1(T   C) = |C|/|C ∩ T |. The notation
+C (cid:51) x means that C contains x  hence minC(cid:51)x is the minimum over all C that contain x. One can
+show that for x ∈ T   maxC(cid:51)x ρ0 1(T   C) = 2d−pidLength(x T )  see appendix D for a proof. This
+characterization motivates using 2−pidLength(x T ) as an anomaly score: anomalies are points that lie
+in relatively sparse subcubes. Low scores come with a natural witness: a sparse subcube PID(x T )
+containing relatively few points from T .
+
+2.2 The continuous setting
+
+Now assume that all the coordinates are real-valued  and bounded. Without loss of generality  we
+may assume that they lie in the range [0  1]  hence T is a collection of n points from [0  1]d. An
+interval I = [a  b]  0 ≤ a ≤ b ≤ 1 is of length len(I) = b − a. A subcube C is speciﬁed by a subset
+of co-ordinates S and intervals Ij for each j ∈ S. It consists of all points such that xj ∈ Ij for all
+j ∈ S. To simplify our notation  we let C be I1 × I2 ··· × Id where Ij = [0  1] for j (cid:54)∈ S. Note that
+vol(C) = Πjlen(Ij). Deﬁne the sparsity of T in C as ρ(T   C) = vol(C)/|C ∩T |. PIDScore(x  T )
+is the maximum sparsity over all subcubes of [0  1]d containing x.
+Deﬁnition 3. For x ∈ T   let
+
+PID(x T ) = arg max
+C(cid:51)x
+
+ρ(T   C)  PIDScore(x T ) = max
+C(cid:51)x
+
+ρ(T   C).
+
+j∈[d] len(Ij)  we can write
+
+(cid:88)
+
+C = PID(x T ). Since vol(C) =(cid:81)
+
+To see the analogy to the Boolean case  deﬁne pidLength(x T ) = − log(PIDScore(x T )). Fix
+
+pidLength(x T ) = log(|C ∩ T |/vol(C)) =
+
+log(1/len(Ij)) + log(|C ∩ T |).
+
+(3)
+
+j∈[d]
+
+(cid:80)
+This exposes the similarities to Equation (2): C ∩ T is exactly the set of impostors for x  whereas
+j∈[d] log(1/len(Ij)) is the analog of |S|. In the boolean setting  we pay 1 for each coordinate from
+S  here the cost ranges in [0 ∞) depending on the length of the interval. In the continuous setting 
+the j (cid:54)∈ S iff Ij = [0  1] hence log(1/len(Ij)) = 0  hence we pay nothing for coordinates outside S.
+Restricting to an interval of length p costs log(1/p). If p = 1/2  we pay 1  which is analogous to the
+Boolean case where we pay 1 to cut the domain in half. This addresses the issue of having to pay
+more for higher precision. Note also that the deﬁnition is scale-invariant as multiplying a coordinate
+by a constant changes the volume of all subcubes by the same factor.
+Other attributes: To handle attributes over a domain D  we need to specify what subsets of
+D are intervals and how we measure their length. For discrete attributes  it is natural to deﬁne
+len(I) = |I|/|D|. When the domain is ordered intervals are naturally deﬁned  for instance months
+between April and September is an interval of length 1/2. We could also allow wraparound in intervals 
+say months between November and March. For unordered discrete values  the right deﬁnition of
+interval could be singleton sets  like country = Brazil or certain subsets  like continent = the Americas.
+The right choice will depend on the dataset. Our deﬁnition is ﬂexible enough to handle this: We can
+make independent choices for each coordinate  subcubes and volumes are then deﬁned as products 
+and PIDScore can be deﬁned using deﬁnition 3.
+IDs and PIDs. The notion of IDs for a point is natural and has been studied in the computational
+learning literature under various names: the teaching dimension of a hypothesis class [8]  discriminant
+
+4
+
+[10]  specifying set [11] and witness set [9]. Our work is inspired by the work of Wigderson and
+Yehudayoff [7] on population recovery  which is the task of learning mixtures of certain discrete
+distributions on the Boolean cube. Their work introduces the notion of partial identiﬁcation in the
+Boolean setting. The terminology of IDs and impostors is from their work. They also consider PIDs 
+but with a different goal in mind (to minimize the depth of a certain graph constructed using the PID
+relation). Our deﬁnition of pidLength  the extension of partial identiﬁcation to the continuous setting
+and its application to anomaly detection are new contributions.
+
+3 The PIDForest algorithm
+
+We do not know how to compute PIDScore exactly  or even a provable approximation of it in a way
+that scales well with both d and n. The PIDForest algorithm described below is heuristic designed to
+approximate PIDScore. Like with iForest  the PIDForest algorithm builds an ensemble of decision
+trees  each tree is built using a sample of the data set and partitions the space into subcubes. However 
+the way the trees are constructed and the criteria by which a point is declared anomalous are very
+different. Each node of a tree corresponds to a subcube C  the children of C represent a disjoint
+partition of C along some axis i ∈ [d] (iForest always splits C into two   here we allow for a ﬁner
+partition). The goal is to have large variance in the sparsity of the subcubes. Recall that the sparsity
+of a subcube C with respect to a data set T is ρ(C T ) = vol(C)/|C ∩ T |. Ultimately  the leaves
+with large ρ values will point to regions with anomalies.
+For each tree  we pick a random sample P ⊆ T of m points  and use that subset to build the tree.
+Each node v in the tree corresponds to subcube C(v)  and a set of points P (v) = C(v) ∩ P. For
+the root  C(v) = [0  1]d and P (v) = P. At each internal node  we pick a coordinate j ∈ [d]  and
+breakpoints t1 ≤ ··· ≤ tk−1 which partition Ij into k intervals  and split C into k subcubes. The
+number of partitions k is a hyper-parameter (taking k < 5 works well in practice). We then partition
+the points P (v) into these subcubes. The partitions stop when the tree reached some speciﬁed
+maximum depth or when |P (v)| ≤ 1. The key algorithmic problem is how to choose the coordinate
+j and the breakpoints by which it should be partitioned. Intuitively we want to partition the cube into
+some sparse regions and some dense regions. This intuition is formalized next.
+Let Ij ⊆ [0  1] be the projection of C onto coordinate i. Say the breakpoints are chosen so that we
+partition Ij into I 1
+j . This partitions C into C 1  . . .   C k where the intervals corresponding to
+the other coordinates stay the same. We ﬁrst observe that in any partition of C  the average sparsity
+of the subcubes when weighted by the number of points is the same. Let
+|P ∩ C i|
+
+j   . . .   I k
+
+pi :=
+
+len(I i
+j)
+len(I)
+
+=
+
+vol(C i)
+vol(C)
+
+  qi :=
+
+=⇒ ρ(C i) =
+
+vol(C i)
+|P ∩ C i| =
+
+pivol(C)
+qi|P| =
+
+ 
+
+|P|
+piρ(C)
+
+.
+
+qi
+
+Since a qi fraction of points in P have sparsity ρ(Ci)  the expected sparsity for a randomly chosen
+point from P is
+
+qiρ(C i) =
+
+piρ(C) = ρ(C).
+
+In words  in any partition of C if we pick a point randomly from P (v) and measure the sparsity of
+its subcube  on expectation we get ρ(C). Recall that our goal is to split C into sparse and dense
+subcubes. Hence a natural objective is to maximize the variance in the sparsity:
+
+Var(P {C i}i∈[k]) =
+
+qi(ρ(C i) − ρ(C))2 =
+
+qiρ(C i)2 − ρ(C)2.
+
+(4)
+
+(cid:88)
+
+i∈[k]
+
+A partition that produces large variance in the sparsity needs to partition space into some sparse
+regions and other dense regions  which will correspond to outliers and normal regions respectively.
+Alternately  one might choose partitions to optimize the maximum sparsity of any interval in the
+partition  or some higher moment of the sparsity. Maximizing the variance has the advantage that
+it turns out to equivalent to a well-studied problem about histograms  and admits a very efﬁcient
+streaming algorithm. We continue splitting until a certain predeﬁned depth is reached  or points are
+isolated. Each leaf is labeled with the sparsity of its subcube.
+
+5
+
+(cid:88)
+
+i∈[k]
+
+(cid:88)
+
+i∈[k]
+
+(cid:88)
+
+i∈[k]
+
+PIDForest Fit
+Params: Num of trees t  Samples m  Max degree k  Max depth h.
+Repeat t times:
+
+Create root node v.
+Let C(v) = [0  1]d  P (v) ⊆ T be a random subset of size m .
+Split(v)
+
+Split(v):
+
+For j ∈ [d]  compute the best split into k intervals.
+Pick j that maximizes variance  split C along j into {C i}k
+For i ∈ [k] create child vi s.t. C(vi) = C i  P (vi) = P (v) ∩ C i.
+If depth(vi) ≤ h and |P (vi)| > 1 then Split(vi).
+Else  set PIDScore(vi) = vol(C(vi))/|P (vi)|.
+
+i=1.
+
+In Appendix C  we show that the problem of ﬁnding the partition along a coordinate j that maximizes
+the variance in the sparsity can be reduced to the problem of ﬁnding a k-histogram for a discrete
+function f : [n] → R  which minimizes the squared (cid:96)2 error. This is a well-studied problem [12 
+13  14] and there an efﬁcient one-pass streaming algorithm for computing near-optimal histograms
+due to Guha et al. [15]. We use this algorithm to compute the best split along each coordinate  and
+then choose the coordinate that offers the most variance reduction. Using their algorithm  ﬁnding the
+optimal split for a node takes time O(dm log(m)). This is repeated at most kh times for each tree
+(typically much fewer since the trees we build tend to be unbalanced)  and t times to create the forest.
+We typically choose m ≤ 200  k ≤ 5  h ≤ 10 and t ≤ 50.
+Producing an anomaly score for each point is fairly straightforward. Say we want to compute a score
+for y ∈ [0  1]d. Each tree in the forest maps y to a leaf node v and gives it a score PIDScore(v). We
+take the 75% percentile score as our ﬁnal score (any robust analog of the max will do).
+
+iForest repeatedly samples a set S of m points from T and builds
+Comparison to Isolation Forest.
+a random tree with those points as leaves. The tree is built by choosing a random co-ordinate xi  and
+a random value in its range about which to split. The intuition is that anomalous points will be easy
+to separate from the rest  and will be isolated at small depth. What kind of points are likely to be
+labeled anomalous by iForest?
+In one direction  if a point is isolated at relatively low depth k in a tree  then it probably belongs in
+a sparse subcube. Indeed  a node at depth k corresponds to a subcube C of expected volume 2−k 
+which is large for small k. The fact that the sample contains no points from C implies that C ∩ T
+is small  with high probability (this can be made precise using a VC-dimension argument). Hence
+ρ(C  T ) = vol(C)/|C ∩ T | is fairly large.
+Being in a sparse subcube is necessary but not sufﬁcient. This is because iForest chooses which
+coordinate we split on as well as the breakpoint at random. Thus to be isolated at small depth
+frequently  a point needs to lie in an abundant number of low-density subspaces: picking splits at
+random should have a good chance of deﬁning such a subspace. Requiring such an abundance of
+sparse subcubes can be problematic. Going back to the animals example  isolating white elephants is
+hard unless both Color and Type are used as attributes  as there is no shortage of elephants or white
+animals. Moreover  which attributes are relevant can depend on the point: weight might be irrelevant
+in isolating a white elephant  but it might be crucial to isolating a particularly large elephant. This
+causes iForest to perform poorly in the presence of irrelevant attributes  see for instance [5].
+This is the fundamental difference between PIDForest and iForest and its variants. PIDForest zooms
+in on coordinates with signal—where a split is most beneﬁcial. Attributes with little signal are
+unlikely to be chosen for splitting. For concrete examples  see Section 5. The tradeoff is that we incur
+a slightly higher cost at training time  the cost of prediction stays pretty much the same.
+
+4 Real-world Datasets
+
+We show that PIDForest performs favorably in comparison to several popular anomaly detection
+algorithms on real-world benchmarks. We select datasets from varying domains  and with different
+
+6
+
+number of datapoints  percentage of anomalies and dimensionality. The code and data for all
+experiments is available online.2 Detailed parameters of the datasets are in Table 2 in the appendix.
+Dataset Descriptions: The ﬁrst set of datasets are classiﬁcation datasets from the UCI [16] and
+openML repository [17] (they are also available at [18]). Three of the datsets—Thyroid  Mammogra-
+phy and Seismic—are naturally suited to anomaly detection as they are binary classiﬁcation tasks
+where one of the classes has a much smaller occurrence rate (around 5%) and hence can be treated as
+anomalous. Thyroid and Mammography have real-valued attributes whereas Seismic has categorical
+attributes as well. Three other datasets—Satimage-2  Musk and Vowels—are classiﬁcation datasets
+with multiple classes  and we combine the classes and divide them into inliers and outliers as in
+[19]. Two of the datasets—http and smtp—are derived from the KDD Cup 1999 network intrusion
+detection task and we preprocess them as in [20]. These two datasets have have signiﬁcantly more
+datapoints (about 500k and 100k respectively) and a smaller percentage of outliers (less than 0.5%).
+The next set of real-world datasets—NYC taxicab  CPU utilization  Machine temperature (M.T.) and
+Ambient temperature (A.T.)—are time series datasets from the Numenta anomaly detection benchmark
+which have been hand-labeled with anomalies rooted in real-world causes [21]. The length of the time
+series is 10k-20k  with about 10% of the points marked anomalous. We use the standard technique of
+shingling with a sliding window of width 10  hence each data point becomes a 10 dimensional vector
+of 10 consecutive measurements from the time series.
+Methodology: We compare PIDForestwith six popular anomaly detection algorithms: Isolation
+Forest (iForest)  Robust Random Cut Forest (RRCF)  one-class SVM (SVM)  Local Outlier Factor
+(LOF)  k-Nearest Neighbour (kNN) and Principal Component Analysis (PCA). We implement
+PIDForest in Python  it takes about 500 lines of code. For iForest  SVM and LOF we used the
+scikit-learn implementations  for kNN and PCA we used the implementations on PyOD [22]   and
+for RRCF we use the implementation from [23]. Except for RRCF  we run each algorithm with
+the default hyperparameter setting as varying the hyperparameters from their default values did not
+change the results signiﬁcantly. For RRCF  we use 500 trees instead of the default 100 since it yielded
+signiﬁcantly better performance. For PIDForest  we ﬁx the hyperparameters of depth to 10  number
+of trees to 50  and the number of samples used to build each tree to 100. We use the area under the
+ROC curve (AUC) as the performance metric. As iForest  PIDForest and RRCF are randomized  we
+repeat these algorithms for 5 runs and report the mean and standard deviation. SVM  LOF  kNN and
+PCA are deterministic  hence we report a single AUC number for them.
+Results: We report the results in Table 1. PIDForest is the top performing or jointly top performing
+algorithm in 6 out of the 12 datasets  and iForest  kNN and PCA are top performing or jointly top
+performing algorithms in 3 datasets each. Detailed ROC performance curves of the algorithms are
+given in Fig. 6 and 7 in the Appendix. While the running time of our ﬁt procedure is slower than
+iForest  it is comparable to RRCF and faster than many other methods. Even our vanilla Python
+implementation on a laptop computer only takes about 5 minutes to ﬁt a model to our largest dataset
+which has half a million points.
+Recall from Section 3 that PIDForest differs from iForest in two ways  it optimizes for the axis to
+split on  and secondly  it uses sparsity instead of depth as the anomaly measure. To further examine
+the factors which contribute to the favorable performance of PIDForest  we do an ablation study
+through two additional experiments.
+Choice of split: Optimizing for the choice of split rather than choosing one at random seems
+valuable in the presence of irrelevant dimensions. To measure this effect  we added 50 additional
+random dimensions sampled uniformly in the range [0  1] to two low-dimensional datasets from Table
+1—Mammography and Thyroid (both datasets are 6 dimensional). In the Mammography dataset 
+PIDForest (and many other algorithms as well) suffers only a small 2% drop in performance  whereas
+the performance of iForest drops by 15%. In the Thyroid dataset  the performance of all algorithms
+drops appreciably. However  PIDForest has a 13% drop in performance  compared to a 20% drop for
+iForest. The detailed results are given in Table 3 in the Appendix.
+Using sparsity instead of depth: In this experiment  we test the hypothesis that the sparsity of the
+leaf is a better anomaly score than depth for the PIDForest algorithm. The performance of PIDForest
+deteriorates noticeably with depth as the score  the AUC for Thyroid drops to 0.847 from 0.876 
+while the AUC for Mammography drops to 0.783 from 0.840.
+
+2https://github.com/vatsalsharan/pidforest
+
+7
+
+Data set
+Thyroid
+Mammo.
+Seismic
+Satimage
+Vowels
+Musk
+http
+smtp
+NYC
+A.T.
+CPU
+M.T.
+
+PIDForest
+0.876 ± 0.013
+0.840 ± 0.010
+0.733 ± 0.006
+0.987 ± 0.001
+0.741 ± 0.008
+1.000 ± 0.000
+0.986 ± 0.004
+0.923 ± 0.003
+0.564 ± 0.004
+0.810 ± 0.005
+0.935 ± 0.003
+0.813 ± 0.006
+
+iForest
+
+0.819 ± 0.013
+0.862 ± 0.008
+0.698 ± 0.004
+0.994 ± 0.001
+0.736 ± 0.026
+0.998 ± 0.003
+1.000 ± 0.000
+0.908 ± 0.003
+0.550 ± 0.005
+0.780 ± 0.006
+0.917 ± 0.002
+0.828 ± 0.002
+
+RRCF
+
+0.739± 0.004
+0.830 ± 0.002
+0.701 ± 0.004
+0.991 ± 0.002
+0.813± 0.007
+0.998 ± 0.000
+0.993 ± 0.000
+0.886 ± 0.017
+0.543 ± 0.004
+0.695 ±0.004
+0.785 ± 0.002
+0.7524 ± 0.003
+
+LOF
+0.737
+0.720
+0.553
+0.540
+0.943
+0.416
+0.353
+0.905
+0.671
+0.563
+0.560
+0.501
+
+SVM kNN
+0.751
+0.547
+0.839
+0.872
+0.740
+0.601
+0.936
+0.421
+0.975
+0.778
+0.573
+0.373
+0.231
+0.994
+0.895
+0.841
+0.697
+0.500
+0.634
+0.670
+0.724
+0.794
+0.796
+0.759
+
+PCA
+0.673
+0.886
+0.682
+0.977
+0.606
+1.000
+0.996
+0.823
+0.511
+0.792
+0.858
+0.834
+
+Table 1: Results on real-world datasets. We bold the algorithm(s) which get the best AUC.
+
+(a) Masking. Accuracy is the fraction of true out-
+liers in the top 5% of reported anomalies.
+
+(b) y−axis measures how many of the 100 true
+anomalies were reported by the algorithm in the
+top 100 anomalies.
+
+Figure 1: Synthetic experiments on masked anomalies and Gaussian data.
+
+5 Synthetic Data
+
+We compare PIDForest with popular anomaly detection algorithms on synthetic benchmarks. The
+ﬁrst experiment checks how the algorithms handle duplicates in the data. The second experiment
+uses data from a mixture of Gaussians  and highlights the importance of the choice of coordinates
+to split in PIDForest. The third experiment tests the ability of the algorithm to detect anomalies in
+time-series (see Appendix B). In all these experiments  PIDForest outperforms prior art.
+
+Masking and sample size.
+It is often the case that anomalies repeat multiple times in the data. This
+phenomena is called masking and is a challenge for many algorithms. iForest counts on sampling to
+counter masking: not too many repetitions occur in the sample. But the performance is sensitive to
+the sampling rate  see [4  5]. To demonstrate it  we create a data set of 1000 points in 10 dimensions.
+970 of these points are sampled randomly in {−1  1}10 (hence most of these points are unique). The
+remaining 30 are the all-zeros vector  these constitute a masked anomaly. We test if the zero points are
+declared as anomalies by PIDForest and iForest under varying sample sizes. The results are reported
+in Fig. 1a. Whereas PIDForest consistently reported these points as anomalies  the performance
+of iForest heavily depends on the sample size. When it is small  then masking is negated and the
+anomalies are caught  however the points become hard to isolate when the sample size increases.
+
+8
+
+100300500700900num of samples0.00.20.40.60.81.0accuracyEffects of maskingIsolation ForestPIDForest024681012141618noise dimension020406080100accuracyMixture of Gaussians with added NoisePIDForestIsolation ForestEMLOF(a) Varying number of buckets
+
+(b) Varying number of samples
+
+Figure 2: Robustness to choice of hyperparameters
+
+Mixtures of Gaussians and random noise. We use a generative model where the ground truth
+anomalies are the points of least likelihood. The ﬁrst two coordinates of the 1000 data points are
+sampled by taking a mixture of two 2−dimensional Gaussians with different means and covariances
+(the eigenvalues are {1  2}  the eigenvectors are chosen at random). The remaining d dimensions are
+sampled uniformly in the range [−2  2]. We run experiments varying d from 0 to 19. In each case we
+take the 100 points smallest likelihood points as the ground truth anomalies. For each algorithm we
+examine the 100 most anomalous points and calculate how many of these belong to the ground truth.
+We compare PIDForest with Isolation Forest  Local Outlier Factor (LOF)  an algorithm that uses
+Expectation Maximization (EM) to ﬁt the data to a mixture of Gaussians  RRCF  SVM  kNN and
+PCA. For clarity  the results for the ﬁrst four algorithms are reported in Fig. 1b and the rest appear in
+Fig. 4b in the Appendix. Note that even without noise (d = 0) PIDForest is among the best generic
+algorithms. As the number of noisy dimensions increase PIDForest focuses on the dimensions with
+signal  so it performs better. Some observations:
+1. The performance of iForest degrades rapidly with d  once d ≥ 6 it effectively outputs a random
+set. Noticeably  PIDForest performs better than iForest even when d = 0. This is mainly due to
+the points between the two centers being classiﬁed as normal by iForest. PIDForest classiﬁes
+them correctly as anomalous even though they are assigned to leaves that are deep in the tree.
+
+2. The EM algorithm is speciﬁcally designed to ﬁt a mixture of two Gaussians  so it does best for
+
+small or zero noise  i.e. when d is small. PIDForest beats it once d > 2.
+
+3. Apart from PIDForest  a few other algorithms such as RRCF  SVM and kNN also do well (see
+Fig. 4b in the Appendix)—but their performance is crucially dependent on the fact that the noise
+is of the same scale as the Gaussians. If we change the scale of the noise (which could happen
+if the measuring unit changes)  then the performance of all algorithms except PIDForest drops
+signiﬁcantly. In Figs. 5a and 5b in the Appendix  we repeat the same experiment as above but
+with the noisy dimensions being uniform in [−10  10] (instead of [−2  2]). The performance of
+PIDForest is essentially unchanged  and it does markedly better than all other algorithms.
+
+Robustness to choice of hyperparameters. One of the appealing properties of PIDForest is that
+the quality of the output is relatively insensitive to the exact value of the hyper-parameters. We tested
+multiple settings and found that each hyper-parameter has a moderate value above which the quality
+of the output remains stable. Figure 2a shows precision-recall in the synthetic time-series experiment 
+where we vary the parameter k (number of buckets). We see that k = 2 is too little  but there is
+relatively small variation between k = 3  4  5  6. Similar behavior was observed for the number of
+samples m (see Figure 2b)  number of trees t and depth of each tree h  and also with the mixture of
+Gaussians experiment. Since these parameters do affect the running time directly  we set them to the
+smallest values for which we got good results.
+6 Conclusion
+
+We believe that PIDForest is arguably one of the best off-the-shelf algorithms for anomaly detection
+on a large  heterogenous dataset. It inherits many of the desirable features of Isolation Forests 
+while also improving on it in important ways. Developing provable and scalable approximations to
+PIDScore is an interesting algorithmic challenge.
+
+9
+
+0.50.60.70.80.9recall0.30.40.50.60.70.80.91.0precisionTime Seriesn_buckets 2n_buckets 3n_buckets 4n_buckets 5n_buckets 60.50.60.70.80.9recall0.50.60.70.80.91.0precisionTime Seriesn_samples 50n_samples 100n_samples 150n_samples 200n_samples 250Acknowledgment
+
+VS’s contribution were supported by NSF award 1813049.
+
+References
+[1] Varun Chandola  Arindam Banerjee  and Vipin Kumar. Anomaly detection: A survey. ACM
+
+Comput. Surv.  41(3):15:1–15:58  2009.
+
+[2] Charu C. Aggarwal. Outlier Analysis. Springer Publishing Company  Incorporated  2nd edition 
+
+2013. ISBN 9783319475783.
+
+[3] Fei Tony Liu  Kai Ming Ting  and Zhi-Hua Zhou. Isolation forest. In Proceedings of the 8th
+IEEE International Conference on Data Mining (ICDM 2008)  December 15-19  2008  Pisa 
+Italy  pages 413–422  2008.
+
+[4] Sudipto Guha  Nina Mishra  Gourav Roy  and Okke Schrijvers. Robust random cut forest based
+anomaly detection on streams. In Proceedings of the 33nd International Conference on Machine
+Learning  ICML 2016  New York City  NY  USA  June 19-24  2016  pages 2712–2721  2016.
+
+[5] Tharindu R. Bandaragoda  Kai Ming Ting  David W. Albrecht  Fei Tony Liu  Ye Zhu  and
+Isolation-based anomaly detection using nearest-neighbor ensembles.
+
+Jonathan R. Wells.
+Computational Intelligence  34(4):968–998  2018.
+
+[6] Andrew F Emmott  Shubhomoy Das  Thomas Dietterich  Alan Fern  and Weng-Keen Wong.
+Systematic construction of anomaly detection benchmarks from real data. In Proceedings of the
+ACM SIGKDD workshop on outlier detection and description  pages 16–21. ACM  2013.
+
+[7] Avi Wigderson and Amir Yehudayoff. Population recovery and partial identiﬁcation. Mach.
+Learn.  102(1):29–56  January 2016. ISSN 0885-6125. doi: 10.1007/s10994-015-5489-9. URL
+http://dx.doi.org/10.1007/s10994-015-5489-9.
+
+[8] S.A. Goldman and M.J. Kearns. On the complexity of teaching. J. Comput. Syst. Sci.  50
+ISSN 0022-0000. doi: 10.1006/jcss.1995.1003. URL http:
+
+(1):20–31  February 1995.
+//dx.doi.org/10.1006/jcss.1995.1003.
+
+[9] Eyal Kushilevitz  Nathan Linial  Yuri Rabinovich  and Michael E. Saks. Witness sets for families
+of binary vectors. J. Comb. Theory  Ser. A  73(2):376–380  1996. doi: 10.1006/jcta.1996.0031.
+URL https://doi.org/10.1006/jcta.1996.0031.
+
+[10] Balas K. Natarajan. Machine learning: A theoretical approach. Morgan Kaufmann Publishers 
+
+Inc.  1991.
+
+[11] Martin Anthony  Graham Brightwell  Dave Cohen  and John Shawe-Taylor. On exact speciﬁca-
+tion by examples. In Proceedings of the Fifth Annual Workshop on Computational Learning The-
+ory  COLT ’92  pages 311–318  New York  NY  USA  1992. ACM. ISBN 0-89791-497-X. doi:
+10.1145/130385.130420. URL http://doi.acm.org/10.1145/130385.130420.
+
+[12] Nick Koudas  S Muthukrishnan  and Divesh Srivastava. Optimal histograms for hierarchical
+
+range queries. In PODS  pages 196–204  2000.
+
+[13] Anna C Gilbert  Sudipto Guha  Piotr Indyk  Yannis Kotidis  S. Muthukrishnan  and Martin J
+Strauss. Fast  small-space algorithms for approximate histogram maintenance. In Proceedings
+of the thiry-fourth annual ACM symposium on Theory of computing  pages 389–398. ACM 
+2002.
+
+[14] Sudipto Guha  Piotr Indyk  S Muthukrishnan  and Martin J Strauss. Histogramming data
+streams with fast per-item processing. In International Colloquium on Automata  Languages 
+and Programming  pages 681–692. Springer  2002.
+
+[15] Sudipto Guha  Nick Koudas  and Kyuseok Shim. Approximation and streaming algorithms
+for histogram construction problems. ACM Trans. Database Syst.  31(1):396–438  March
+2006. ISSN 0362-5915. doi: 10.1145/1132863.1132873. URL http://doi.acm.org/
+10.1145/1132863.1132873.
+
+10
+
+[16] Arthur Asuncion and David Newman. Uci machine learning repository  2007.
+
+[17] Joaquin Vanschoren  Jan N. van Rijn  Bernd Bischl  and Luis Torgo. Openml: Networked
+science in machine learning. SIGKDD Explorations  15(2):49–60  2013. doi: 10.1145/2641190.
+2641198. URL http://doi.acm.org/10.1145/2641190.2641198.
+
+[18] Shebuti Rayana. ODDS library  2016. URL http://odds.cs.stonybrook.edu.
+
+[19] Charu C Aggarwal and Saket Sathe. Theoretical foundations and algorithms for outlier ensem-
+
+bles. ACM Sigkdd Explorations Newsletter  17(1):24–47  2015.
+
+[20] Kenji Yamanishi  Jun-Ichi Takeuchi  Graham Williams  and Peter Milne. On-line unsupervised
+outlier detection using ﬁnite mixtures with discounting learning algorithms. Data Mining and
+Knowledge Discovery  8(3):275–300  2004.
+
+[21] Subutai Ahmad  Alexander Lavin  Scott Purdy  and Zuha Agha. Unsupervised real-time anomaly
+
+detection for streaming data. Neurocomputing  262:134–147  2017.
+
+[22] Yue Zhao  Zain Nasrullah  and Zheng Li. Pyod: A python toolbox for scalable outlier detection.
+
+arXiv preprint arXiv:1901.01588  2019.
+
+[23] Tharindu R. Bandaragoda  Kai Ming Ting  David W. Albrecht  Fei Tony Liu  Ye Zhu  and
+Jonathan R. Wells. rrcf: Implementation of the robust random cut forest algorithm for anomaly
+detection on streams. Journal of Open Source Software  4(35):1336  2019.
+
+[24] Victoria J. Hodge and Jim Austin. A survey of outlier detection methodologies. Artif. Intell.
+
+Rev.  22(2):85–126  2004.
+
+[25] Animesh Patcha and Jung-Min Jerry Park. An overview of anomaly detection techniques:
+Existing solutions and latest technological trends. Computer Networks  51:3448–3470  2007.
+
+[26] Markus M. Breunig  Hans-Peter Kriegel  Raymond T. Ng  and Jörg Sander. Lof: Iden-
+In Proceedings of the 2000 ACM SIGMOD Interna-
+tifying density-based local outliers.
+tional Conference on Management of Data  SIGMOD ’00  pages 93–104  New York  NY 
+USA  2000. ACM.
+ISBN 1-58113-217-4. doi: 10.1145/342009.335388. URL http:
+//doi.acm.org/10.1145/342009.335388.
+
+[27] Fabrizio Angiulli and Clara Pizzuti. Fast outlier detection in high dimensional spaces. In
+Proceedings of the 6th European Conference on Principles of Data Mining and Knowledge
+Discovery  PKDD ’02  pages 15–26  London  UK  UK  2002. Springer-Verlag. ISBN 3-540-
+44037-2. URL http://dl.acm.org/citation.cfm?id=645806.670167.
+
+[28] Sridhar Ramaswamy  Rajeev Rastogi  and Kyuseok Shim. Efﬁcient algorithms for mining
+outliers from large data sets. SIGMOD Rec.  29(2):427–438  May 2000. ISSN 0163-5808. doi:
+10.1145/335191.335437. URL http://doi.acm.org/10.1145/335191.335437.
+
+[29] Tao Shi and Steve Horvath. Unsupervised learning with random forest predictors. Journal of
+
+Computational and Graphical Statistics  15(1):118–138  2006.
+
+[30] Martin Ester  Hans-Peter Kriegel  Jörg Sander  and Xiaowei Xu. A density-based algorithm
+for discovering clusters a density-based algorithm for discovering clusters in large spatial
+databases with noise. In Proceedings of the Second International Conference on Knowledge
+Discovery and Data Mining  KDD’96  pages 226–231. AAAI Press  1996. URL http:
+//dl.acm.org/citation.cfm?id=3001460.3001507.
+
+[31] Rakesh Agrawal  Johannes Gehrke  Dimitrios Gunopulos  and Prabhakar Raghavan. Automatic
+subspace clustering of high dimensional data for data mining applications. SIGMOD Rec. 
+27(2):94–105  June 1998.
+ISSN 0163-5808. doi: 10.1145/276305.276314. URL http:
+//doi.acm.org/10.1145/276305.276314.
+
+11
+
+,Parikshit Gopalan
+Vatsal Sharan
+Udi Wieder

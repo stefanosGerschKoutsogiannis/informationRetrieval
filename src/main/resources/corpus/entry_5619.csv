@@ -1,0 +1,913 @@
+2018,Towards Understanding Acceleration Tradeoff between Momentum and Asynchrony in Nonconvex Stochastic Optimization,Asynchronous momentum stochastic gradient descent algorithms (Async-MSGD) have been widely used in distributed machine learning  e.g.  training large collaborative filtering systems and deep neural networks. Due to current technical limit  however  establishing convergence properties of Async-MSGD for these highly complicated nonoconvex problems is generally infeasible. Therefore  we propose to analyze the algorithm through a simpler but nontrivial nonconvex problems --- streaming PCA. This allows us to make progress toward understanding Aync-MSGD and gaining new insights for more general problems. Specifically  by exploiting the diffusion approximation of stochastic optimization  we establish the asymptotic rate of convergence of Async-MSGD for streaming PCA. Our results indicate a fundamental tradeoff between asynchrony and momentum: To ensure convergence and acceleration through asynchrony  we have to reduce the momentum (compared with Sync-MSGD). To the best of our knowledge  this is the first theoretical attempt on understanding Async-MSGD for distributed nonconvex stochastic optimization. Numerical experiments on both streaming PCA and training deep neural networks are provided to support our findings for Async-MSGD.,Towards Understanding Acceleration Tradeoff
+
+between Momentum and Asynchrony
+in Nonconvex Stochastic Optimization
+
+Tianyi Liu
+
+School of Industrial and System Engineering
+
+Georgia Institute of Technology
+
+Atlanta  GA 30332
+
+tliu341@gatech.edu
+
+Shiyang Li
+
+Harbin Institue of Technology
+
+lsydevin@gmail.com
+
+Jianping Shi
+
+Sensetime Group Limited
+
+shijianping@sensetime.com
+
+Enlu Zhou⇤
+
+School of Industrial and System Engineering
+
+Georgia Institute of Technology
+
+Atlanta  GA 30332
+
+enlu.zhou@isye.gatech.edu
+
+Tuo Zhao†
+
+School of Industrial and System Engineering
+
+Georgia Institute of Technology
+
+Atlanta  GA 30332
+
+tuo.zhao@isye.gatech.edu
+
+Abstract
+
+Asynchronous momentum stochastic gradient descent algorithms (Async-MSGD)
+have been widely used in distributed machine learning  e.g.  training large col-
+laborative ﬁltering systems and deep neural networks. Due to current technical
+limit  however  establishing convergence properties of Async-MSGD for these
+highly complicated nonoconvex problems is generally infeasible. Therefore  we
+propose to analyze the algorithm through a simpler but nontrivial nonconvex prob-
+lems — streaming PCA. This allows us to make progress toward understanding
+Aync-MSGD and gaining new insights for more general problems. Speciﬁcally 
+by exploiting the diffusion approximation of stochastic optimization  we establish
+the asymptotic rate of convergence of Async-MSGD for streaming PCA. Our
+results indicate a fundamental tradeoff between asynchrony and momentum: To
+ensure convergence and acceleration through asynchrony  we have to reduce the
+momentum (compared with Sync-MSGD). To the best of our knowledge  this is the
+ﬁrst theoretical attempt on understanding Async-MSGD for distributed nonconvex
+stochastic optimization. Numerical experiments on both streaming PCA and train-
+ing deep neural networks are provided to support our ﬁndings for Async-MSGD.
+
+⇤Home Page: http://enluzhou.gatech.edu
+†Home Page: https://www2.isye.gatech.edu/ tzhao80/
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+1
+
+Introduction
+
+Modern machine learning models trained on large data sets have revolutionized a wide variety
+of domains  from speech and image recognition (Hinton et al.  2012; Krizhevsky et al.  2012)
+to natural language processing (Rumelhart et al.  1986) to industry-focused applications such as
+recommendation systems (Salakhutdinov et al.  2007). Training these machine learning models
+requires solving large-scale nonconvex optimization. For example  to train a deep neural network
+i=1  where xi is the i-th input feature and yi is the response 
+given n observations denoted by {(xi  yi)}n
+we need to solve the following empirical risk minimization problem 
+
+✓ F(✓) :=
+min
+
+1
+n
+
+nXi=1
+
+`(yi  f (xi ✓ )) 
+
+(1)
+
+where ` is a loss function  and f is a neural network function/operator associated with parameter ✓.
+Thanks to signiﬁcant advances made in GPU hardware and training algorithms  we can easily train
+machine learning models on a GPU-equipped machine. For example  we can solve (1) using the
+popular momentum stochastic gradient descent (MSGD  Robbins and Monro (1951); Polyak (1964))
+algorithm. Speciﬁcally  at the t-th iteration  we uniformly sample i (or a mini-batch) from (1  ...  n) 
+and then take
+
+✓(k+1) = ✓(k)  ⌘r`(yi  f (xi ✓ (k))) + µ(✓(k)  ✓(k1)) 
+
+(2)
+where ⌘ is the step size parameter and µ 2 [0  1) is the parameter for controlling the momentum. Note
+that when µ = 0  (2) is reduced to the vanilla stochastic gradient descent (VSGD) algorithm. Many
+recent empirical results have demonstrated the impressive computational performance of MSGD.
+For example  ﬁnishing a 180-epoch training with a moderate scale deep neural network (ResNet  1.7
+million parameters  He et al. (2016)) for CIFAR10 (50  000 training images in resolution 32 ⇥ 32)
+only takes hours with a NVIDIA Titan XP GPU.
+For even larger models and datasets  however  solving (1) is much more computationally demanding
+and can take an impractically long time on a single machine. For example  ﬁnishing a 90-epoch
+ImageNet-1k (1 million training images in resolution 224 ⇥ 224) training with large scale ResNet
+(around 25.6 million parameters) on the same GPU takes over 10 days. Such high computational
+demand of training deep neural networks necessitates the training on distributed GPU cluster in order
+to keep the training time acceptable.
+In this paper  we consider the “parameter server” approach (Li et al.  2014)  which is one of the
+most popular distributed optimization frameworks. Speciﬁcally  it consists of two main ingredients:
+First  the model parameters are globally shared on multiple servers nodes. This set of servers are
+called the parameter servers. Second  there can be multiple workers processing data in parallel and
+communicating with the parameter servers. The whole framework can be implemented in either
+synchronous or asynchronous manner. The synchronous implementations are mainly criticized for
+the low parallel efﬁciency  since the servers always need to wait for the slowest worker to aggregate
+all updates within each iteration.
+To circumvent this issue  practitioners have resorted to asynchronous implementations  which empha-
+size parallel efﬁciency by using potentially stale stochastic gradients for computation. Speciﬁcally 
+each worker in asynchronous implementations can process a mini-batch of data independently of the
+others  as follows: (1) The worker fetches from the parameter servers the most up-to-date parameters
+of the model needed to process the current mini-batch; (2) It then computes gradients of the loss with
+respect to these parameters; (3) Finally  these gradients are sent back to the parameter servers  which
+then updates the model accordingly. Since each worker communicates with the parameter servers
+independently of the others  this is called Asynchronous MSGD (Async-MSGD).
+As can be seen  Async-MSGD is different from Sync-MSGD  since parameter updates may have
+occurred while a worker is computing its stochastic gradient; hence  the resulting stochastic gradients
+are typically computed with respect to outdated parameters. We refer to these as stale stochastic
+gradients  and its staleness as the number of updates that have occurred between its corresponding
+read and update operations. More precisely  at the k-th iteration  Async-MSGD takes
+
+✓(k+1) = ✓(k)  ⌘r`(yi  f (xi ✓ (k⌧k))) + µ(✓(k)  ✓(k1)) 
+
+where ⌧k 2 Z+ denotes the delay in the system (usually proportional to the number of workers).
+
+(3)
+
+2
+
+Understanding the theoretical impact of staleness is fundamental  but very difﬁcult for distributed
+nonconvex stochastic optimization. Though there have been some recent papers on this topic  there
+are still signiﬁcant gaps between theory and practice:
+(A) They all focus on Async-VSGD (Lian et al.  2015; Zhang et al.  2015; Lian et al.  2016). Many
+machine learning models  however  are often trained using algorithms equipped with momentum such
+as Async-MSGD and Async-ADAM (Kingma and Ba  2014). Moreover  there have been some results
+reporting that Async-MSGD sometimes leads to computational and generalization performance loss
+than Sync-MSGD. For example  Mitliagkas et al. (2016) observe that Async-MSGD leads to the
+generalization accuracy loss for training deep neural networks; Chen et al. (2016) observe similar
+results for Async-ADAM for training deep neural networks; Zhang and Mitliagkas (2018) suggest that
+the momentum for Async-MSGD needs to be adaptively tuned for better generalization performance.
+(B) They all focus on analyzing convergence to a ﬁrst order optimal solution (Lian et al.  2015;
+Zhang et al.  2015; Lian et al.  2016)  which can be either a saddle point or local optimum. To better
+understand the algorithms for nonconvex optimization  machine learning researcher are becoming
+more and more interested in the second order optimality guarantee. The theory requires more reﬁned
+characterization on how the delay affects escaping from saddle points and converging to local optima.
+Unfortunately  closing these gaps of Async-MSGD for highly complicated nonconvex problems (e.g. 
+training large recommendation systems and deep neural networks) is generally infeasible due to
+current technical limit. Therefore  we will study the algorithm through a simpler and yet nontrivial
+nonconvex problems — streaming PCA. This helps us to understand the algorithmic behavior of
+Async-MSGD better even in more general problems. Speciﬁcally  the stream PCA problem is
+formulated as
+
+max
+
+v
+
+subject to v>v = 1 
+
+v>EX⇠D[XX>]v
+
+(4)
+where D is an unknown zero-mean distribution  and the streaming data points {Xk}1k=1 are drawn
+independently from D. This problem  though nonconvex  is well known as a strict saddle optimization
+problem over sphere (Ge et al.  2015)  and its optimization landscape enjoys two geometric properties:
+(1) no spurious local optima and (2) negative curvatures around saddle points.
+These nice geometric properties can also be found in several other popular nonconvex optimization
+problems  such as matrix regression/completion/sensing  independent component analysis  partial
+least square multiview learning  and phase retrieval (Ge et al.  2016; Li et al.  2016; Sun et al. 
+2016). However  little has been known for the optimization landscape of general nonconvex problems.
+Therefore  as suggested by many theoreticians  a strict saddle optimization problem such as streaming
+PCA could be a ﬁrst and yet signiﬁcant step towards understanding the algorithms. The insights
+we gain on such simpler problems shed light on more general nonconvex optimization problems.
+Illustrating through the example of streaming PCA  we intend to answer the fundamental question 
+which also arises in Mitliagkas et al. (2016):
+
+Does there exist a tradeoff between asynchrony and momentum
+
+in distributed nonconvex stochastic optimization?
+
+The answer is “Yes". We need to reduce the momentum for allowing a larger delay. Roughly speaking 
+our analysis indicates that for streaming PCA  the delay ⌧k’s are allowed to asymptotically scale as
+
+⌧k . (1  µ)2/p⌘.
+
+Moreover  our analysis also indicates that the asynchrony has very different behaviors from mo-
+mentum. Speciﬁcally  as shown in Liu et al. (2018)  the momentum accelerates optimization  when
+escaping from saddle points  or in nonstationary regions  but cannot improve the convergence to
+optima. The asynchrony  however  can always enjoy a linear speed up throughout all optimization
+stages. The linear speed-up can be understood as follows. We assume all the workers have similar
+performance  which is realistic when training Deep Neural Network where all GPUs are same. Async-
+MSGD works in a pipelining manner. Since we have more workers  Async-MSGD can complete
+⌧ updates in the one iteration time of MSGD. Thus  if we count ⌧ updates of Async-MSGD as one
+iteration  the algorithm will enjoy a linear speed up (faster).
+The main technical challenge for analyzing Async-MSGD comes from the complicated dependency
+caused by momentum and asynchrony. Our analysis adopts diffusion approximations of stochastic
+optimization  which is a powerful applied probability tool based on the weak convergence theory.
+
+3
+
+Existing literature has shown that it has considerable advantages when analyzing complicated
+stochastic processes (Kushner and Yin  2003). Speciﬁcally  we prove that the solution trajectory of
+Async-MSGD for streaming PCA converges weakly to the solution of an appropriately constructed
+ODE/SDE. This solution can provide intuitive characterization of the algorithmic behavior  and
+establish the asymptotic rate of convergence of Async-MSGD. To the best of our knowledge  this is
+the ﬁrst theoretical attempt of Async-MSGD for distributed nonconvex stochastic optimization.
+Notations: For 1  i  d  let ei = (0  ...  0  1  0  ...  0)> (the i-th dimension equals to 1  others 0)
+be the standard basis in Rd. Given a vector v = (v(1)  . . .   v(d))> 2 Rd  we deﬁne the vector norm:
+||v||2 =Pj(v(j))2. The notation w.p.1 is short for with probability one  Bt is the standard Brownian
+˙F
+Motion in Rd  and S denotes the sphere of the unit ball in Rd  i.e.  S = {v 2 Rd |k vk = 1}.
+denotes the derivative of the function F (t). ⇣ means asymptotically equal.
+2 Async-MSGD and Optimization Landscape of Streaming PCA
+
+Recall that we study Async-MSGD for the streaming PCA problem formulated as (4)
+
+max
+
+v
+
+v>EX⇠D[XX>]v
+
+subject to v>v = 1.
+
+vk+1 = vk + µ(vk  vk1) + ⌘(I  vk⌧k v>k⌧k )XkX>k vk⌧k  
+
+We apply the asynchronous stochastic generalized Hebbian Algorithm with Polyak’s momentum
+(Sanger  1989). Note that the serial/synchronous counterpart has been studied in Liu et al. (2018).
+Speciﬁcally  at the k-th iteration  given Xk 2 Rd independently sampled from the underlying
+zero-mean distribution D  Async-MSGD takes
+(5)
+where µ 2 [0  1) is the momentum parameter  and ⌧k is the delay. We remark that from the perspective
+of manifold optimization  (5) is essentially considered as the stochastic approximation of the manifold
+gradient with momentum in the asynchronous manner. Throughout the rest of this paper  if not clearly
+speciﬁed  we denote (5) as Async-MSGD for notational simplicity.
+The optimization landscape of (4) has been well studied in existing literature. Speciﬁcally  we impose
+the following assumption on ⌃= E[XX>].
+Assumption 1. The covariance matrix ⌃ is positive deﬁnite with eigenvalues
+
+1 > 2  ...  d > 0
+
+and associated normalized eigenvectors v1  v2  ...  vd.
+Assumption 1 implies that the eigenvectors ±v1  ±v2  ...  ±vd are all the stationary points for
+problem (4) on the unit sphere S. Moreover  the eigen-gap (1 > 2) guarantees that the global
+optimum v1 is identiﬁable up to sign change  and moreover  v2  ...  vd1 are d  2 strict saddle
+points  and vd is the global minimum (Chen et al.  2017).
+
+3 Convergence Analysis
+
+We analyze the convergence of the Async-MSGD by diffusion approximations. Our focus is to
+ﬁnd the proper delay given the momentum parameter µ and the step size ⌘. We ﬁrst prove the
+global convergence of Async-MSGD using an ODE approximation. Then through more reﬁned SDE
+analysis  we further establish the rate of convergence. Before we proceed  we impose the following
+mild assumption on the underlying data distribution:
+Assumption 2. The data points {Xk}1k=1 are drawn independently from some unknown distribution
+D over Rd such that
+where Cd is a constant (possibly dependent on d).
+
+E[X] = 0  E[XX>] =⌃   kXk  Cd 
+
+The boundedness assumption here can be further relaxed to a moment bound condition. The proof 
+however  requires much more involved truncation arguments  which is beyond the scope of this paper.
+Thus  we assume the uniform boundedness for convenience.
+
+4
+
+3.1 Global Convergence
+
+k
+
+We ﬁrst show that the solution trajectory converges to the solution of an ODE. By studying the ODE 
+we establish the global convergence of Async-MSGD  and the rate of convergence will be established
+later. Speciﬁcally  we consider a continuous-time interpolation V ⌘ ⌧ (t) of the solution trajectory
+of the algorithm: For t  0  set V ⌘ ⌧ (t) = v⌘ ⌧
+on the time interval [k⌘  k⌘ + ⌘). Throughout our
+analysis  similar notations apply to other interpolations  e.g.  H ⌘ ⌧ (t)  U ⌘ ⌧ (t).
+To prove the weak convergence  we need to show the solution trajectory {V ⌘ ⌧ (t)} must be tight in
+the Cadlag function space. In another word  {V ⌘ ⌧ (t)} is uniformly bounded in t  and the maximum
+discontinuity (distance between two iterations) converges to 0  as shown in the following lemma:
+Lemma 1. Given v0 2 S  for any k  O(1/⌘)  we have kvkk2  1 + Omaxi ⌧i⌘/(1  µ)2.
+Speciﬁcally  given ⌧k . (1  µ)2/⌘1 for some  2 (0  1]  we have
+kvk+1  vkk 
+
+kvkk2  1 + O (⌘)
+
+and
+
+.
+
+2Cd⌘
+1  µ
+
+The proof is provided in Appendix A.1. Roughly speaking  the delay is required to satisfy
+
+⌧k . (1  µ)2/⌘1  8k > 0 
+
+for some  2 (0  1] such that the tightness of the trajectory sequence is kept. Then by Prokhorov’s
+Theorem  this sequence {V ⌘(t)} converges weakly to a continuous function. Please refer to Liu et al.
+(2018) for the prerequisite knowledge on weak convergence theory.
+Then we derive the weak limit. Speciﬁcally  we rewrite Async-MSGD as follows:
+
+(6)
+
+where
+
+vk+1 = vk + ⌘Zk = vk + ⌘(mk+1 + k + ✏k) 
+✏k = (⌃ k  ⌃)vk⌧k  v>k⌧k (⌃k  ⌃)vk⌧k vk⌧k 
+mk+1 =Pk
+and k =Pk1
+
+i=0 µi[⌃vki⌧ki  v>ki⌧ki⌃vki⌧kivki⌧ki] 
+i=0 µki⇥(⌃i  ⌃)vi⌧i  v>i (⌃i  ⌃)vi⌧ivi⌧i⇤  
+gradient  which is different from VSGD. Actually  it is an approximation offM (v⌘
+fM (v) = 1
+(1  µ)2!  w.p. 1.
+
+k)k  O (⌘ log(1/⌘)) + O ⌧k1⌘
+
+As can bee seen in (6)  the term mk+1 dominates the update  and k + ✏k is the noise. Note
+that when we have momentum in the algorithm  mk+1 is not a stochastic approximation of the
+k) and biased  where
+
+1µ [⌃v  v>⌃vv]. We have the following lemma to bound the approximation error.
+
+Lemma 2. For any k > 0  we have
+
+Note that the ﬁrst term in the above error bound comes from the momentum  while the second one is
+introduced by the delay. To ensure that this bound does not blow up as ⌘ ! 0  we have to impose a
+further requirement on the delay.
+Given Lemmas 1 and 2  we only need to prove that the continuous interpolation of the noise term
+k + ✏k converges to 0  which leads to the main theorem.
+Theorem 3. Suppose for any i > 0  vi = v0 = v1 2 S. When the delay in each step is chosen
+according to the following condition:
+
+⌧k . (1  µ)2/(1⌘1)  8k > 0  for some  2 (0  1] 
+
+for each subsequence of {V ⌘(·) ⌘ > 0}  there exists a further subsequence and a process V (·) such
+that V ⌘(·) ) V (·) in the weak sense as ⌘ ! 0 through the convergent subsequence  where V (·)
+satisﬁes the following ODE:
+
+k+1 fM (v⌘
+km⌘
+
+˙V =
+
+1
+
+1  µ
+
+[⌃V  V >⌃V V ] 
+
+V (0) = v0.
+
+(7)
+
+To solve ODE (7)  we rotate the coordinate to decouple each dimension. Speciﬁcally  there exists an
+eigenvalue decomposition such that
+
+⌃= Q⇤Q>  where ⇤ = diag(1  2  ...  d) and Q>Q = I.
+
+5
+
+Note that  after the rotation  e1 is the optimum corresponding to v1. Let H ⌘(t) = Q>V ⌘(t)  then we
+have as ⌘ ! 0  {H ⌘(·) ⌘ > 0} converges weakly to
+1  µ⌘i2⌘ 1
+
+H (i)(t) =⇣ dXi=1hH (i)(0) exp⇣ it
+
+1  µ◆   i = 1  ...  d.
+
+2 H (i)(0) exp✓ it
+
+Moreover  given H (1)(0) 6= 0  H(t) converges to H⇤ = e1 as t ! 1. This implies that the
+limiting solution trajectory of Async-MSGD converges to the global optima  given the delay ⌧k .
+(1  µ)2/(1⌘1) in each step.
+Such an ODE approach neglects the noise and only considers the effect of the gradient. Thus  it is
+only a characterization of the mean behavior and is reliable only when the gradient dominates the
+variance throughout all iterations. In practice  however  we care about one realization of the algorithm 
+and the noise plays a very important role and cannot be neglected (especially near the saddle points
+and local optima  where the gradient has a relatively small magnitude). Moreover  since the ODE
+analysis does not explicitly characterize the order of the step size ⌘  no rate of convergence can be
+established. In this respect  the ODE analysis is insufﬁcient. Therefore  we resort to the SDE-based
+approach later for a more precise characterization.
+
+n  e1)/p⌘}
+
+n = (h⌘ ⌧
+n = Q>v⌘ ⌧
+
+3.2 Local Algorithmic Dynamics
+The following SDE approach recovers the effect of the noise by rescaling and can provide a more
+precise characterization of the local behavior. The relationship between the SDE and ODE approaches
+is analogous to that between Central Limit Theorem and Law of Large Number.
+• Phase III: Around Global Optima. We consider the normalized process
+{u⌘ ⌧
+around the optimal solution e1  where h⌘ ⌧
+to “pN" in Central Limit Theorem.
+We ﬁrst analyze the error introduced by the delay after the above normalization. Let Dn = Hn+1 
+Hn  ⌘Pk
+i=0 µki{⇤iHi  H>i ⇤iHiHi} be the error . Then we have
+Deﬁne the accumulative asynchronous error process as: D(t) = 1p⌘Pt/⌘
+
+i=1 Di. To ensure the weak
+convergence  we prove that the continuous stochastic process D(t) converges to zero as shown in the
+following lemma.
+Lemma 4. Given delay ⌧0ks satisfying
+⌧k ⇣
+
+un+1 = un + p⌘Pk
+
+i=0 µki{⇤iHi  H>i ⇤iHiHi} + 1p⌘ Dn.
+
+n . The intuition behind this rescaling is similar
+
+  8k > 0 
+
+(1  µ)2
+(1 + Cd)⌘ 1
+
+for some  2 (0  0.5]  we have for any t ﬁxed  lim⌘!0 D(t) ! 0  a.s.
+Lemma 4 shows that after normalization  we have to use a delay smaller than that in Theorem 3 to
+control the noise. This justiﬁes that the upper bound we derived from the ODE approximation is
+inaccurate for one single sample path.
+We then have the following SDE approximation of the solution trajectory.
+Theorem 5. For every k > 0  the delay satisﬁes the following condition:
+
+2
+
+⌧k ⇣
+
+(1  µ)2
+(1 + Cd)⌘ 1
+
+2
+
+  8k > 0  for some  2 (0  0.5] 
+
+dU =
+
+(i  1)
+1  µ
+
+as ⌘ ! 0  {U ⌘ s i(·)} (i 6= 1) converges weakly to a stationary solution of
+where ↵i j =pE[(Y (i))2(Y (j))2] and U ⌘ s i(·) is the i-th dimension of U ⌘ s(·).
+simplicity  denote ⌧ = maxk ⌧k and  =Pj ↵2
+
+Theorem 8 implies that
+
+the data. Then the asymptotic rate of convergence is shown in the following proposition.
+
+2  workers are allowed to work simultaneously. For notational
+1 j  which is bounded by the forth order moment of
+
+↵i 1
+(1  µ)
+
+(1µ)2
+(1+Cd)⌘
+
+U dt +
+
+dBt 
+
+(8)
+
+1
+
+6
+
+Proposition 6. Given a sufﬁciently small ✏> 0 and
+
+there exists some constant  ⇣ p⌘  such that after restarting the counter of time  ifH ⌘ 1(0)2 
+1  2  we allow ⌧ workers to work simultaneously  where for some  2 (0  0.5] 
+
+⌘ ⇣ (1  µ)✏(1  2)/ 
+
+(1  µ)(1  2)2
+
+(1  µ)(1  2)✏  2⌘⌘
+
+dU =
+
+(i  j)
+1  µ
+
+↵i j
+(1  µ)
+
+dBt.
+
+U dt +
+
+7
+
+⌧ ⇣
+
+to ensurePd
+
+2
+
+(1  µ)2
+(1 + Cd)⌘ 1
+
+  and we need T3 =
+
+(1  µ)
+2(1  2)
+
+log⇣
+i=2H ⌘ i(T3)2  ✏ with probability at least 3/4.
+log⇣
+
+(1 + Cd) 1
+[(1  µ)(1  2)] 3
+
+2 +
+2 +✏ 1
+
+T3
+⌧ ⌘ ⇣
+
+N3 ⇣
+
+2 +
+
+(1  µ)(1  2)2
+
+(1  µ)(1  2)✏  2⌘⌘
+
+Proposition 6 implies that asymptotically  the effective iteration complexity of Async-MSGD enjoys
+a linear acceleration  i.e. 
+
+Remark 7. Mitliagkas et al. (2016) conjecture that the delay in Async-SGD is equivalent to the
+momentum in MSGD. Our result  however  shows that this is not true in general. Speciﬁcally  when
+µ = 0  Async-SGD yields an effective iterations of complexity:
+
+which is faster than that of MSGD (Liu et al.  2018):
+
+2 +
+
+2 +
+2 +✏ 1
+
+(1  2)2
+
+(1  2)✏  2⌘⌘ 
+log⇣
+(1 + Cd) 1
+cN3 ⇣
+[(1  2)] 3
+(1  2)✏  2⌘⌘.
+✏(1  2)2 · log⇣
+fN3 ⇣
+
+(1  2)2
+
+
+
+Thus  there exists fundamental difference between these two algorithms.
+• Phase II: Traverse between Stationary Points. For Phase II  we study the algorithmic behavior
+once Async-MSGD has escaped from saddle points. During this period  since the noise is too small
+compared to the large magnitude of the gradient  the update is dominated by the gradient  and the
+inﬂuence of the noise is negligible. Thus  the ODE approximation is reliable before it enters the
+neighborhood of the optimum. The upper bound ⌧ . (1  µ)2/1⌘1 we ﬁnd in Section 3.1 works
+in this phase. Then we have the following proposition:
+Proposition 8. After restarting the counter of time  given ⌘ ⇣ ✏(1  2)/   ⇣ p⌘  we can allow
+⌧ workers to work simultaneously  where for some  2 (0  1] 
+
+(1  µ)2
+1⌘1   and we need T2 =
+
+⌧ ⇣
+
+(1  µ)
+2(1  2)
+
+log✓ 1  2
+2 ◆
+
+such thatH ⌘ 1(T2)2  1  2.
+
+Proposition 8 implies that asymptotically  the effective iteration complexity of Async-MSGD enjoys
+a linear acceleration by a factor ⌧  i.e. 
+
+N2 ⇣
+
+T2
+⌧ ⌘ ⇣
+
+1
+
+2(1  µ)(1  2)1+✏ log✓ 1  2
+2 ◆ .
+
+n = (hs ⌘
+
+• Phase I: Escaping from Saddle Points. At last  we study the algorithmic behavior around saddle
+points ej  j 6= 1. Similarly to Phase I  the gradient has a relatively small magnitude  and noise is
+the key factor to help the algorithm escape from the saddles. Thus  an SDE approximation need to
+n  ei)/p⌘} for i 6= 1. By the same SDE approximation technique
+be derived. Deﬁne {us ⌘
+used in Section 3.2  we obtain the following theorem.
+k  ej ⇣ p⌘ for k = 1  2.... Then for i 6= j  if for any k 
+Theorem 9. Condition on the event that h⌘
+the delay satisﬁes the following condition:
+(1  µ)2
+(1 + Cd)⌘ 1
+
+  8k > 0 
+for some  2 (0  0.5]  {U ⌘ i(·)} converges weakly to a solution of
+
+⌧k ⇣
+
+2
+
+k  ej ⇣ p⌘ is only a technical assumption. When (h⌘
+
+k  ej)/p⌘ is large  MSGD has escaped
+Here h⌘
+from the saddle point ej  which is out of Phase I. In this respect  this assumption does not cause any
+issue.
+We further have the following proposition:
+Proposition 10. Given a pre-speciﬁed ⌫ 2 (0  1)  ⌘ ⇣ ✏(1  2)/  and  ⇣ p⌘  we allow ⌧
+workers to work simultaneously  where for some  2 (0  0.5] 
+log 2
++ 1!
+such that (H ⌘ 2(T1))2  1  2 with probability at least 1  ⌫  where (x) is the CDF of the
+standard normal distribution.
+
+(1  µ)2
+(1 + Cd)⌘ 1
+
+(1  µ)⌘12(1  2)
+1 1+⌫
+
+2 2 ↵2
+
+  and we need T1 =
+
+2(1  2)
+
+1  µ
+
+⌧ ⇣
+
+2
+
+12
+
+Proposition 10 implies that asymptotically  the effective iteration complexity of Async-MSGD enjoys
+a linear acceleration  i.e. 
+
+log 2
+
+(1  µ)⌘12(1  2)
+1 1+⌫
+
+2 2 ↵2
+
+12
+
++ 1! .
+
+N1 ⇣
+
+T1
+⌘⌧ ⇣
+
+(1 + Cd) 1
+2(1  µ)(1  2) 3
+
+2 +
+2 +✏ 1
+
+2 +
+
+Remark 11. We brieﬂy summarize here: (1) There is a trade-off between the momentum and
+asynchrony. Speciﬁcally  to guarantee the convergence  delay must be chosen according to :
+
+⌧ ⇣
+
+(1  µ)2
+(1 + Cd)⌘ 1
+
+2
+
+ 
+
+for some  2 (0  0.5]. Then Async-MSGD asymptotically achieves a linear speed-up compared to
+MSGD. (2) Momentum and asynchrony have fundamental difference. With proper delays  Async-SGD
+achieves a linear speed-up in the third phase  while momentum cannot improve the convergence.
+
+4 Numerical Experiments
+
+We present numerical experiments for both streaming PCA and training deep neural networks to
+demonstrate the tradeoff between the momentum and asynchrony. The experiment on streaming PCA
+verify our theory in Section 3  and the experiments on training deep neural networks verify that our
+theory  though trimmed for Streaming PCA  gains new insights for more general problems.
+
+4.1 Streaming PCA
+
+We ﬁrst provide a numerical experiment to show the tradeoff between the momentum and asynchrony
+in streaming PCA. For simplicity  we choose d = 4 and the covariance matrix ⌃ = diag{4  3  2  1}.
+The optimum is (1  0  0  0). We compare the performance of Async-MSGD with different delays and
+momentum parameters. Speciﬁcally  we start the algorithm at the saddle point (0  1  0  0) and set
+⌘ = 0.0005. The algorithm is run for 100 times.
+Figure 1 shows the average optimization error obtained by Async-MSGD with µ =
+0.7  0.8  0.85  0.9  0.95 and delays from 0 to 100. Here  the shade is the error bound. We see
+that for a ﬁxed µ  Async-MSGD can achieve similar optimization error to that of MSGD when the
+delay is below some threshold. We call it the optimal delay. As can be seen in Fig 1  the optimal
+delays for µ = 0.7  0.8  0.85  0.9  0.95 are 120  80  60  30  10 respectively. This indicates that there
+is a clear tradeoff between the asynchrony and momentum which is consistent with our theoretical
+analysis. We remark that the difference among Async-MSGD with different µ when ⌧ = 0 is due to
+the fact that the momentum hurts convergence  as shown in Liu et al. (2018).
+
+4.2 Deep Neural Networks
+
+We then provide numerical experiments for comparing different number workers and choices of
+momentum in training a 32-layer hyperspherical residual neural network (SphereResNet34) using
+the CIFAR-100 dataset for a 100-class image classiﬁcation task. We use a computer workstation
+with 8 Titan XP GPUs. We choose a batch size of 128. 50k images are used for training  and the
+rest 10k are used for testing. We repeat each experiment for 10 times and report the average. We
+
+8
+
+s
+r
+o
+r
+r
+E
+n
+o
+i
+t
+a
+z
+i
+m
+
+i
+t
+p
+O
+
+⌧opt ⇡ 10
+
+⌧opt ⇡ 30
+
+⌧opt ⇡ 60 ⌧opt ⇡ 80
+
+⌧opt ⇡ 120
+
+Figure 1: Comparison of Async-MSGD with different momentum and delays. For µ =
+0.7  0.8  0.85  0.9  0.95  the optimal delay’s are ⌧ = 120  80  60  30  10 respectively. This suggests a
+clear tradeoff between the asynchrony and momentum.
+
+Delay ⌧
+
+choose the initial step size as 0.2. We decrease the step size by a factor of 0.2 after 60  120  and
+160 epochs. The momentum parameter is tuned over {0.1  0.3  0.5  0.7  0.9}. More details on the
+network architecture and experimental settings can be found in He et al. (2016) and Liu et al. (2017).
+We repeat all experiments for 10 times  and report the averaged results.
+
+Figure 2: The average validation accuracies of ResNet34 versus the momentum parameters with
+different numbers of workers. We can see that the optimal momentum decreases  as the number of
+workers increases.
+
+Figure 2 shows that the validation accuracies of ResNet34 under different settings. We can see that
+for one single worker ⌧ = 1  the optimal momentum parameter is µ = 0.9; As the number of workers
+increases  the optimal momentum decreases; For 8 workers ⌧ = 8  the optimal momentum parameter
+is µ = 0.5. We also see that µ = 0.9 yields the worst performance for ⌧ = 8. This indicates a clear
+tradeoff between the delay and momentum  which is consistent with our theory.
+
+5 Discussions
+
+We remark that though our theory helps explain some phenomena in training DNNs  there still exist
+some gaps: (1) The optimization landscapes of DNNs are much more challenging than that of our
+studied streaming PCA problem. For example  there might exist many bad local optima and high
+order saddle points. How Async-MSGD behaves in these regions is still largely unknown; (2) Our
+analysis based on the diffusion approximations requires ⌘ ! 0. However  the experiments actually
+use relatively large step sizes at the early stage of training. Though we can expect large and small
+step sizes share some similar behaviors  they may lead to very different results; (3) Our analysis only
+explains how Async-MSGD minimizes the population objective. For DNNs  however  we are more
+interested in generalization accuracies. We will leave these open questions for future investigation.
+
+References
+CHEN  J.  PAN  X.  MONGA  R.  BENGIO  S. and JOZEFOWICZ  R. (2016). Revisiting distributed
+
+synchronous sgd. arXiv preprint arXiv:1604.00981 .
+
+9
+
+CHEN  Z.  YANG  F. L.  LI  C. J. and ZHAO  T. (2017). Online multiview representation learning:
+
+Dropping convexity for better efﬁciency. arXiv preprint arXiv:1702.08134 .
+
+GE  R.  HUANG  F.  JIN  C. and YUAN  Y. (2015). Escaping from saddle points—online stochastic
+
+gradient for tensor decomposition. In Conference on Learning Theory.
+
+GE  R.  LEE  J. D. and MA  T. (2016). Matrix completion has no spurious local minimum. In
+
+Advances in Neural Information Processing Systems.
+
+HE  K.  ZHANG  X.  REN  S. and SUN  J. (2016). Deep residual learning for image recognition. In
+
+Proceedings of the IEEE conference on computer vision and pattern recognition.
+
+HINTON  G.  DENG  L.  YU  D.  DAHL  G. E.  MOHAMED  A.-R.  JAITLY  N.  SENIOR  A. 
+VANHOUCKE  V.  NGUYEN  P.  SAINATH  T. N. ET AL. (2012). Deep neural networks for
+acoustic modeling in speech recognition: The shared views of four research groups. IEEE Signal
+Processing Magazine 29 82–97.
+
+KINGMA  D. P. and BA  J. (2014). Adam: A method for stochastic optimization. arXiv preprint
+
+arXiv:1412.6980 .
+
+KRIZHEVSKY  A.  SUTSKEVER  I. and HINTON  G. E. (2012). Imagenet classiﬁcation with deep
+
+convolutional neural networks. In Advances in neural information processing systems.
+
+KUSHNER  H. J. and YIN  G. G. (2003). Stochastic approximation and recursive algorithms and
+
+applications  stochastic modelling and applied probability  vol. 35.
+
+LI  M.  ANDERSEN  D. G.  PARK  J. W.  SMOLA  A. J.  AHMED  A.  JOSIFOVSKI  V.  LONG  J. 
+SHEKITA  E. J. and SU  B.-Y. (2014). Scaling distributed machine learning with the parameter
+server. In OSDI  vol. 14.
+
+LI  X.  WANG  Z.  LU  J.  ARORA  R.  HAUPT  J.  LIU  H. and ZHAO  T. (2016). Symmetry  saddle
+points  and global geometry of nonconvex matrix factorization. arXiv preprint arXiv:1612.09296 .
+
+LIAN  X.  HUANG  Y.  LI  Y. and LIU  J. (2015). Asynchronous parallel stochastic gradient for
+
+nonconvex optimization. In Advances in Neural Information Processing Systems.
+
+LIAN  X.  ZHANG  H.  HSIEH  C.-J.  HUANG  Y. and LIU  J. (2016). A comprehensive linear
+speedup analysis for asynchronous stochastic parallel optimization from zeroth-order to ﬁrst-order.
+In Advances in Neural Information Processing Systems.
+
+LIU  T.  CHEN  Z.  ZHOU  E. and ZHAO  T. (2018). Toward deeper understanding of noncon-
+vex stochastic optimization with momentum using diffusion approximations. arXiv preprint
+arXiv:1802.05155 .
+
+LIU  W.  ZHANG  Y.-M.  LI  X.  YU  Z.  DAI  B.  ZHAO  T. and SONG  L. (2017). Deep
+
+hyperspherical learning. In Advances in Neural Information Processing Systems.
+
+MITLIAGKAS  I.  ZHANG  C.  HADJIS  S. and RÉ  C. (2016). Asynchrony begets momentum  with
+an application to deep learning. In Communication  Control  and Computing (Allerton)  2016 54th
+Annual Allerton Conference on. IEEE.
+
+POLYAK  B. T. (1964). Some methods of speeding up the convergence of iteration methods. USSR
+
+Computational Mathematics and Mathematical Physics 4 1–17.
+
+ROBBINS  H. and MONRO  S. (1951). A stochastic approximation method. The annals of mathemat-
+
+ical statistics 400–407.
+
+RUMELHART  D. E.  HINTON  G. E. and WILLIAMS  R. J. (1986). Learning representations by
+
+back-propagating errors. nature 323 533.
+
+SALAKHUTDINOV  R.  MNIH  A. and HINTON  G. (2007). Restricted boltzmann machines for
+collaborative ﬁltering. In Proceedings of the 24th international conference on Machine learning.
+ACM.
+
+10
+
+SANGER  T. D. (1989). Optimal unsupervised learning in a single-layer linear feedforward neural
+
+network. Neural networks 2 459–473.
+
+SUN  J.  QU  Q. and WRIGHT  J. (2016). A geometric analysis of phase retrieval. In Information
+
+Theory (ISIT)  2016 IEEE International Symposium on. IEEE.
+
+ZHANG  J. and MITLIAGKAS  I. (2018). Yellowﬁn: Adaptive optimization for (a) synchronous
+
+systems. Training 1 2–0.
+
+ZHANG  W.  GUPTA  S.  LIAN  X. and LIU  J. (2015). Staleness-aware async-sgd for distributed
+
+deep learning. arXiv preprint arXiv:1511.05950 .
+
+11
+
+,Joseph Suarez
+Tianyi Liu
+Shiyang Li
+Jianping Shi
+Enlu Zhou
+Tuo Zhao

@@ -1,0 +1,971 @@
+2018,Learning to Solve SMT Formulas,We present a new approach for learning to solve SMT formulas. We phrase the challenge of solving SMT formulas as a tree search problem where at each step a transformation is applied to the input formula until the formula is solved. Our approach works in two phases: first  given a dataset of unsolved formulas we learn a policy that for each formula selects a suitable transformation to apply at each step in order to solve the formula  and second  we synthesize a strategy in the form of a loop-free program with branches. This strategy is an interpretable representation of the policy decisions and is used to guide the SMT solver to decide formulas more efficiently  without requiring any modification to the solver itself and without needing to evaluate the learned policy at inference time. We show that our approach is effective in practice - it solves 17% more formulas over a range of benchmarks and achieves up to 100x runtime improvement over a state-of-the-art SMT solver.,Learning to Solve SMT Formulas
+
+Mislav Balunovi´c  Pavol Bielik  Martin Vechev
+
+Department of Computer Science
+
+bmislav@ethz.ch  {pavol.bielik  martin.vechev}@inf.ethz.ch
+
+ETH Zürich
+Switzerland
+
+Abstract
+
+We present a new approach for learning to solve SMT formulas. We phrase the
+challenge of solving SMT formulas as a tree search problem where at each step
+a transformation is applied to the input formula until the formula is solved. Our
+approach works in two phases: ﬁrst  given a dataset of unsolved formulas we learn
+a policy that for each formula selects a suitable transformation to apply at each step
+in order to solve the formula  and second  we synthesize a strategy in the form of
+a loop-free program with branches. This strategy is an interpretable representation
+of the policy decisions and is used to guide the SMT solver to decide formulas
+more efﬁciently  without requiring any modiﬁcation to the solver itself and without
+needing to evaluate the learned policy at inference time. We show that our approach
+is effective in practice – it solves 17% more formulas over a range of benchmarks
+and achieves up to 100× runtime improvement over a state-of-the-art SMT solver.
+
+1
+
+Introduction
+
+Satisﬁability Modulo Theories (SMT) solvers are a powerful class of automated theorem provers
+which can deduce satisﬁability and validity of ﬁrst-order formulas in particular logical theories (e.g. 
+real numbers  arrays  bit vectors). SMT solvers are more general than SAT solvers and have been
+used in a variety of application domains including veriﬁcation (e.g.  neural networks [28])  program
+synthesis  static analysis  scheduling  and others [16].
+To efﬁciently solve complex real world problems  state-of-the-art SMT solvers (e.g.  Z3 [15] 
+Yices [18]  CVC4 [4]  MathSAT5 [13]  Boolector [35]) contain hand-crafted heuristics combining
+algorithmic proof methods and satisﬁability search techniques. Indeed  crafting the right heuristic
+is critical and can be the difference between solving a complex formula in seconds or not at all. To
+enable end users to create suitable heuristics  several modern SMT solvers such as Z3 [15] provide a so
+called tactic language for expressing heuristics. Typically  such tactics are combined and performed
+in a sequence (speciﬁed by the user)  forming an interpretable program called a strategy. However 
+the resulting strategies can often end up being quite complex (e.g.  containing loops and conditionals).
+Combined with the vast search space  this means that manually ﬁnding a well-performing strategy
+can be very difﬁcult  even for experts.
+
+Our Contributions We present a new approach  based on a combination of learning and synthesis
+techniques  which addresses the problem of automatically ﬁnding the right SMT strategy. Given
+a dataset of formulas whose solution is initially unknown  we ﬁrst train a policy that searches for
+strategies that are fast at solving the formulas in this dataset. Then  we synthesize a single strategy
+(a program with branches) that captures the policy decision making in an interpretable manner. The
+resulting strategy is then passed on to the SMT solver which uses it to make more effective decisions
+when solving a given formula. We note that our approach does not require any changes to the solver’s
+internals and thus can work with any decision procedure which cleanly exports its tactics.
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+We performed an extensive experimental evaluation of our approach on formulas of varying complex-
+ity across 3 different theories (QF_NRA  QF_BV and QF_NIA). We show that our synthesized strategies
+solve 17% more formulas and are up to 100× faster when compared to the default strategy used in
+the state-of-the-art Z3 solver. Further  our learned strategies generalize well and can solve formulas
+which are much more challenging than those seen during training. Finally  we make our tool  called
+fastSMT  datasets and experiments available at http://fastsmt.ethz.ch/.
+
+2 Related work
+
+Given the importance and wide range of SMT solver applications  a number of approaches have been
+developed to improve both  their runtime as well as the range of formulas they can solve.
+
+Portfolio based approaches The most common approach of tools such as SATzilla [44] 
+CPhydra [12]  SUNNY [2]  Proteus [22]  ISAC [27] is a portfolio based method. The key idea
+is that different SMT solvers use different heuristics and hence work well for different types of
+formulas. Then  given several SMT solvers and a dataset of formulas  the goal is to learn a classiﬁer
+which uses features extracted from the given formula to select the right SMT solver (or alternatively
+deﬁnes order in which to run the solvers). In comparison  we address a harder problem - learn how to
+instantiate an SMT solver with a strategy that efﬁciently solves the given dataset of formulas.
+
+Evolutionary search The work most closely related to ours is StratEVO [39] which also studies
+the task of generating SMT strategies. However  StratEVO has several limitations – it performs
+search using an evolutionary algorithm which does not incorporate any form of learning  the search
+does not depend on the actual formula  and local mutations tend to get stuck in local minima (as we
+show in our experiments in Section 5). As a result  for many tasks where the suitable strategy cannot
+be trivially found (e.g.  is very short) their approach reduces to random search. Instead  we leverage
+models that learn from previously explored strategies as well as the current formula. As we show  this
+enables discovery of complex strategies that are out of reach for approaches not based on learning.
+
+Learning branching heuristics and premise selection Recently  learning techniques have been
+applied to improving performance of SAT solvers [32  42]  constraint programming solvers [34] 
+solving quantiﬁed boolean formulas [41]  solving mixed integer programming problems [29] as
+well as premise selection in interactive theorem provers [1  43  33]. At a high level  these are
+complementary to us – we learn to search across many tactics and combine them into high level
+strategies while they optimize a single tactic (e.g.  by learning which variable to branch on in SAT).
+Our work also supports formulas from a wide range of theories (as long as there is a corresponding
+tactic language) where selecting a suitable high level strategy leads to higher speedups compared
+to optimizing a single tactic in isolation. However  there are also common challenges such as
+deﬁning a suitable formula representation. This representation can range from a set of hand-crafted
+features [32  36]  to recursive and convolutional neural networks [33  1]  to graph embeddings [43].
+We extend this line of work by considering fast to compute representations based on bag of words 
+syntactic features  and features extracted from a graph representation of the formula.
+
+Parameter tuning Finally  a number of approaches exist for ﬁnding good parameter conﬁgurations
+from a vast space of both discrete and continuous parameters  including ParamILS [25]  GGA [3] 
+TB − SPO [24] or SMAC [23]. An interesting application of such approaches to the domain of SAT/SMT
+solvers is proposed by SATenstein [30] which ﬁrst designs a highly parameterized solver framework
+to be subsequently optimized by off-the shelf tools. Although such tools are not applicable for the
+task of searching for strategy programs (that include loops and conditionals) considered in our work 
+they can be used to ﬁne-tune the strategy parameters once a candidate strategy is found.
+
+3 SMT strategies: preliminaries
+
+At a high level  an SMT solver takes as input a ﬁrst-order logical formula and then tries to decide if
+the formula is satisﬁable. In the process  solvers employ various heuristics that ﬁrst transform the
+input formula into a suitable representation and then use search procedures to check for satisﬁability.
+Existing heuristics include: simplify which applies basic simpliﬁcation rules such as constant
+
+2
+
+Table 1: Formalization of the Strategy language used to express SMT strategies in Z3 [15].
+
+(Strategy)
+
+q
+
+(Tactics)
+(Predicates)
+(Expressions)
+(Constants)
+(Probes)
+(AOperators)
+(BOperators)
+(Parameter)
+(Parameters)
+
+t
+p
+expr
+c
+probe
+⊕
+(cid:46)(cid:47)
+param
+params
+
+t | q; q | if p then q else q | q else q |
+::=
+repeat q  c | try q for c | using t with params
+Tactics = { bit_blast  solve_eqs  elim_uncnstr . . .}
+∈
+p ∧ p | p ∨ p | expr (cid:46)(cid:47) expr
+::=
+c | probe | expr ⊕ expr
+::=
+∈
+Consts = Q
+Probe → Q 
+::=
+::= + | − | ∗ | /
+::= > | < | ≥ | ≤ | = | (cid:54)=
+::=
+::=
+
+Param = { hoist_mul  flat  som  . . .}
+
+Probe = { num_consts  is_pb  . . .}
+
+(Param  Q) 
+ | param; params
+
+folding (x + 0 → x)  removal of redundant expressions (x − x → 0)  gaussian_elim which
+eliminates variables (x = 1∧ y ≥ x + z → y ≥ 1 + z) using Gaussian elimination  elim_term_ite
+which replaces the term if-then-else with fresh auxiliary declarations (if x > y then x else y) >
+z → k > z ∧ (x > y ⇒ k = x) ∧ (x ≤ y ⇒ k = y)  or bit_blast which reduces bit-vector
+expressions by introducing fresh variables  one for each bit of the original bit-vector (e.g.  a bit
+vector of size 4 is expanded into four fresh variables). In total  the Z3 SMT solver deﬁnes more than
+100 such heuristic transformations (called tactics) that can be combined together to deﬁne a custom
+strategy. For example  a strategy for integer arithmetic can be deﬁned as1:
+using simplify with (som : true); normalize_bounds; lia2pb; pb2bv; bit_blast; sat
+Although the above sequence of transformations (tactics) works well for some types of input formulas
+(e.g.  in case every variable has a lower and an upper bound)  for other formulas a different set of
+tactics is more suited. In some cases  the suitable set of tactics can be obtained by a small modiﬁcation
+of the original tactic while in others  a completely different set of tactics needs to be deﬁned. As a
+concrete example  consider the following strategy implemented in the Yices SMT solver [18  17]:
+
+if (¬diff ∧ num_atoms
+
+dim
+
+< k) then simplex else floyd_warshall
+
+Here  two high level tactics can be applied to solve an input formula – the Simplex algorithm or
+the algorithm based on Floyd-Warshall all-pairs shortest distance. The Simplex algorithm is used
+if the input formula is not in the difference logic fragment (denoted using ¬diff) and the ratio of
+inequalities divided by the number of uninterpreted constants is smaller than a threshold k.
+
+Language for expressing SMT solver strategies
+In Fig. 1 we formalize the language used by
+Z3 to enable control over the core solver heuristics. The basic building blocks of the language
+are called tactics and represent various heuristic transformations that might be applied during the
+search. Optionally  each tactic can deﬁne a set of parameters that affect its behavior. For example  the
+simplify tactic contains > 50 different parameters that control which simpliﬁcations are performed
+(e.g.  if som : true then simplify puts polynomials in som-of-monomials form). The tactics are
+combined into larger programs either sequentially or using one of the following control structures:
+• if p then q1 else q2: If the predicate p evaluates to true apply q1  otherwise apply q2.
+The predicate can contain arithmetic expressions as well as Probes which collect statistics
+of the current formula (e.g.  num_consts returns the number of non-boolean constants).
+
+• q1 else q2: First apply q1 and if it fails then apply q2 on the original input.
+• repeat q  c: Keep applying q until it does not modify the input formula any more or the
+• try q for c: Apply q to the input and if it does not return in c millisenconds then fail.
+• using t with params: Apply the given tactic t with the given parameters params.
+
+number of iterations is greater than the constant c.
+
+1For more information and examples we refer the reader to the online tutorial available at:
+
+https://rise4fun.com/z3/tutorial/strategies
+
+3
+
+4 Learning SMT strategies
+
+N(cid:88)
+
+i=1
+
+(cid:26)runtime(q(fi))
+
+timeout_penalty otherwise
+
+if q solves fi
+
+(1)
+
+We now present our approach for synthesizing SMT strategies. Formally  the task we are interested in
+solving is deﬁned as follows:
+Problem statement Given a dataset of SMT formulas F = {fi}N
+
+i=1  our goal is to ﬁnd a strategy:
+
+qbest = arg min
+q∈Strategy
+
+cost(fi  q) where cost(fi  q) def=
+
+Here  runtime(q(fi)) ∈ Q denotes the runtime required for strategy q to solve formula fi and
+timeout_penalty ∈ Q is a constant denoting the penalty for not solving fi (either due to timeout
+or because the strategy q is not powerful enough). Our goal is to ﬁnd a strategy that minimizes the
+time required to solve the formulas in the dataset F. Note that our cost function reﬂects the fact that
+we aim to synthesize a strategy that solves as many formulas as possible yet one that is also the fastest.
+Generally  optimizing for Equation 1 directly is problematic as using runtime makes the optimization
+problem inherently noisy and non-deterministic. It also makes learning hard to parallelize due to
+signiﬁcant impact of hardware and environment on overall runtime. Thus  instead of runtime  we use
+the amount of work measured as the number of basic operations performed by the solver required to
+solve a formula (e.g.  implemented via the rlimit counter in Z3).
+
+Challenges To solve the problem of learning SMT strategies  one has to address two challenges:
+• Interpretability. We are interested in learning a model that is not only efﬁcient at solving
+a given set of formulas but also expressible as programs in the Strategy language. This is
+important as the learned strategies can then be directly used an input to existing solvers.
+
+• No prior domain knowledge. Our learning does not assume any prior knowledge about
+the dataset F and which strategies work best in general – initially the solution to all the
+formulas in the dataset is unknown  no existing strategies are used to boostrap the learning
+(not even the default strategies already written by the SMT solver developers) and we do
+not rely on any heuristics (and their combination) that may be useful in solving formulas
+from F. Indeed  this represents the most challenging setting for learning.
+
+Our approach The key idea behind learning a program qbest ∈ Strategy efﬁciently is to take
+advantage of the fact that each program q can be decomposed into a set of smaller branch-free
+programs q1 ... k  each qi corresponding to one execution path of q. This is possible because programs
+in the Stategy language do not contain state (all state is implicitly captured in the formula being
+solved). As a result  in our approach we learn a program qbest ∈ Strategy via a two step process:
+• Learn candidate strategies. First  we learn a policy which ﬁnds a set of candidate strategies
+consisting of only sequences of tactics where each strategy performs well on a different
+subset of the dataset F. This allows us to phrase the learning problem as a tree search over
+tactics for which state-of-the-art models can be used. This step is described in Section 4.1.
+• Synthesize a combined strategy. Then  given a set of candidate strategies  we combine these
+into a single best strategy qbest by synthesizing control structures such as branches and loops
+as supported by the Strategy language. This step is described in Section 4.2.
+
+4.1 Learning candidate strategies
+
+We phrase the problem of learning candidate strategies as a tree search problem. We start from an
+initial state s0 and at each timestep t we choose an action at that expands the tree by exploring
+a single edge. In our setting  a state corresponds to a tuple consisting of an SMT formula and
+a strategy used to compute the formula. An action is described by a tactic and its parameters (if any)
+a ∈ Tactics × Params. Applying an action transforms the formula into another one. Terminal
+states are those that decide the initial formula f  that is  f was reduced to a form that is either trivially
+satisﬁable or unsatisﬁable. Further  for practical reasons  terminal states also include those to which
+applying an action (tactic) leads to a timeout.
+
+4
+
+Strategy
+
+[simplify  sat  PAD  . . . ]
+
+Embedding
+
+Z3 Probes
+
+[num_consts  is_pb  . . . ]
+
+eval. on f
+
+[1733  0  . . . ]
+
+Formula Representation
+BOW | Skip-Gram | AST
+
+eval. on f
+
+Embedding
+
+R
+e
+L
+U
+
+R
+e
+L
+U
+
+R
+e
+L
+U
+
+S
+o
+f
+t
+
+M
+a
+x
+
+S
+i
+g
+m
+o
+i
+d
+
+Tactics
+0.70 : pb2bv
+0.15 : smt
+0.01 : sat
+. . .
+Params
+0.20 : flat
+0.75 : som
+0.95 : factor
+. . .
+
+Figure 1: Architecture of the neural network model which predicts next tactic and arguments.
+
+A terminal state deﬁnes a strategy q (i.e.  a sequence of tactics starting from the tree root) with
+an associated cost(f  q) (as deﬁned in Equation 1) that we aim to minimize. During the search
+we keep a priority queue of tuples (s  a  p) consisting of a state  possible action and its associated
+probability  initialized with (s0    1). At each step  we remove the tuple with highest probability
+from the queue  apply its action to obtain a new state si and update the priority queue with new tuples
+(si  a  p · π(a | si)) for all actions a ∈ Tactics × Params capturing the possible transitions from si.
+Our goal is to learn a policy  denoted as π(a | s)  that represents a probability distribution of actions
+conditioned on a state s. Ideally  the learned distribution should be such that selecting the most likely
+action at that state minimizes the expected cost. In what follows we ﬁrst describe the models used to
+represent the policy π considered in our work and then describe how the models are trained  including
+how to construct a suitable training dataset.
+
+Bilinear model Based on matrix factor models used in unsupervised learning of word embeddings
+[11  38] as well as supervised text classiﬁcation [26] we deﬁne a bilinear model as follows:
+
+π(a | s) = σ(U V φ(s  a))
+
+where φ(s  a) is a bag of features computed for action a taken in state s  U ∈ Rk×h and V ∈ Rh×|V |
+are the learnable weight matrices  V is the input vocabulary and σ is softmax computing the probability
+distribution over output classes (in our case actions to be taken in a given state s). As the set of all
+possible actions is too large to consider  we randomly generate a subset of parameters for each tactic
+before training starts  thus obtaining the overall set of actions S ⊆ Tactics × Params. We deﬁne
+φ(s  a) to be all n-grams constructed from the strategy of state s. For example  for strategy a1; a2; a3 
+the extracted n-grams (features) are described by the vector: (cid:104)a1  a2  a3  a1a2  a2a3  a1a2a3(cid:105). Then 
+the vocabulary set V is simply the collection of all possible n-grams formed over S.
+
+Neural network Our second model is based on a neural network and improves over the bilinear
+model in two key aspects – it considers a richer state when making the predictions and predicts tactics
+as well as their corresponding parameters. The architecture of the neural network model is illustrated
+in Fig. 1 and uses two inputs: (i) the strategy in the current state (as in the bilinear model)  and (ii)
+the formula f to be solved in the current state. The strategy is encoded by ﬁrst padding it to be
+of ﬁxed size  concatenating the embedding of each action in the strategy into a single vector and
+ﬁnally feeding the resulting vector into a fully-connected layer. We encode the input formula in two
+ways: ﬁrst  by computing a set of formula measures such as the number of expressions and constants 
+and second  by learning a representation of the formula itself. The formula measures are computed
+using probes supported by Z3 and are a subset of the possibilities one could deﬁne. For the learned
+representation of the formula we experimented with three different approaches:
+
+language. We obtain its bag-of-words and use it as the formula embedding.
+
+• Bag-of-words (BOW): The formula is treated as a sequence of tokens from the SMT-LIB
+• Abstract Syntax Tree (AST): From the formulas’s AST  we extract all subtrees of depth at
+most two. The bag-of-words over such subtrees is used as the formula embedding. Note
+that subtrees which appear in less than 5% of formulas in F are discarded.
+• Skip-gram: Each formula in the dataset is treated as a sequence of tokens over which
+we learn a skip-gram model. We deﬁne embedding of the formula as the average of all
+embeddings of its tokens.
+
+5
+
+Algorithm 1: Iterative algorithm used to train policy π
+Data: Formulas F  Number of iterations N  Number of formulas to sample K  Exploration
+Result: Trained policy π  Explored strategies Q
+1 D ← ∅; Q ← ∅; π ← policy initialization
+2 for i = 1 to N do
+3
+4
+5
+6
+
+ˆπ ← βiπ + (1 − βi)πexplore
+Q ← Q ∪ Top K most likely strategies for each formula in F according to ˆπ
+D ← D ∪ Extract training dataset from strategies Q
+π ← Retrain model π on D
+
+rates β  Exploration policy πexplore (e.g.  random policy)
+
+(cid:46) policy ˆπ explores with probability (1 − βi)
+
+The network output consists of two parts – a probability distribution over tactics to apply next and an
+assignment to each tactic parameter. The possible tactic parameters are captured by the set Param
+from Fig. 1. We provide a full list of tactics and their parameters in the extended version of our paper.
+To compute arguments for the tactic parameters  the network introduces a separate output layer for
+each parameter type. The layer performs regression and outputs normalized values in the range [0  1].
+For boolean parameters  values 1 and 0 correspond to true and false  respectively. For integer
+parameters  the output of the network is mapped and discretized into the range of allowed values.
+
+Model training At a high level  our training is based on the DAgger method [40] and is shown in
+Algorithm 1. The training starts with a randomly initialized policy used to sample the top K most
+likely strategies for each formula in the training dataset F (line 4). Selected strategies are evaluated
+and used to create a training dataset (line 5  described below) on which the policy π is retrained
+(line 6). As the model is initially untrained the strategies are sampled at random and only as the
+training progresses the policy will learn to select strategies that perform well on formulas from F. As
+an alternative  one could pre-train the initial policy using strategies supplied by an expert in which
+case the algorithm would correspond to imitation learning. However  in our work we assume such
+expert strategies are not available and therefore we start with a model that is initialized randomly.
+Building the training dataset Each sample in our training dataset D = {(cid:104)(ti  pi)  si(cid:105)}M
+i=1 for the
+neural network consists of a state and its associated training label. Here  the label is a tuple consisting
+of a probability distribution over tactics t ∈ R|Tactics| and the values of all tactic parameters
+p ∈ R|Param|. The intuition behind this choice is that for a state s  the vector t encodes the likelihood
+that a given tactic is fast at solving the formula whereas p contains the best parameter values found
+so far during training. Generating the dataset in this way encodes the preference for strategies that
+are most efﬁcient in contrast to ﬁnding any strategy that solves the input formula. To train the neural
+network model using such a dataset  the loss is constructed as a weighted average of the cross-entropy
+loss for tactic prediction and mean-squared-error for parameter prediction.
+We build the dataset as follows. First  we evaluate each strategy in Q on the formula for which it
+was generated and keep only those that succeeded in deciding the formula. Second  let us denote
+with r(t  si) the best runtime (or timeout) achieved from state si by ﬁrst applying tactic t  with
+rbest(si) the best runtime achieved from state si  and with v(p  si) the value assigned to parameter p
+in tactics with the best runtime from state si. We obtain r  rbest and v by considering all the states
+and actions performed when evaluating the strategies in Q. Then  for each non-terminal state si that
+eventually succeeded we create one training sample (cid:104)(σ( ˜ti)  pi)  si(cid:105) where ˜ti = [1/r(t  si)]t∈Tactics 
+σ normalizes ˜ti to a valid probability distribution and pi = [v(p  si)]p∈Param. To generate the
+training dataset for bilinear model we follow a similar procedure with the exception that we use
+˜ti = 1[rbest(si) = r(t  si)]t∈Tactics which assigns probability 1 to the best tactic and 0 to others.
+
+Pruning via equivalence classes A challenge in training the models presented above is that whether
+a strategy solves the formula is known only at terminal states. This is especially problematic for
+datasets where majority of the effort is spent on ﬁnding any successful strategy. To address this
+issue we take advantage of the fact that some information can be learned also from partial strategies
+– namely their current runtime and their transformed formula. This allows us to check if multiple
+transformed formulas are equivalent (we consider two formulas equivalent if their abstract syntax
+tress are identical) and keep only the one which was fastest to reach (and prune the others).
+
+6
+
+a1
+
+a2
+
+a4
+
+a3
+
+a5
+
+tree representation of q1 and q2
+
+q1 = a1; a2; a3
+q2 = a1; a4; a5
+
+f1
+10
+30
+
+f2
+100
+
+TIMEOUT
+
+f3
+100
+20
+
+f1
+200
+
+f2
+250
+
+f3
+30
+
+num_expr
+
+H(F) = −(cid:88)
+
+if true then a2 else _
+if num_expr > 100 then a2 else a4
+
+formulas f1  f2  f3 and their associated costs
+branch with cost 0.276 = (−1/3 · log(1/3) − 2/3 · log(2/3)) + 0
+branch with cost 0.2 = −2/3 · log(1/2) + 1/3 · 0
+
+formula measure
+
+Figure 2: Illustration of decision tree representation of strategies  scored formulas and branches.
+
+4.2 Synthesizing a combined  interpretable strategy
+
+The policy π learned in Section 4.1 can be used to speed-up SMT solving as follows: invoke the
+solver with the current formula f and the action a0 selected by π  obtain a new intermediate formula
+f1 from the solver  then again invoke the solver from scratch with f1 and a new action a1  obtaining
+another intermediate formula f2  and so on. Unfortunately  even if the ﬁnal formula fk is solved (e.g. 
+determined to be SAT)  we would have lost the connection with the original formula f as at each
+step we are making a new  fresh invocation of the SMT solver. This is problematic for tasks (e.g. 
+planning) that require more information from SMT solvers  beyond satisﬁability of f  for instance 
+the model itself. To address this challenge without changing the internals of the SMT solver  we
+propose to synthesize an interpretable policy qbest that follows π and can be directly expressed in the
+Strategy language from Fig. 1 (and thus be given as input to the SMT solver).
+Recall from Fig. 1 that the Strategy language deﬁnes two types of statements that can be used to
+combine programs: if-then-else and or-else. However  notice that the or-else statement is in
+fact a special version of the if statement with a condition that checks if a given tactic terminates
+within c milliseconds. As a result  we can reduce the problem of synthesizing programs in the
+Strategy language to the problem of synthesizing branches with predicates over a set of candidate
+strategies. We can obtain the set of candidate strategies by either evaluating π over the training
+formulas or by extracting successful strategies from the set Q explored during policy learning. Next 
+we discuss how to synthesize qbest.
+
+Decision tree learning To synthesize branches with predicates  we adapt techniques based on
+decision tree learning. Consider the tree illustrated in Fig. 2 (top left) with the same structure as
+used during search (i.e.  edges denoting actions and nodes denoting states) but formed from the
+two candidate strategies q1 and q2. Each SMT formula is evaluated by taking a path in the tree and
+applying all the corresponding actions. Intuitively  at each node with more than one outgoing edge
+a decision needs to be taken to determine which path to take. To encode such decisions  our goal is to
+introduce one or more branches at each such node (denoted as orange square in Fig. 2).
+More formally  let Q = {q1  . . .   qn} be a set of candidate strategies  F be our dataset of formulas
+and b ::= if p then qtrue else qfalse a branch that partitions F into two parts – Ftrue are formulas
+on which predicate p evaluates to true and Ffalse for the rest. We deﬁne a notion of multi-label
+entropy of a dataset of formulas  denoted as H(F) [14]:
+
+q∈Q p(q) log(p(q)) + (1 − p(q)) log(1 − p(q))
+
+where p(q) denotes the ratio of formulas solved by strategy q in F. The goal of synthesis is then to
+discover branches that partition F into smaller sets  each of which has small entropy (i.e. either none
+or all formulas are solved). Using the entropy  we deﬁne a cost associated with a branch b as:
+
+cost(b Ftrue Ffalse) = (|Ftrue|/|F|)H(Ftrue) + (|Ffalse|/|F|)H(Ffalse)
+
+That is  branch cost is a weighted sum of entropies in each of the resulting branches. With this scoring
+function we build the decision tree in a top-down fashion – for each node with multiple outgoing
+edges we recursively synthesize predicates that minimize the cost. If dataset size for some node is
+below a certain threshold we greedily select the strategy which can solve the most formulas  breaking
+ties using runtimes. To express branches  we consider the following types of predicates: (i) true
+which allows expressing a default choice  (ii) Probes with arithmetic expression as deﬁned in Fig. 1 
+and (iii) try s for c which allows checking whether tactics terminate within c ms.
+
+7
+
+Models Comparison
+
+Effect of State Representation
+
+Figure 3: Comparison of proposed models and baselines for learning SMT solver strategies. Each line
+(higher is better) denotes the quality of the best learned strategy among top x most likely strategies
+found by a given model (x axis) proportional to the best known strategy overall (y axis).
+
+5 Experiments
+
+We implemented our method in a system called fastSMT and evaluated its effectiveness on 5 different
+datasets – AProVE [19  5]  hycomp [7]  core [6]  leipzig [8] and Sage2 [9  21]. These contain
+formulas of varying complexity across 3 logics QF_NRA  QF_BV and QF_NIA. The formulas have on
+average 336  35  228  153  345 assertions  929  10690  1672  886  1887 expressions and 118  49 
+46  20  79 variables for leipzig  core  hycomp  AProVE and Sage2 benchmarks  respectively and
+require up to 60 MB for each formula to be stored in the SMT2-lib format. All datasets are part
+of the ofﬁcial SMT-LIB benchmarks [10] and encode formulas from both academic and industrial
+tools (i.e. Sage and AProVE). For all datasets we split formulas in training  validation and test set in
+predetermined ratios. To train our models we use 10 iterations of Algorithm 1 with exponentially
+decaying exploration rate to choose between policy and random action. We train the bilinear model
+using FastText [26] for 5 epochs with learning rate 0.1 and 20 hidden units. We implemented the
+neural network model in PyTorch [37] and trained using a learning rate 10−4  mini batch size 32 
+Adam optimizer [31] with Xavier initialization [20] and early stopping. All our datasets  experiments 
+implementation and extended version of this paper are available at http://fastsmt.ethz.ch/.
+
+Search models comparison To compare different learned models we used them to obtain the 100
+most likely strategies for each formula in our test dataset. The results are shown in Fig. 3 (left) and
+additionally include three baseline models that perform random search  breadth-ﬁrst search and search
+using an evolutionary algorithm. The x-axis shows the number of most likely strategies sampled
+from each model and y-axis their runtime proportional to runtime of the best known strategy (i.e. 
+best strategy from top 100 strategies across all models). Here  score one denotes that the best known
+strategy was found whereas score zero denotes that no strategy was found that solves the formula.
+Even though baselines perform poorly  they are already able to ﬁnd simpler strategies that can solve
+some of the formulas. Note that in our experiment the evolutionary algorithm performed similarly to
+a random model as it got easily stuck in local minima without enough exploration. Overall  the best
+model is the neural network which is also most complex and considers the richest set of features.
+
+Effect of state representation In Fig. 3 (right) we evaluate the effect of instantiating the neural
+network model with a different set of input features capturing the current state. For our task  the
+representation at the right level of complexity is bag-of-words – if the formula representation is
+ﬂattened using pre-trained embeddings it loses the relevant information and with more complex AST
+features the model suffers due to data sparsity. Further  we note that for our task the most important
+features are those capturing sequences of tactics applied so far  which is illustrated by the strong
+performance of Strategy only model in Fig. 3 (right).
+
+Comparison to state-of-the-art SMT solvers We evaluate the effectiveness of the learned strate-
+gies compared to the hand-crafted strategies in Z3 4.6.2 on two metrics – number of solved formulas
+and runtime. Unless stated otherwise  we use time limit of 10 seconds allocated for solving each
+formula and instead of runtime  we use the amount of executed basic operations (using rlimit
+counter in Z3) as a deterministic and machine independent measure of the work required to solve the
+formula. We include additional experiments with runtime in the extended version of the paper.
+
+8
+
+020406080100Numberofsampledstrategies0.00.20.40.60.81.0PerformanceEvolutionaryRandomBilinearBFSNN01020304050Numberofsampledstrategies0.00.20.40.60.81.0PerformanceStrategy+Probes+BOWStrategy+Probes+Skip-gramStrategy+Probes+ASTStrategy+ProbesStrategyTable 2: Comparison of best strategy found by any of our models (Section 4.1) against Z3.
+
+Formulas solved
+
+Speedup percentile
+
+Only Z3 Only Learned None
+
+Both
+57
+332
+270
+273
+283
+68.3%
+
+leipzig
+Sage2
+core
+hycomp
+AProVE
+Total
+
+3
+2
+0
+0
+0
+
+0
+246
+0
+34
+18
+
+0.3%
+
+16.8%
+
+50th
+
+90th
+10th
+5.8× 60.7× 191.5×
+8
+35.5×
+1.2× 2.7×
+220
+1.2× 1.3×
+1.9×
+0
+1.0× 1.8×
+4.0×
+18
+3.9× 87.8× 1314.0×
+14
+14.6% 2.6× 30.9× 309.4×
+
+Table 3: Comparison of the combined strategy synthesized by our approach (Section 4.2) against Z3.
+
+Formulas solved
+
+Speedup percentile
+
+Only Z3 Only Learned None
+
+Both
+55
+2488
+270
+1547
+1365
+54.6%
+
+leipzig
+Sage2
+core
+hycomp
+AProVE
+Total
+
+5
+200
+0
+93
+76
+3.6%
+
+1
+705
+0
+112
+112
+8.9%
+
+7
+
+3051
+
+10th
+90th
+50th
+21.7×
+1.4× 9.9×
+3.1×
+0.8× 1.2×
+1.2× 1.3×
+1.8×
+0
+2.3×
+0.4× 1.1×
+230
+3.2× 65.1× 860.8×
+159
+32.9% 1.4× 15.7× 178.0×
+
+Table 2 shows the number of formulas solved by Z3 compared to the best strategy found by any of
+our methods. We also measure speedups of our strategies over Z3 on all formulas which were solved
+by both methods. For example  the 90th percentile in the AProVE benchmark denotes that for 90% of
+formulas the speedup is at least 3.9×. The learned strategies signiﬁcantly outperform Z3 across all
+benchmarks – solving 17% more formulas  often with up to 3 orders of magnitude speedups and with
+only 5 formulas not solved by any of the learned strategies even though they can be solved by Z3.
+This shows that  for all our benchmarks  the strategies found during training generalize well to other
+formulas from the same dataset.
+Table 3 shows performance of the single combined strategy synthesized as described in Section 4.2.
+Here  the result of synthesis is a program in the Strategy language that is used as input to Z3
+together with the formula to solve. Naturally  as the Strategy language has limited expressiveness
+(i.e.  restricting the kind of expressions that can be used as branch predicates) the performance
+improvement is smaller compared to best strategy found by any of our methods for each formula as
+shown in Table 2. However  more importantly  the improvement over the default Z3 strategy is still
+signiﬁcant allowing us to solve 8.9% more formulas compared to Z3.
+
+Generalization to harder to solve formulas So far  in all our experiments the time limit for both
+training and evaluation was set to 10 seconds. To evaluate how our learned strategies generalize to
+harder to solve formulas we kept the 10 seconds time limit for training but used 600 seconds time
+limit for the evaluation. Then  our learned strategies can solve 97.7% formulas (up from 85.1%)
+across all the benchmarks with even slightly better speedups than those shown in Table 2.
+
+6 Conclusion
+
+We presented a new approach for solving SMT formulas based on a combination of training a policy
+that learns to discover strategies that solve formulas efﬁciently and a synthesizer that produces
+interpretable strategies based on this model. The synthesized strategies are represented as programs
+with branches and are directly usable by state-of-the-art SMT solvers to guide its search. This avoids
+the need to evaluate the learned policy at inference time and enables close integration with existing
+SMT solvers. Our technique is practically effective – it solves 17% more formulas over a range of
+benchmarks and achieves up to 100× runtime improvements over state-of-the-art SMT solver.
+
+9
+
+References
+[1] A. A. Alemi  F. Chollet  N. Een  G. Irving  C. Szegedy  and J. Urban. DeepMath - Deep
+Sequence Models for Premise Selection. In Proceedings of the 30th International Conference
+on Neural Information Processing Systems  NIPS’16  pages 2243–2251  2016.
+
+[2] R. Amadini  M. Gabbrielli  and J. Mauro. SUNNY: a Lazy Portfolio Approach for Constraint
+
+Solving. Theory and Practice of Logic Programming  14(4-5):509–524  2014.
+
+[3] C. Ansótegui  M. Sellmann  and K. Tierney. A Gender-Based Genetic Algorithm for the
+Automatic Conﬁguration of Algorithms. In Principles and Practice of Constraint Programming
+- CP 2009  pages 142–157  2009.
+
+[4] C. Barrett  C. L. Conway  M. Deters  L. Hadarean  D. Jovanovi’c  T. King  A. Reynolds  and
+C. Tinelli. CVC4. In Proceedings of the 23rd International Conference on Computer Aided
+Veriﬁcation (CAV ’11)  volume 6806 of Lecture Notes in Computer Science  pages 171–177 
+July 2011.
+
+[5] C. Barrett  P. Fontaine  and C. Tinelli. AProVE Benchmarks. https://clc-gitlab.cs.
+
+uiowa.edu:2443/SMT-LIB-benchmarks/QF_NIA/tree/master/AProVE  2016.
+
+[6] C. Barrett  P. Fontaine  and C. Tinelli. core Benchmarks. https://clc-gitlab.cs.uiowa.
+
+edu:2443/SMT-LIB-benchmarks/QF_BV/tree/master/bruttomesso/core  2016.
+
+[7] C. Barrett  P. Fontaine  and C. Tinelli.
+
+hycomp Benchmarks. https://clc-gitlab.
+
+cs.uiowa.edu:2443/SMT-LIB-benchmarks/QF_NRA/tree/master/hycomp  2016.
+
+[8] C. Barrett  P. Fontaine  and C. Tinelli.
+
+leipzig Benchmarks. https://clc-gitlab.cs
+
+.uiowa.edu:2443/SMT-LIB-benchmarks/QF_NIA/tree/master/leipzig  2016.
+
+[9] C. Barrett  P. Fontaine  and C. Tinelli. Sage2 Benchmarks. https://clc-gitlab.cs.
+
+uiowa.edu:2443/SMT-LIB-benchmarks/Sage2  2016.
+
+[10] C. Barrett  P. Fontaine  and C. Tinelli. The Satisﬁability Modulo Theories Library (SMT-LIB).
+
+www.SMT-LIB.org  2016.
+
+[11] P. Bojanowski  E. Grave  A. Joulin  and T. Mikolov. Enriching Word Vectors with Subword
+Information. Transactions of the Association for Computational Linguistics  5:135–146  2017.
+
+[12] D. Bridge  E. O’Mahony  and B. O’Sullivan. Case-Based Reasoning for Autonomous Constraint
+
+Solving. In Autonomous Search  pages 73–95. 2012.
+
+[13] A. Cimatti  A. Griggio  B. Schaafsma  and R. Sebastiani. The MathSAT5 SMT Solver. In
+
+Proceedings of TACAS  volume 7795 of LNCS  2013.
+
+[14] A. Clare and R. D. King. Knowledge discovery in multi-label phenotype data. In European
+
+Conference on Principles of Data Mining and Knowledge Discovery  pages 42–53  2001.
+
+[15] L. De Moura and N. Bjørner. Z3: An Efﬁcient SMT Solver. In Proceedings of the Theory
+and Practice of Software  14th International Conference on Tools and Algorithms for the
+Construction and Analysis of Systems  TACAS’08/ETAPS’08  pages 337–340  2008.
+
+[16] L. De Moura and N. Bjørner. Satisﬁability Modulo Theories: Introduction and Applications.
+
+Commun. ACM  54(9):69–77  Sept. 2011.
+
+[17] L. de Moura and G. O. Passmore. The Strategy Challenge in SMT Solving. In Automated
+
+Reasoning and Mathematics  pages 15–44. 2013.
+
+[18] B. Dutertre. Yices 2.2. In Computer Aided Veriﬁcation  pages 737–744  2014.
+
+[19] J. Giesl  C. Aschermann  M. Brockschmidt  F. Emmes  F. Frohn  C. Fuhs  J. Hensel  C. Otto 
+M. Plücker  P. Schneider-Kamp  T. Ströder  S. Swiderski  and R. Thiemann. Analyzing Program
+Termination and Complexity Automatically with AProVE. Journal of Automated Reasoning 
+58(1):3–31  2017.
+
+10
+
+[20] X. Glorot and Y. Bengio. Understanding the difﬁculty of training deep feedforward neural
+networks. In In Proceedings of the International Conference on Artiﬁcial Intelligence and
+Statistics (AISTATS’10). Society for Artiﬁcial Intelligence and Statistics  2010.
+
+[21] P. Godefroid  M. Y. Levin  and D. Molnar. Automated Whitebox Fuzz Testing. 2008.
+
+[22] B. Hurley  L. Kotthoff  Y. Malitsky  and B. O’Sullivan. Proteus: A Hierarchical Portfolio of
+Solvers and Transformations. In Integration of AI and OR Techniques in Constraint Program-
+ming  pages 301–317  2014.
+
+[23] F. Hutter  H. H. Hoos  and K. Leyton-Brown. Sequential Model-based Optimization for General
+Algorithm Conﬁguration. In Proceedings of the 5th International Conference on Learning and
+Intelligent Optimization  LION’05  pages 507–523  2011.
+
+[24] F. Hutter  H. H. Hoos  K. Leyton-Brown  and K. Murphy. Time-Bounded Sequential Parameter
+
+Optimization. In Learning and Intelligent Optimization  pages 281–298  2010.
+
+[25] F. Hutter  H. H. Hoos  K. Leyton-Brown  and T. Stützle. ParamILS: An Automatic Algorithm
+
+Conﬁguration Framework. J. Artif. Int. Res.  36(1):267–306  2009.
+
+[26] A. Joulin  E. Grave  P. Bojanowski  and T. Mikolov. Bag of Tricks for Efﬁcient Text Classiﬁca-
+tion. In Proceedings of the 15th Conference of the European Chapter of the Association for
+Computational Linguistics: Volume 2  Short Papers  pages 427–431  April 2017.
+
+[27] S. Kadioglu  Y. Malitsky  M. Sellmann  and K. Tierney. ISAC –Instance-Speciﬁc Algorithm Con-
+ﬁguration. In Proceedings of the 2010 Conference on ECAI 2010: 19th European Conference
+on Artiﬁcial Intelligence  pages 751–756  2010.
+
+[28] G. Katz  C. Barrett  D. L. Dill  K. Julian  and M. J. Kochenderfer. Reluplex: An Efﬁcient SMT
+Solver for Verifying Deep Neural Networks. In Computer Aided Veriﬁcation  pages 97–117 
+2017.
+
+[29] E. B. Khalil  P. L. Bodic  L. Song  G. Nemhauser  and B. Dilkina. Learning to Branch in
+Mixed Integer Programming. In Proceedings of the Thirtieth AAAI Conference on Artiﬁcial
+Intelligence  AAAI’16  pages 724–731  2016.
+
+[30] A. R. KhudaBukhsh  L. Xu  H. H. Hoos  and K. Leyton-Brown. SATenstein: Automatically
+Building Local Search SAT Solvers from Components. In Proceedings of the 21st International
+Jont Conference on Artiﬁcal Intelligence  IJCAI’09  pages 517–524  2009.
+
+[31] D. P. Kingma and J. Ba. Adam: A Method for Stochastic Optimization. CoRR  abs/1412.6980 
+
+2014.
+
+[32] M. G. Lagoudakis and M. L. Littman. Learning to Select Branching Rules in the DPLL
+Procedure for Satisﬁability. Electronic Notes in Discrete Mathematics  9:344 – 359  2001. LICS
+2001 Workshop on Theory and Applications of Satisﬁability Testing (SAT 2001).
+
+[33] S. M. Loos  G. Irving  C. Szegedy  and C. Kaliszyk. Deep Network Guided Proof Search. In
+
+LPAR  volume 46 of EPiC Series in Computing  pages 85–105  2017.
+
+[34] M. Loth  M. Sebag  Y. Hamadi  and M. Schoenauer. Bandit-based Search for Constraint
+Programming. In Proceedings of the 19th International Conference on Principles and Practice
+of Constraint Programming  CP’13  pages 464–480  2013.
+
+[35] A. Niemetz  M. Preiner  and A. Biere. Boolector 2.0 system description. Journal on Satisﬁability 
+
+Boolean Modeling and Computation  9:53–58  2014 (published 2015).
+
+[36] E. Nudelman  K. Leyton-Brown  H. H. Hoos  A. Devkar  and Y. Shoham. Understanding
+Random SAT: Beyond the Clauses-to-variables Ratio. In Proceedings of the 10th International
+Conference on Principles and Practice of Constraint Programming  CP’04  pages 438–452 
+2004.
+
+[37] A. Paszke  S. Gross  S. Chintala  G. Chanan  E. Yang  Z. DeVito  Z. Lin  A. Desmaison 
+
+L. Antiga  and A. Lerer. Automatic differentiation in PyTorch. 2017.
+
+11
+
+[38] J. Pennington  R. Socher  and C. Manning. Glove: Global Vectors for Word Representation. In
+Proceedings of the 2014 Conference on Empirical Methods in Natural Language Processing
+(EMNLP)  pages 1532–1543  2014.
+
+[39] N. G. Ramírez  Y. Hamadi  E. Monfroy  and F. Saubion. Evolving SMT Strategies. In IEEE
+28th International Conference on Tools with Artiﬁcial Intelligence (ICTAI)  pages 247–254 
+2016.
+
+[40] S. Ross  G. Gordon  and D. Bagnell. A reduction of imitation learning and structured prediction
+to no-regret online learning. In Proceedings of the fourteenth international conference on
+artiﬁcial intelligence and statistics  pages 627–635  2011.
+
+[41] H. Samulowitz and R. Memisevic. Learning to Solve QBF. In Proceedings of the 22nd National
+
+Conference on Artiﬁcial Intelligence - Volume 1  AAAI’07  pages 255–260  2007.
+
+[42] P. Somol  P. Pudil  and J. Kittler. Fast Branch & Bound Algorithms for Optimal Feature
+
+Selection. IEEE Trans. Pattern Anal. Mach. Intell.  26(7):900–912  July 2004.
+
+[43] M. Wang  Y. Tang  J. Wang  and J. Deng. Premise Selection for Theorem Proving by Deep Graph
+Embedding. In Advances in Neural Information Processing Systems 30  pages 2786–2796.
+2017.
+
+[44] L. Xu  F. Hutter  H. H. Hoos  and K. Leyton-Brown. SATzilla: Portfolio-based Algorithm
+
+Selection for SAT. J. Artif. Int. Res.  32(1):565–606  June 2008.
+
+12
+
+,Mislav Balunovic
+Pavol Bielik
+Martin Vechev

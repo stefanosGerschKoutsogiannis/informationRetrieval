@@ -1,0 +1,875 @@
+2018,Lipschitz regularity of deep neural networks: analysis and efficient estimation,Deep neural networks are notorious for being sensitive to small well-chosen perturbations  and estimating the regularity of such architectures is of utmost importance for safe and robust practical applications.  In this paper  we investigate one of the key characteristics to assess the regularity of such methods: the Lipschitz constant of deep learning architectures.  First  we show that  even for two layer neural networks  the exact computation of this quantity is NP-hard and state-of-art methods may significantly overestimate it. Then  we both extend and improve previous estimation methods by providing AutoLip  the first generic algorithm for upper bounding the Lipschitz constant of any automatically differentiable function.  We provide a power method algorithm working with automatic differentiation  allowing efficient computations even on large convolutions. Second  for sequential neural networks  we propose an improved algorithm named SeqLip that takes advantage of the linear computation graph to split the computation per pair of consecutive layers. Third we propose heuristics on SeqLip in order to tackle very large networks.  Our experiments show that SeqLip can significantly improve on the existing upper bounds.  Finally  we provide an implementation of AutoLip in the PyTorch environment that may be used to better estimate the robustness of a given neural network to small perturbations or regularize it using more precise Lipschitz estimations.  These results also hint at the difficulty to estimate the Lipschitz constant of deep networks.,Lipschitz regularity of deep neural networks:
+
+analysis and efﬁcient estimation
+
+Kevin Scaman
+
+Huawei Noah’s Ark Lab
+
+kevin.scaman@huawei.com
+
+Aladin Virmaux
+
+Huawei Noah’s Ark Lab
+
+aladin.virmaux@huawei.com
+
+Abstract
+
+Deep neural networks are notorious for being sensitive to small well-chosen per-
+turbations  and estimating the regularity of such architectures is of utmost impor-
+tance for safe and robust practical applications. In this paper  we investigate one
+of the key characteristics to assess the regularity of such methods: the Lipschitz
+constant of deep learning architectures. First  we show that  even for two layer
+neural networks  the exact computation of this quantity is NP-hard and state-of-
+art methods may signiﬁcantly overestimate it. Then  we both extend and improve
+previous estimation methods by providing AutoLip  the ﬁrst generic algorithm for
+upper bounding the Lipschitz constant of any automatically differentiable func-
+tion. We provide a power method algorithm working with automatic differen-
+tiation  allowing efﬁcient computations even on large convolutions. Second  for
+sequential neural networks  we propose an improved algorithm named SeqLip that
+takes advantage of the linear computation graph to split the computation per pair
+of consecutive layers. Third we propose heuristics on SeqLip in order to tackle
+very large networks. Our experiments show that SeqLip can signiﬁcantly improve
+on the existing upper bounds. Finally  we provide an implementation of AutoLip
+in the PyTorch environment that may be used to better estimate the robustness of
+a given neural network to small perturbations or regularize it using more precise
+Lipschitz estimations.
+
+1
+
+Introduction
+
+Deep neural networks made a striking entree in machine learning and quickly became state-of-the-
+art algorithms in many tasks such as computer vision [1  2  3  4]  speech recognition and generation
+[5  6] or natural language processing [7  8].
+However  deep neural networks are known for being very sensitive to their input  and adversarial
+examples provide a good illustration of their lack of robustness [9  10]. Indeed  a well-chosen small
+perturbation of the input image can mislead a neural network and signiﬁcantly decrease its classi-
+ﬁcation accuracy. One metric to assess the robustness of neural networks to small perturbations is
+the Lipschitz constant (see Deﬁnition 1)  which upper bounds the relationship between input per-
+turbation and output variation for a given distance. For generative models  the recent Wasserstein
+GAN [11] improved the training stability of GANs by reformulating the optimization problem as a
+minimization of the Wasserstein distance between the real and generated distributions [12]. How-
+ever  this method relies on an efﬁcient way of constraining the Lipschitz constant of the critic  which
+was only partially addressed in the original paper  and the object of several follow-up works [13  14].
+Recently  Lipschitz continuity was used in order to improve the state-of-the-art in several deep learn-
+ing topics: (1) for robust learning  avoiding adversarial attacks was achieved in [15] by constraining
+local Lipschitz constants in neural networks. (2) For generative models  using spectral normaliza-
+tion on each layer allowed [13] to successfully train a GAN on ILRSVRC2012 dataset. (3) In deep
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+learning theory  novel generalization bounds critically rely on the Lipschitz constant of the neural
+network [16  17  18].
+To the best of our knowledge  the ﬁrst upper-bound on the Lipschitz constant of a neural network was
+described in [9  Section 4.3]  as the product of the spectral norms of linear layers (a special case of
+our generic algorithm  see Proposition 1). More recently  the Lipschitz constant of scatter networks
+was analyzed in [19]. Unfortunately  this analysis does not extend to more general architectures.
+Our aim in this paper is to provide a rigorous and practice-oriented study on how Lipschitz constants
+of neural networks and automatically differentiable functions may be estimated. We ﬁrst precisely
+deﬁne the notion of Lipschitz constant of vector valued functions in Section 2  and then show in Sec-
+tion 3 that its estimation is  even for 2-layer Multi-Layer-Perceptrons (MLP)  NP-hard. In Section 4 
+we both extend and improve previous estimation methods by providing AutoLip  the ﬁrst generic
+algorithm for upper bounding the Lipschitz constant of any automatically differentiable function.
+Moreover  we show how the Lipschitz constant of most neural network layers may be computed efﬁ-
+ciently using automatic differentiation algorithms [20] and libraries such as PyTorch [21]. Notably 
+we extend the power method to convolution layers using automatic differentiation to speed-up the
+computations. In Section 6  we provide a theoretical analysis of AutoLip in the case of sequential
+neural networks  and show that the upper bound may lose a multiplicative factor per activation layer 
+which may signiﬁcantly downgrade the estimation quality of AutoLip and lead to a very large and
+unrealistic upper bound. In order to prevent this  we propose an improved algorithm called SeqLip
+in the case of sequential neural networks  and show in Section 7 that SeqLip may signiﬁcantly im-
+prove on AutoLip. Finally we discuss the different algorithms on the AlexNet [1] neural network
+for computer vision using the proposed algorithms. 1
+
+2 Background and notations
+In the following  we denote as ⟨x; y⟩ and ∥x∥2 the scalar product and L2-norm of the Hilbert space
+Rn  x (cid:1) y the coordinate-wise product of x and y  and f ◦ g the composition between the functions
+f : Rk ! Rm and g : Rn ! Rk. For any differentiable function f : Rn ! Rm and any point
+x 2 Rn  we will denote as Dx f 2 Rm(cid:2)n the differential operator of f at x  also called the Jacobian
+matrix. Note that  in the case of real valued functions (i.e. m = 1)  the gradient of f is the transpose
+of the differential operator: ∇f (x) = (Dx f )
+⊤. Finally  diagn;m(x) 2 Rn(cid:2)m is the rectangular
+matrix with x 2 Rminfn;mg along the diagonal and 0 outside of it. When unambiguous  we will use
+the notation diag(x) instead of diagn;m(x). All proofs are available as supplemental material.
+Deﬁnition 1. A function f : Rn ! Rm is called Lipschitz continuous if there exists a constant L
+such that
+
+8x; y 2 Rn; ∥f (x) (cid:0) f (y)∥2 (cid:20) L∥x (cid:0) y∥2:
+
+The smallest L for which the previous inequality is true is called the Lipschitz constant of f and will
+be denoted L(f ).
+
+For locally Lipschitz functions (i.e. functions whose restriction to some neighborhood around any
+point is Lipschitz)  the Lipschitz constant may be computed using its differential operator.
+Theorem 1 (Rademacher [22  Theorem 3.1.6]). If f : Rn ! Rm is a locally Lipschitz continuous
+function  then f is differentiable almost everywhere. Moreover  if f is Lipschitz continuous  then
+
+L(f ) = sup
+x2Rn
+
+∥ Dx f∥2
+
+(1)
+
+where ∥M∥2 = supfx : ∥x∥=1g ∥M x∥2 is the operator norm of the matrix M 2 Rm(cid:2)n.
+In particular  if f is real valued (i.e. m = 1)  its Lipschitz constant is the maximum norm of its
+∥∇f (x)∥2 on its domain set. Note that the supremum in Theorem 1 is a
+gradient L(f ) = supx
+slight abuse of notations  since the differential Dx f is deﬁned almost everywhere in Rn  except for
+a set of Lebesgue measure zero.
+
+1The code used in this paper is available at https://github.com/avirmaux/lipEstimation.
+
+2
+
+3 Exact Lipschitz computation is NP-hard
+
+In this section  we show that the exact computation of the Lipschitz constant of neural networks
+is NP-hard  hence motivating the need for good approximation algorithms. More precisely  upper
+bounds are in this case more valuable as they ensure that the variation of the function  when subject
+to an input perturbation  remains small. A neural network is  in essence  a succession of linear
+operators and non-linear activation functions. The most simplistic model of neural network is the
+Multi-Layer-Perceptron (MLP) as deﬁned below.
+Deﬁnition 2 (MLP). A K-layer Multi-Layer-Perceptron fM LP : Rn ! Rm is the function
+where Tk : x 7! Mkx + bk is an afﬁne function and (cid:26)k : x 7! (gk(xi))i2J1;nkK is a non-linear
+
+fM LP (x) = TK ◦ (cid:26)K(cid:0)1 ◦ (cid:1)(cid:1)(cid:1) ◦ (cid:26)1 ◦ T1(x);
+
+activation function.
+
+Many standard deep network architectures (e.g. CNNs) follow –to some extent– the MLP structure.
+It turns out that even for 2-layer MLPs  the computation of the Lipschitz constant is NP-hard.
+Problem 1 (LIP-CST). LIP-CST is the decision problem associated to the exact computation
+of the Lipschitz constant of a 2-layer MLP with ReLU activation layers.
+
+Input: Two matrices M1 2 Rl(cid:2)n and M2 2 Rm(cid:2)l  and a constant ℓ (cid:21) 0.
+Question: Let f = M2 ◦ (cid:26)◦ M1 where (cid:26)(x) = maxf0; xg is the ReLU activation function.
+Is the Lipschitz constant L(f ) (cid:20) ℓ ?
+
+Theorem 2 shows that  even for extremely simple neural networks  exact Lipschitz computation is
+not achievable in polynomial time (assuming that P ̸= NP). The proof of Theorem 2 is available
+in the supplemental material.
+Theorem 2. Problem 1 is NP-hard.
+
+Theorem 2 relies on a reduction to the NP-hard problem of quadratic concave minimization on a
+hypercube by considering well-chosen matrices M1 and M2.
+
+4 AutoLip: a Lipschitz upper bound through automatic differentiation
+
+Efﬁcient implementations of backpropagation in modern deep learning libraries such as Py-
+Torch [21] or TensorFlow [23] rely on on the concept of automatic differentiation [24  20]. Simply
+put  automatic differentiation is a principled approach to the computation of gradients and differen-
+tial operators of functions resulting from K successive operations.
+Deﬁnition 3. A function f : Rn ! Rm is computable in K operations if it is the result of K simple
+functions in the following way: 9((cid:18)1; :::; (cid:18)K) functions of the input x and (g1; : : : ; gK) where gl is
+a function of ((cid:18)i)i(cid:20)l(cid:0)1 such that:
+
+8k 2J1; KK; (cid:18)k(x) = gk(x; (cid:18)1(x); : : : ; (cid:18)k(cid:0)1(x)) :
+
+(cid:18)0(x) = x;
+
+(cid:18)K(x) = f (x);
+
+(2)
+
+(cid:18)2 = !
+
+(cid:18)0 = x
+
+(cid:18)3 = sin((cid:18)0)
+
+g3
+
+g4
+
+(cid:18)4 = (cid:18)1 (cid:0) (cid:18)2(cid:18)3
+
+g6
+
+(cid:18)6 = j(cid:18)4j
+
+g7
+
+(cid:18)7 = (cid:18)5 + (cid:18)6
+
+g1
+
+(cid:18)1 = (cid:18)0=2
+
+g5
+
+(cid:18)5 = ln(1 + e(cid:18)1)
+
+Figure 1: Example of a computation graph for f!(x) = ln(1 + ex=2) + jx=2 (cid:0) ! sin(x)j.
+
+3
+
+1: Z = f(z0; :::; zK) : 8k 2J0; KK; (cid:18)k is constant ) zk = (cid:18)k(0)g
+Lk k(cid:0)1∑
+
+Algorithm 1 AutoLip
+Input: function f : Rn ! Rm and its computation graph (g1; :::; gK)
+Output: upper bound on the Lipschitz constant: ^LAL (cid:21) L(f )
+2: L0 1
+3: for k = 1 to K do
+4:
+max
+z2Z
+5: end for
+6: return ^LAL = Lk
+
+∥@igk(z)∥2Li
+
+i=1
+
+We assume that these operations are all locally Lipschitz-continuous  and that their partial deriva-
+tives @igk(x) can be computed and efﬁciently maximized. This assumption is discussed in Section 5
+for the main operations used in neural networks. When the function is real valued (i.e. m = 1) 
+the backpropagation algorithm allows to compute its gradient efﬁciently in time proportional to the
+number of operations K [25]. For the computation of the Lipschitz constant L(f )  a forward prop-
+agation through the computation graph is sufﬁcient. More speciﬁcally  the chain rule immediately
+implies
+
+@igk((cid:18)0(x); : : : ; (cid:18)k(cid:0)1(x)) Dx (cid:18)i ;
+
+(3)
+
+k(cid:0)1∑
+
+Dx (cid:18)k =
+
+i=1
+
+and taking the norm then maximizing over all possible values of (cid:18)i(x) leads to the AutoLip algorithm
+described in Alg. (1). This algorithm is an extension of the well known product of operator norms
+for MLPs (see e.g. [13]) to any function computable in K operations.
+Proposition 1. For any MLP (see Deﬁnition 2) with 1-Lipschitz activation functions (e.g. ReLU 
+Leaky ReLU  SoftPlus  Tanh  Sigmoid  ArcTan or Softsign)  the AutoLip upper bound becomes
+
+K∏
+
+^LAL =
+
+∥Mk∥2:
+
+k=1
+
+Note that  when the intermediate function (cid:18)k does not depend on x  it is not necessary to take a
+maximum over all possible values of (cid:18)k(x). To this end we deﬁne the set of feasible intermediate
+values as
+
+Z = f(z0; :::; zK) : 8k 2J0; KK; (cid:18)k is constant ) zk = (cid:18)k(0)g;
+
+(4)
+and only maximize partial derivatives over this set.
+In practice  this is equivalent to removing
+branches of the computation graph that are not reachable from node 0 and replacing them by con-
+stant values. To illustrate this deﬁnition  consider a simple matrix product operation f (x) = W x.
+One possible computation graph for f is (cid:18)0 = x  (cid:18)1 = W and (cid:18)2 = g2((cid:18)0; (cid:18)1) = (cid:18)1(cid:18)0.
+While the quadratic function g2 is not Lipschitz-continuous  its derivative w.r.t. (cid:18)0 is bounded by
+@0g2((cid:18)0; (cid:18)1) = (cid:18)1 = W . Since (cid:18)1 is constant relatively to x  we have Z = f(x; 0)g and the
+algorithm returns the exact Lipschitz constant ^LAL = L(f ) = ∥W∥2.
+Example. We consider the graph explicited on Figure 1. Since (cid:18)2 is a constant w.r.t. x  we can
+replace it by its value ! in all other nodes. Then  the AutoLip algorithm runs as follows:
+
+^LAL = L7 = L6 + L5 = L1 + L4 = 2L1 + wL3 = 1 + !:
+
+(5)
+Note that  in this example  the Lipschitz upper bound ^LAL matches the exact Lipschitz constant
+L(f!) = 1 + !.
+
+5 Lipschitz constants of typical neural network layers
+Linear and convolution layers. The Lipschitz constant of an afﬁne function f : x 7! M x + b
+where M 2 Rm(cid:2)n and b 2 Rm is the largest singular value of its associated matrix M  which
+may be computed efﬁciently  up to a given precision  using the power method [26]. In the case of
+
+4
+
+convolutions  the associated matrix may be difﬁcult to access and high dimensional  hence making
+the direct use of the power method impractical. To circumvent this difﬁculty  we extend the power
+method to any afﬁne function on whose automatic differentiation can be used (e.g. linear or convo-
+lution layers of neural networks) by noting that the only matrix multiplication of the power method
+M
+Lemma 1. Let M 2 Rm(cid:2)n  b 2 Rm and f : x 7! M x + b be an afﬁne function. Then  for all
+x 2 Rn  we have
+
+M x can be computed by differentiating a well-chosen function.
+
+⊤
+
+⊤
+
+M x = ∇g(x) ;
+
+M
+
+where g(x) = 1
+2
+
+∥f (x) (cid:0) f (0)∥2
+2.
+∥M x∥2
+
+Proof. By deﬁnition  g(x) = 1
+2
+
+2  and differentiating this equation leads to the desired result.
+
+Algorithm 2 AutoGrad compliant power method
+Input: afﬁne function f : Rn ! Rm  number of iteration N
+Output: approximation of the Lipschitz constant L(f )
+1: for k = 1 to N do
+2:
+3:
+4:
+5: end for
+6: return L(f ) = ∥f (v) (cid:0) f (0)∥2
+
+v ∇g(v) where g(x) = 1
+(cid:21) ∥v∥2
+v v=(cid:21)
+
+∥f (x) (cid:0) f (0)∥2
+
+2
+
+2
+
+The full algorithm is described in Alg. (2). Note that this algorithm is fully compliant with any
+dynamic graph deep learning libraries such as PyTorch. The gradient of the square norm may be
+computed through autograd  and the gradient of L(f ) may be computed the same way without any
+more programming effort. Note that the gradients w.r.t. M may also be computed with the closed
+form formula ∇M (cid:27) = u1v
+⊤
+1 where u1 and v1 are respectively the left and right singular vector of
+M associated to the singular value (cid:27) [27]. The same algorithm may be straightforwardly iterated to
+compute the k-largest singular values.
+
+Other layers. Most activation functions such as ReLU  Leaky ReLU  SoftPlus  Tanh  Sigmoid 
+ArcTan or Softsign  as well as max-pooling  have a Lipschitz constant equal to 1. Other common
+neural network layers such as dropout  batch normalization and other pooling methods all have
+simple and explicit Lipschitz constants. We refer the reader to e.g. [28] for more information on this
+subject.
+
+6 Sequential neural networks
+
+∥MK diag(g
+
+L(fM LP ) = sup
+x2Rn
+
+Despite its generality  AutoLip may be subject to large errors due to the multiplication of smaller
+errors at each iteration of the algorithm. In this section  we improve on the AutoLip upper bound by
+a more reﬁned analysis of deep learning architectures in the case of MLPs. More speciﬁcally  the
+Lipschitz constant of MLPs have an explicit formula using Theorem 1 and the chain rule:
+1((cid:18)1))M1∥2;
+′
+where (cid:18)k = Tk ◦ (cid:26)k(cid:0)1 ◦ (cid:1)(cid:1)(cid:1) ◦ (cid:26)1 ◦ T1(x) is the intermediate output after k linear layers.
+Considering Proposition 1 and Eq. (6)  the equality ^LAL = L(fM LP ) only takes place if all acti-
+′
+vation layers diag(g
+k((cid:18)k)) map the ﬁrst singular vector of Mk to the ﬁrst singular vector of Mk+1
+by Cauchy-Schwarz inequality. However  differential operators of activation layers  being diagonal
+matrices  can only have a limited effect on input vectors  and in practice  ﬁrst singular vectors will
+tend to misalign  leading to a drop in the Lipschitz constant of the MLP. This is the intuition behind
+SeqLip  an improved algorithm for Lipschitz constant estimation for MLPs.
+
+′
+K(cid:0)1((cid:18)K(cid:0)1))Mk(cid:0)1:::M2 diag(g
+
+(6)
+
+5
+
+6.1 SeqLip  an improved algorithm for MLPs
+
+′
+K(cid:0)1((cid:18)K(cid:0)1)) are difﬁcult to evaluate  as they may depend
+In Eq. (6)  the diagonal matrices diag(g
+on the input value x and previous layers. Fortunately  as stated in Section 5  most major activation
+k(x) 2
+′
+functions are 1-Lipschitz. More speciﬁcally  these activation functions have a derivative g
+[0; 1]. Hence  we may replace the supremum on the input vector x by a supremum over all possible
+values:
+
+L(fM LP ) (cid:20)
+
+max
+
+8i; (cid:27)i2[0;1]ni
+
+∥MK diag((cid:27)K(cid:0)1)(cid:1)(cid:1)(cid:1) diag((cid:27)1)M1∥2 ;
+
+∑
+where (cid:27)i corresponds to all possible derivatives of the activation gate. Solving the right hand side
+of Eq. (7) is still a hard problem  and the high dimensionality of the search space (cid:27) 2 [0; 1]
+K
+i=1 ni
+makes purely combinatorial approaches prohibitive even for small neural networks.
+In order to
+decrease the complexity of the problem  we split the operator norm in K (cid:0) 1 parts using the SVD
+decomposition of each matrix Mi = Ui(cid:6)iV
+K(cid:0)1 diag((cid:27)K(cid:0)1) : : : diag((cid:27)1)U1(cid:6)1∥2 ;
+L(fM LP ) (cid:20)
+⊤
+
+⊤
+i and the submultiplicativity of the operator norm:
+
+⊤
+K diag((cid:27)K)UK(cid:0)1(cid:6)K(cid:0)1V
+
+∥(cid:6)KV
+
+max
+
+(7)
+
+8i; (cid:27)i2[0;1]ni
+
+(cid:20) K(cid:0)1∏
+
+(cid:13)(cid:13)(cid:13)e(cid:6)i+1V
+K(cid:0)1∏
+
+⊤
+i+1 diag((cid:27)i+1)Ui
+
+i=1
+
+max
+
+(cid:27)i2[0;1]ni
+
+where e(cid:6)i = (cid:6)i if i 2 f1; Kg and e(cid:6)i = (cid:6)1=2
+(cid:13)(cid:13)(cid:13)e(cid:6)i+1V
+
+independently  leading to the SeqLip upper bound:
+
+^LSL =
+
+i
+
+(cid:13)(cid:13)(cid:13)
+
+e(cid:6)i
+
+;
+
+2
+
+(cid:13)(cid:13)(cid:13)
+
+e(cid:6)i
+
+otherwise. Each activation layer can now be solved
+
+⊤
+i+1 diag((cid:27)i+1)Ui
+
+i=1
+
+max
+
+(cid:27)i2[0;1]ni
+
+(8)
+When the activation layers are ReLU and the inner layers are small (ni (cid:20) 20)  the gradients are g
+2
+f0; 1g and we may explore the entire search space (cid:27)i 2 f0; 1gni using a brute force combinatorial
+approach. Otherwise  a gradient ascent may be used by computing gradients via the power method
+In our experiments  we call this heuristic Greedy SeqLip  and veriﬁed that
+described in Alg. 2.
+the incurred error is at most 1% whenever the exact optimum is computable. Finally  when the
+dimension of the layer is too large to compute a whole SVD  we perform a low rank-approximation
+of the matrix Mi by retaining the ﬁrst E eigenvectors (E = 200 in our experiments).
+
+′
+k
+
+2
+
+:
+
+6.2 Theoretical analysis of SeqLip
+
+In order to better understand how SeqLip may improve on AutoLip  we now consider a simple setting
+in which all linear layers have a large difference between their ﬁrst and second singular values. For
+k(x) 2 [0; 1]  although the
+′
+simplicity  we also assume that activation functions have a derivative g
+following results easily generalize as long as the derivative remains bounded. Then  the following
+theorem holds.
+Theorem 3. Let Mk be the matrix associated to the k-th linear layer  uk (resp. vk) its ﬁrst left (resp.
+right) singular vector  and rk = sk;2=sk;1 the ratio between its second and ﬁrst singular values.
+Then  we have
+
+√
+(1 (cid:0) rk (cid:0) rk+1) max
+(cid:27)2[0;1]nk
+
+K(cid:0)1∏
+
+k=1
+
+^LSL (cid:20) ^LAL
+
+⟨(cid:27) (cid:1) vk+1; uk⟩2 + rk + rk+1 + rkrk+1 :
+
+Note that max(cid:27)2[0;1]nk⟨(cid:27) (cid:1) vk+1; uk⟩2 (cid:20) 1 and  when the ratios rk are negligible  then
+
+^LSL (cid:20) ^LAL
+
+max
+
+(cid:27)2[0;1]nk
+
+k=1
+
+j⟨(cid:27) (cid:1) vk+1; uk⟩j :
+
+(9)
+
+Intuitively  each activation layer may align uk to vk+1 only to a certain extent. Moreover  when the
+two singular vectors uk and vk+1 are not too similar  this quantity can be substantially smaller than
+1. To illustrate this idea  we now show that max(cid:27)2[0;1]nk j⟨(cid:27) (cid:1) vk+1; uk⟩j is of the order of 1=(cid:25) if the
+two vectors are randomly chosen on the unit sphere.
+
+6
+
+K(cid:0)1∏
+
+Lemma 2. Let x (cid:21) 0 and u; v 2 Rn be two independent random vectors taken uniformly on the
+unit sphere Sn(cid:0)1 = fx 2 Rn : ∥x∥2 = 1g. Then we have
+
+j⟨(cid:27) (cid:1) u; v⟩j
+
+max
+(cid:27)2[0;1]n
+
+n!+1
+
+1
+(cid:25)
+
+almost surely.
+
+Intuitively  when the ratios between the second and ﬁrst singular values are sufﬁciently small  each
+activation layer decreases the Lipschitz constant by a factor 1=(cid:25) and
+
+^LSL (cid:25) ^LAL
+(cid:25)K(cid:0)1 :
+
+(10)
+For example  for K = 5 linear layers  we have (cid:25)K(cid:0)1 (cid:25) 100 and a large improvement may be
+expected for SeqLip compared to AutoLip. Of course  in a more realistic setting  the eigenvectors
+of different layers are not independent and  more importantly  the ratio between second and ﬁrst
+eigenvalues may not be sufﬁciently small. However  this simple setting provides us with the best
+improvement one can hope for  and our experiments in Section 7 shows that at least part of the
+suboptimality of AutoLip is due to the misalignment of eigenvectors.
+
+7 Experimentations
+
+As stated in Theorem 2  computing the Lipschitz constant is an NP-hard problem. However  in
+low dimension (e.g. d (cid:20) 5)  optimizing the problem in Eq. (1) can be performed efﬁciently using
+a simple grid search. This will provide a baseline to compare the different estimation algorithms.
+In high dimension  grid search is intractable and we consider several other estimation methods: (1)
+grid search for Eq. (1)  (2) simulated annealing for Eq. (1)  (3) product of Frobenius norms of linear
+layers [13]  (4) product of spectral norms [13] (equivalent to AutoLip in the case of MLPs). Note
+that  for MLPs with ReLU activations  ﬁrst order optimization methods such as SGD are not usable
+because the function to optimize in Eq. (1) is piecewise constant. Methods (1) and (2) return lower
+bounds while (3) and (4) return upper bounds on the Lipschitz constant.
+
+Ideal scenario. We ﬁrst show the improvement of SeqLip over AutoLip in an ideal setting where
+inner layers have a low eigenvalue ratio rk and uncorrelated leading eigenvectors. To do so  we
+construct an MLP with weight matrices Mi = Ui diag((cid:21))V
+such that Ui; Vi are random orthogonal
+matrices and (cid:21)1 = 1; (cid:21)i>1 = r where r 2 [0; 1] is the ratio between ﬁrst and second eigenvalue.
+Figure 2 shows the decrease of SeqLip as the number of layers of the MLP increases (each layer has
+100 neurons). The theoretical limit is tight for small eigenvalue ratio. Note that the AutoLip upper
+bound is always 1 as  by construction of the network  all layers have a spectral radius equal to one.
+
+⊤
+i
+
+MLP. We construct a 2-dimensional dataset from a Gaussian Process with RBF Kernel with mean
+0 and variance 1. We use 15000 generated points as a synthetic dataset. An example of such a
+dataset may be seen in Figure 3. We train MLPs of several depths with 20 neurons at each layer  on
+the synthetic dataset with MSE loss and ReLU activations. Note that in all simulations  the greedy
+SeqLip algorithm is within a 0:01% error compared to SeqLip  which justify its usage in higher
+dimension.
+
+# layers Frobenius AutoLip
+33:04
+134:4
+294:6
+19248:2
+
+648:2
+4283:1
+22341
+7343800
+
+4
+5
+7
+10
+
+Upper bounds
+SeqLip
+21:47
+72:87
+130:2
+2463:44
+
+Greedy SeqLip Dataset Annealing Grid Search
+
+Lower bounds
+
+21:47
+72:87
+130:2
+2463:36
+
+4:36
+6:77
+5:4
+10:04
+
+4:55
+5:8
+5:27
+5:77
+
+6:56
+7:1
+6:51
+17:1
+
+Figure 4: AutoLip and SeqLip for MLPs of various size.
+
+First  since the dimension is low (d = 2)  grid search returns a very good approximation of the
+Lipschitz constant  while simulated annealing is suboptimal  probably due to the presence of local
+
+7
+
+Figure 2: SeqLip in the ideal scenario.
+
+Figure 3: Synthetic function used to train MLPs.
+
+maxima. For upper bounds  SeqLip outperforms its competitors reducing the gap between upper
+bounds and  in this case  the true Lipschitz constant computed using grid search.
+
+CNN. We construct simple CNNs with increasing number of layers that we train independently
+on the MNIST dataset [29].The details of the structure of the CNNs are given in the supplementary
+material. SeqLip improves by a factor of 5 the upper bound given by AutoLip for the CNN with 10
+layers. Note that the lower bounds obtained with simulated annealing is probably too low  as shown
+in the previous experiments.
+
+# layers AutoLip Greedy SeqLip Ratio Dataset Annealing
+
+Upper bounds
+
+Lower bounds
+
+4
+5
+7
+10
+
+174
+790:1
+12141
+4:5 (cid:1) 106
+
+86
+335
+3629
+8:2 (cid:1) 105
+
+2
+2:4
+3:3
+5:4
+
+12:64
+16:79
+31:22
+38:26
+
+25:5
+22:2
+43:6
+107:8
+
+Figure 5: AutoLip and SeqLip for MNIST-CNNs of various size.
+
+AlexNet. AlexNet [1] is one of the ﬁrst successes of deep learning in computer vision. The Au-
+toLip algorithm ﬁnds that the Lipschitz constant is upper bounded by 3:62 (cid:2) 107 which remains
+extremely large and probably well above the true Lipschitz constant. As for the experiment on a
+CNN  we use the 200 highest singular values of each linear layer for Greedy SeqLip. We obtain
+5:45 (cid:2) 106 as an upper bound approximation  which remains large despite its 6 fold improvement
+over AutoLip. Note that we do not get the same results as [9  Section 4.3] as we did not use the same
+weights.
+
+8 Conclusion
+
+In this paper  we studied the Lispchitz regularity of neural networks. We ﬁrst showed that exact com-
+putation of the Lipschitz constant is an NP-hard problem. We then provided a generic upper bound
+called AutoLip for the Lipschitz constant of any automatically differentiable function. In doing so 
+we introduced an algorithm to compute singular values of afﬁne operators such as convolution in
+a very efﬁcient way using autograd mechanism. We ﬁnally proposed a reﬁnement of the previous
+method for MLPs called SeqLip and showed how this algorithm can improve on AutoLip theoreti-
+cally and in applications  sometimes improving up to a factor of 8 the AutoLip upper bound. While
+the AutoLip and SeqLip upper bounds remain extremely large for neural networks of the computer
+vision literature (e.g. AlexNet  see Section 7)  it is yet an open question to know if these values are
+close to the true Lipschitz constant or substantially overestimating it.
+
+8
+
+12345678910Number of laye s10−410−310−210−1100SeqLip uppe boundAutoLiptheo etical limiteigenvalue atio: 0.5eigenvalue atio: 0.1eigenvalue atio: 0.01Acknowledgements
+
+The authors thank the whole team at Huawei Paris and in particular Igor Colin  Moez Draief  Sylvain
+Robbiano and Albert Thomas for useful discussions and feedback.
+
+References
+[1] Alex Krizhevsky  Ilya Sutskever  and Geoffrey E Hinton. Imagenet classiﬁcation with deep
+convolutional neural networks. In Advances in Neural Information Processing Systems  pages
+1097–1105  2012.
+
+[2] Christian Szegedy  Vincent Vanhoucke  Sergey Ioffe  Jon Shlens  and Zbigniew Wojna. Re-
+thinking the inception architecture for computer vision. In Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR)  pages 2818–2826  2016.
+
+[3] Kaiming He  Xiangyu Zhang  Shaoqing Ren  and Jian Sun. Deep residual learning for image
+recognition. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recogni-
+tion (CVPR)  pages 770–778  2016.
+
+[4] G. Huang  Z. Liu  L. v. d. Maaten  and K. Q. Weinberger. Densely connected convolutional
+networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition
+(CVPR)  pages 2261–2269  2017.
+
+[5] Alex Graves and Navdeep Jaitly. Towards end-to-end speech recognition with recurrent neural
+
+networks. In International Conference on Machine Learning  pages 1764–1772  2014.
+
+[6] Aäron van den Oord  Sander Dieleman  Heiga Zen  Karen Simonyan  Oriol Vinyals  Alex
+Graves  Nal Kalchbrenner  Andrew W. Senior  and Koray Kavukcuoglu. Wavenet: A genera-
+tive model for raw audio. In SSW  page 125. ISCA  2016.
+
+[7] Tomas Mikolov  Wen-tau Yih  and Geoffrey Zweig. Linguistic regularities in continuous space
+word representations. In Proceedings of the 2013 Conference of the North American Chapter
+of the Association for Computational Linguistics: Human Language Technologies  pages 746–
+751  2013.
+
+[8] Ashish Vaswani  Noam Shazeer  Niki Parmar  Jakob Uszkoreit  Llion Jones  Aidan N Gomez 
+łukasz Kaiser  and Illia Polosukhin. Attention is All You Need. In Advances in Neural Infor-
+mation Processing Systems  pages 6000–6010  2017.
+
+[9] Christian Szegedy  Wojciech Zaremba  Ilya Sutskever  Joan Bruna  Dumitru Erhan  Ian Good-
+fellow  and Rob Fergus. Intriguing properties of neural networks. In Proceedings of the Inter-
+national Conference on Learning Representations (ICLR)  2014.
+
+[10] Ian J Goodfellow  Jonathon Shlens  and Christian Szegedy. Explaining and harnessing adver-
+sarial examples. In Proceedings of the International Conference on Learning Representations
+(ICLR)  2015.
+
+[11] Martín Arjovsky  Soumith Chintala  and Léon Bottou. Wasserstein generative adversarial net-
+In Proceedings of the 34th International Conference on Machine Learning  ICML 
+
+works.
+pages 214–223  2017.
+
+[12] Cédric Villani. Optimal transport: old and new  volume 338. Springer Science & Business
+
+Media  2008.
+
+[13] Takeru Miyato  Toshiki Kataoka  Masanori Koyama  and Yuichi Yoshida. Spectral normaliza-
+tion for generative adversarial networks. In Proceedings of the International Conference on
+Learning Representations (ICLR)  2018.
+
+[14] Ishaan Gulrajani  Faruk Ahmed  Martin Arjovsky  Vincent Dumoulin  and Aaron C Courville.
+Improved training of Wasserstein GANs. In Advances in Neural Information Processing Sys-
+tems  pages 5769–5779  2017.
+
+9
+
+[15] Tsui-Wei Weng  Huan Zhang  Pin-Yu Chen  Jinfeng Yi  Dong Su  Yupeng Gao  Cho-Jui Hsieh 
+and Luca Daniel. Evaluating the Robustness of Neural Networks: An Extreme Value The-
+ory Approach. In Proceedings of the International Conference on Learning Representations
+(ICLR)  2018.
+
+[16] Ulrike von Luxburg and Olivier Bousquet. Distance–based classiﬁcation with lipschitz func-
+
+tions. J. Mach. Learn. Res.  5:669–695  December 2004.
+
+[17] Peter L. Bartlett  Dylan J. Foster  and Matus J. Telgarsky. Spectrally-normalized margin bounds
+for neural networks. In Advances in Neural Information Processing Systems 30: Annual Con-
+ference on Neural Information Processing Systems 2017  4-9 December 2017  Long Beach 
+CA  USA  pages 6241–6250  2017.
+
+[18] Behnam Neyshabur  Srinadh Bhojanapalli  David McAllester  and Nati Srebro. Exploring gen-
+eralization in deep learning. In Advances in Neural Information Processing Systems 30: An-
+nual Conference on Neural Information Processing Systems 2017  4-9 December 2017  Long
+Beach  CA  USA  pages 5949–5958  2017.
+
+[19] R. Balan  M. K. Singh  and D. Zou. Lipschitz properties for deep convolutional networks. to
+
+appear in Contemporary Mathematics  2018.
+
+[20] Louis B. Rall. Automatic Differentiation: Techniques and Applications  volume 120 of Lecture
+
+Notes in Computer Science. Springer  Berlin  1981.
+
+[21] Adam Paszke  Sam Gross  Soumith Chintala  Gregory Chanan  Edward Yang  Zachary DeVito 
+Zeming Lin  Alban Desmaison  Luca Antiga  and Adam Lerer. Automatic differentiation in
+PyTorch. 2017.
+
+[22] Herbert Federer. Geometric measure theory. Classics in Mathematics. Springer-Verlag Berlin
+
+Heidelberg  1969.
+
+[23] Martín Abadi  Ashish Agarwal  Paul Barham  Eugene Brevdo  Zhifeng Chen  Craig Citro 
+Greg S. Corrado  Andy Davis  Jeffrey Dean  Matthieu Devin  Sanjay Ghemawat  Ian Goodfel-
+low  Andrew Harp  Geoffrey Irving  Michael Isard  Yangqing Jia  Rafal Jozefowicz  Lukasz
+Kaiser  Manjunath Kudlur  Josh Levenberg  Dandelion Mané  Rajat Monga  Sherry Moore 
+Derek Murray  Chris Olah  Mike Schuster  Jonathon Shlens  Benoit Steiner  Ilya Sutskever  Ku-
+nal Talwar  Paul Tucker  Vincent Vanhoucke  Vijay Vasudevan  Fernanda Viégas  Oriol Vinyals 
+Pete Warden  Martin Wattenberg  Martin Wicke  Yuan Yu  and Xiaoqiang Zheng. TensorFlow:
+Large-Scale Machine Learning on Heterogeneous Systems  2015. Software available from
+tensorﬂow.org.
+
+[24] Andreas Griewank and Andrea Walther. Evaluating derivatives: principles and techniques of
+
+algorithmic differentiation  volume 105. Siam  2008.
+
+[25] Seppo Linnainmaa. The representation of the cumulative rounding error of an algorithm as
+a Taylor expansion of the local rounding errors. Master’s Thesis (in Finnish)  Univ. Helsinki 
+pages 6–7  1970.
+
+[26] RV Mises and Hilda Pollaczek-Geiringer. Praktische verfahren der gleichungsauﬂösung.
+ZAMM-Journal of Applied Mathematics and Mechanics/Zeitschrift für Angewandte Mathe-
+matik und Mechanik  9(1):58–77  1929.
+
+[27] Jan R. Magnus. On Differentiating Eigenvalues and Eigenvectors. Econometric Theory 
+
+1(2):pp. 179–191  1985.
+
+[28] Ian Goodfellow  Yoshua Bengio  and Aaron Courville. Deep Learning. MIT Press  2016.
+
+[29] Yann LeCun. The MNIST database of handwritten digits. http://yann. lecun. com/exdb/mnist/.
+
+10
+
+,Luke O'Connor
+Soheil Feizi
+Tengyao Wang
+Quentin Berthet
+Yaniv Plan
+Aladin Virmaux
+Kevin Scaman
+Nathan Kallus
+Angela Zhou

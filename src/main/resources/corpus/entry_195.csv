@@ -1,0 +1,958 @@
+2013,A Scalable Approach to Probabilistic Latent Space Inference of Large-Scale Networks,We propose a scalable approach for making inference about latent spaces of large networks. With a succinct representation of networks as a bag of triangular motifs  a parsimonious statistical model  and an efficient stochastic variational inference algorithm  we are able to analyze real networks with over a million vertices and hundreds of latent roles on a single machine in a matter of hours  a setting that is out of reach for many existing methods. When compared to the state-of-the-art probabilistic approaches  our method is several orders of magnitude faster  with competitive or improved accuracy for latent space recovery and link prediction.,A Scalable Approach to Probabilistic Latent Space
+
+Inference of Large-Scale Networks
+
+Junming Yin
+
+School of Computer Science
+Carnegie Mellon University
+
+Pittsburgh  PA 15213
+
+junmingy@cs.cmu.edu
+
+Qirong Ho
+
+School of Computer Science
+Carnegie Mellon University
+
+Pittsburgh  PA 15213
+qho@cs.cmu.edu
+
+Eric P. Xing
+
+School of Computer Science
+Carnegie Mellon University
+
+Pittsburgh  PA 15213
+
+epxing@cs.cmu.edu
+
+Abstract
+
+We propose a scalable approach for making inference about latent spaces of large
+networks. With a succinct representation of networks as a bag of triangular motifs 
+a parsimonious statistical model  and an efﬁcient stochastic variational inference
+algorithm  we are able to analyze real networks with over a million vertices and
+hundreds of latent roles on a single machine in a matter of hours  a setting that is
+out of reach for many existing methods. When compared to the state-of-the-art
+probabilistic approaches  our method is several orders of magnitude faster  with
+competitive or improved accuracy for latent space recovery and link prediction.
+
+Introduction
+
+1
+In the context of network analysis  a latent space refers to a space of unobserved latent represen-
+tations of individual entities (i.e.  topics  roles  or simply embeddings  depending on how users
+would interpret them) that govern the potential patterns of network relations. The problem of latent
+space inference amounts to learning the bases of such a space and reducing the high-dimensional
+network data to such a lower-dimensional space  in which each entity has a position vector. De-
+pending on model semantics  the position vectors can be used for diverse tasks such as community
+detection [1  5]  user personalization [4  13]  link prediction [14] and exploratory analysis [9  19  8].
+However  scalability is a key challenge for many existing probabilistic methods  as even recent state-
+of-the-art methods [5  8] still require days to process modest networks of around 100  000 nodes.
+To perform latent space analysis on at least million-node (if not larger) real social networks with
+many distinct latent roles [24]  one must design inferential mechanisms that scale in both the number
+of vertices N and the number of latent roles K. In this paper  we argue that the following three
+principles are crucial for successful large-scale inference: (1) succinct but informative representation
+of networks; (2) parsimonious statistical modeling; (3) scalable and parallel inference algorithms.
+Existing approaches [1  5  7  8  14] are limited in that they consider only one or two of the above
+principles  and therefore can not simultaneously achieve scalability and sufﬁcient accuracy. For
+example  the mixed-membership stochastic blockmodel (MMSB) [1] is a probabilistic latent space
+model for edge representation of networks. Its batch variational inference algorithm has O(N 2K 2)
+time complexity and hence cannot be scaled to large networks. The a-MMSB [5] improves upon
+MMSB by applying principles (2) and (3): it reduces the dimension of the parameter space from
+O(K 2) to O(K)  and applies a stochastic variational algorithm for fast inference. Fundamentally 
+however  the a-MMSB still depends on the O(N 2) adjacency matrix representation of networks 
+just like the MMSB. The a-MMSB inference algorithm mitigates this issue by downsampling zero
+elements in the matrix  but is still not fast enough to handle networks with N ≥ 100  000.
+But looking beyond the edge-based relations and features  other higher-order structural statistics
+(such as the counts of triangles and k-stars) are also widely used to represent the probability dis-
+tribution over the space of networks  and are viewed as crucial elements in building a good-ﬁtting
+exponential random graph model (ERGM) [11]. These higher-order relations have motivated the
+development of the triangular representation of networks [8]  in which each network is represented
+succinctly as a bag of triangular motifs with size typically much smaller than Θ(N 2). This suc-
+cinct representation has proven effective in extracting informative mixed-membership roles from
+
+1
+
+networks with high ﬁdelity  thus achieving the ﬁrst principle (1). However  the corresponding statis-
+tical model  called the mixed-membership triangular model (MMTM)  only scales well against the
+size of a network  but does not scale to large numbers of latent roles (i.e.  dimension of the latent
+space). To be precise  if there are K distinct latent roles  its tensor of triangle-generating parame-
+ters is of size O(K 3)  and its blocked Gibbs sampler requires O(K 3) time per iteration. Our own
+experiments show that the MMTM Gibbs algorithm is unusable for K > 10.
+We now present a scalable approach to both latent space modeling and inference algorithm design
+that encompasses all three aforementioned principles for large networks. Speciﬁcally  we build our
+approach on the bag-of-triangles representation of networks [8] and apply principles (2) and (3) 
+yielding a fast inference procedure that has time complexity O(N K). In Section 3  we propose the
+parsimonious triangular model (PTM)  in which the dimension of the triangle-generating parameters
+only grows linearly in K. The dramatic reduction is principally achieved by sharing parameters
+among certain groups of latent roles. Then  in Section 4  we develop a fast stochastic natural gradient
+ascent algorithm for performing variational inference  where an unbiased estimate of the natural
+gradient is obtained by subsampling a “mini-batch” of triangular motifs. Instead of adopting a fully
+factorized  naive mean-ﬁeld approximation  which we ﬁnd performs poorly in practice  we pursue
+a structured mean-ﬁeld approach that captures higher-order dependencies between latent variables.
+These new developments all combine to yield an efﬁcient inference algorithm that usually converges
+after 2 passes on each triangular motif (or up to 4-5 passes at worst)  and achieves competitive or
+improved accuracy for latent space recovery and link prediction on synthetic and real networks.
+Finally  in Section 5  we demonstrate that our algorithm converges and infers a 100-role latent space
+on a 1M-node Youtube social network in just 4 hours  using a single machine with 8 threads.
+2 Triangular Representation of Networks
+We take a scalable approach to network modeling by representing each network succinctly as a
+bag of triangular motifs [8]. Each triangular motif is a connected subgraph over a vertex triple
+containing 2 or 3 edges (called open triangle and closed triangle respectively). Empty and single-
+edge triples are ignored. Although this triangular format does not preserve all network information
+found in an edge representation  these three-node connected subgraphs are able to capture a number
+of informative structural features in the network. For example  in social network theory  the notion of
+triadic closure [21  6] is commonly measured by the relative number of closed triangles compared to
+the total number of connected triples  known as the global clustering coefﬁcient or transitivity [17].
+The same quantity is treated as a general network statistic in the exponential random graph model
+(ERGM) literature [16]. Furthermore  the most signiﬁcant and recurrent structural patterns in many
+complex networks  so-called “network motifs”  turn out to be connected three-node subgraphs [15].
+Most importantly of all  triangular modeling requires much less computational cost compared to
+edge-based models  with little or no degradation of performance for latent space recovery [8]. In
+networks with N vertices and low maximum vertex degree D  the number of triangular motifs
+Θ(N D2) is normally much smaller than Θ(N 2)  allowing us to construct more efﬁcient inference
+algorithms scalable to larger networks. For high-maximum-degree networks  the triangular motifs
+can be subsampled in a node-centric fashion as a local data reduction step. For each vertex i with
+
+degree higher than a user-chosen threshold δ  uniformly sample(cid:0)δ
+
+of (a) its adjacent closed triangles  and (b) its adjacent open triangles that are centered on i. Vertices
+with degree ≤ δ keep all triangles from their set. It has been shown that this δ-subsampling pro-
+cedure can approximately preserve the distribution over open and closed triangles  and allows for
+much faster inference algorithms (linear growth in N) at a small cost in accuracy [8].
+In what follows  we assume that a preprocessing step has been performed — namely  extracting and
+δ-subsampling triangular motifs (which can be done in O(1) time per sample  and requires < 1% of
+the actual inference time) — to yield a bag-of-triangles representation of the input network. For each
+triplet of vertices i  j  k ∈ {1  . . .   N}   i < j < k  let Eijk denote the observed type of triangular
+motif formed among these three vertices: Eijk = 1  2 and 3 represent an open triangle with i  j
+and k in the center respectively  and Eijk = 4 if a closed triangle is formed. Because empty and
+single-edge triples are discarded  the set of triples with triangular motifs formed  I = {(i  j  k) : i <
+j < k  Eijk = 1  2  3 or 4}  is of size O(N δ2) after δ-subsampling [8].
+3 Parsimonious Triangular Model
+Given the input network  now represented as a bag of triangular motifs  our goal is to make infer-
+ence about the latent position vector θi of each vertex i ∈ {1  . . .   N}. We take a mixed-membership
+
+(cid:1) triangles from the set composed
+
+2
+
+2
+
+(si jk  sj ik  sk ij )
+
+x = si jk = sj ik = sk ij
+x = si jk = sj ik (cid:54)= sk ij
+x = si jk = sk ij (cid:54)= sj ik
+x = sj ik = sk ij (cid:54)= si jk
+
+sk ij (cid:54)= si jk (cid:54)= sj ik
+
+Equivalence classes
+{1  2  3}  {4}
+{1  2}  {3}  {4}
+{1  3}  {2}  {4}
+{2  3}  {1}  {4}
+{1  2  3}  {4}
+
+Conditional probability of Eijk ∈ {1  2  3  4}
+  Bxxx 2
+
+Bxxx 1
+
+Bxxx 1
+
+ 
+
+ 
+
+3
+
+3
+
+(cid:3)(cid:1)
+
+Bxx 1
+
+2
+
+  Bxx 2  Bxx 3
+
+3
+
+Discrete(cid:0)(cid:2) Bxxx 1
+Discrete(cid:0)(cid:2) Bxx 1
+Discrete(cid:0)(cid:2) Bxx 1
+Discrete(cid:0)(cid:2)Bxx 2 
+Discrete(cid:0)(cid:2) B0 1
+
+2
+
+2
+
+ 
+
+3
+
+(cid:3)(cid:1)
+(cid:3)(cid:1)
+(cid:3)(cid:1)
+
+Bxx 1
+
+2
+
+Bxx 1
+
+2
+
+  Bxx 2 
+
+Bxx 1
+
+2
+B0 1
+
+3
+
+ 
+
+ 
+
+ 
+
+  Bxx 3
+
+  Bxx 3
+
+(cid:3)(cid:1)
+
+B0 1
+
+3
+
+  B0 2
+
+Table 1: Equivalence classes and conditional probabilities of Eijk given si jk  sj ik  sk ij (see text for details).
+approach: each vertex i can take a mixture distribution over K latent roles governed by a mixed-
+membership vector θi ∈ ∆K−1 restricted to the (K − 1)-simplex. Such vectors can be used for
+performing community detection and link prediction  as demonstrated in Section 5. Following a de-
+sign principle similar to the Mixed-Membership Triangular Model (MMTM) [8]  our Parsimonious
+Triangular Model (PTM) is essentially a latent-space model that deﬁnes the generative process for a
+bag of triangular motifs. However  compared to the MMTM  the major advantage of the PTM lies in
+its more compact and lower-dimensional nature that allows for more efﬁcient inference algorithms
+(see Global Update step in Section 4). The dimension of triangle-generating parameters in the PTM
+is just O(K)  rather than O(K 3) in the MMTM (see below for further discussion).
+To form a triangular motif Eijk for each triplet of vertices (i  j  k)  a triplet of role indices
+si jk  sj ik  sk ij ∈ {1  . . .   K} is ﬁrst chosen based on the mixed-membership vectors θi  θj  θk.
+These indices designate the roles taken by each vertex participating in this triangular motif. There
+are O(K 3) distinct conﬁgurations of such latent role triplet  and the MMTM uses a tensor of triangle-
+generating parameters of the same size to deﬁne the probability of Eijk  one entry Bxyz for each
+possible conﬁguration (x  y  z). In the PTM  we reduce the number of such parameters by parti-
+tioning the O(K 3) conﬁguration space into several groups  and then sharing parameters within the
+same group. The partitioning is based on the number of distinct states in the conﬁguration of the
+role triplet: 1) if the three role indices are all in the same state x  the triangle-generating probability
+is determined by Bxxx; 2) if only two role indices exhibit the same state x (called majority role) 
+the probability of triangles is governed by Bxx  which is shared across different minority roles; 3)
+if the three role indices are all distinct  the probability of triangular motifs depends on B0  a sin-
+gle parameter independent of the role conﬁgurations. This sharing yields just O(K) parameters
+B0  Bxx  Bxxx  x ∈ {1  . . .   K}  allowing PTM to scale to far more latent roles than MMTM. A
+similar idea was proposed in a-MMSB [5]  using one parameter  to determine inter-role link prob-
+abilities  rather than O(K 2) parameters for all pairs of distinct roles  as in the original MMSB [1].
+Once the role triplet (si jk  sj ik  sk ij) is chosen  some of the triangular motifs can become
+indistinguishable. To illustrate  in the case of x = si jk = sj ik (cid:54)= sk ij  one cannot distinguish the
+open triangle with i in the center (Eijk = 1) from that with j in the center (Eijk = 2)  because both
+are open triangles centered at a vertex with majority role x  and are thus structurally equivalent
+under the given role conﬁguration. Formally  this conﬁguration induces a set of triangle equivalence
+classes {{1  2} {3} {4}} of all possible triangular motifs {1  2  3  4}. We treat the triangular motifs
+within the same equivalence class as stochastically equivalent; that is  the conditional probabilities
+of events Eijk = 1 and Eijk = 2 are the same if x = si jk = sj ik (cid:54)= sk ij. All possible cases are
+enumerated as follows (see also Table 1):
+1. If all three vertices have the same role x  all three open triangles are equivalent and the induced set of
+equivalence classes is {{1  2  3} {4}}. The probability of Eijk is determined by Bxxx ∈ ∆1  where
+Bxxx 1 represents the total probability of sampling an open triangle from {1  2  3} and Bxxx 2 represents
+the closed triangle probability. Thus  the probability of a particular open triangle is Bxxx 1/3.
+2. If only two vertices have the same role x (majority role)  the probability of Eijk is governed by Bxx ∈ ∆2.
+Here  Bxx 1 and Bxx 2 represent the open triangle probabilities (for open triangles centered at a vertex in
+majority and minority role respectively)  and Bxx 3 represents the closed triangle probability. There are two
+possible open triangles with a vertex in majority role at the center  and hence each has probability Bxx 1/2.
+3. If all three vertices have distinct roles  the probability of Eijk depends on B0 ∈ ∆1  where B0 1 represents
+the total probability of sampling an open triangle from {1  2  3} (regardless of the center vertex’s role) and
+B0 2 represents the closed triangle probability.
+
+To summarize  the PTM assumes the following generative process for a bag of triangular motifs:
+• Choose B0 ∈ ∆1  Bxx ∈ ∆2 and Bxxx ∈ ∆1 for each role x ∈ {1  . . .   K} according to symmetric
+
+Dirichlet distributions Dirichlet(λ).
+
+3
+
+• For each vertex i ∈ {1  . . .   N}  draw a mixed-membership vector θi ∼ Dirichlet (α).
+• For each triplet of vertices (i  j  k)   i < j < k 
+
+− Draw role indices si jk ∼ Discrete (θi)  sj ik ∼ Discrete (θj)  sk ij ∼ Discrete (θk).
+− Choose a triangular motif Eijk ∈ {1  2  3  4} based on B0  Bxx  Bxxx and the conﬁguration of
+
+(si jk  sj ik  sk ij) (see Table 1 for the conditional probabilities).
+
+It is worth pointing out that  similar to the MMTM  our PTM is not a generative model of networks
+per se because (a) empty and single-edge motifs are not modeled  and (b) one can generate a set
+of triangles that does not correspond to any network  because the generative process does not force
+overlapping triangles to have consistent edge values. However  given a bag of triangular motifs E
+extracted from a network  the above procedure deﬁnes a valid probabilistic model p(E | α  λ) and
+we can legitimately use it for performing posterior inference p(s  θ  B | E  α  λ). We stress that our
+goal is latent space inference  not network simulation.
+4 Scalable Stochastic Variational Inference
+In this section  we present a stochastic variational inference algorithm [10] for performing approx-
+imate inference under our model. Although it is also feasible to develop such algorithm for the
+MMTM [8]  the O(N K 3) computational complexity precludes its application to large numbers of
+latent roles. However  due to the parsimonious O(K) parameterization of the PTM  our efﬁcient
+algorithm has only O(N K) complexity.
+We adopted a structured mean-ﬁeld approximation method  in which the true posterior of latent
+variables p(s  θ  B | E  α  λ) is approximated by a partially factorized distribution q(s  θ  B) 
+
+(i j k)∈I
+
+q(s  θ  B) =
+
+q(si jk  sj ik  sk ij | φijk)
+
+q(Bxx | ηxx)q(B0 | η0) 
+where I = {(i  j  k) : i < j < k  Eijk = 1  2  3 or 4} and |I| = O(N δ2). The strong dependencies
+among the per-triangle latent roles (si jk  sj ik  sk ij) suggest that we should model them as a group 
+rather than completely independent as in a naive mean-ﬁeld approximation1. Thus  the variational
+posterior of (si jk  sj ik  sk ij) is the discrete distribution
+
+q(Bxxx | ηxxx)
+
+q(θi | γi)
+
+x=1
+
+x=1
+
+i=1
+
+.
+= qijk(x  y  z) = φxyz
+ijk  
+
+q(si jk = x  sj ik = y  sk ij = z)
+
+(1)
+The posterior q(θi) is a Dirichlet(γi); and the posteriors of Bxxx  Bxx  B0 are parameterized as:
+q(Bxxx) = Dirichlet(ηxxx)  q(Bxx) = Dirichlet(ηxx)  and q(B0) = Dirichlet(η0).
+The mean ﬁeld approximation aims to minimize the KL divergence KL(q (cid:107) p) between the ap-
+proximating distribution q and the true posterior p; it is equivalent to maximizing a lower bound
+L(φ  η  γ) of the log marginal likelihood of the triangular motifs (based on Jensen’s inequality)
+with respect to the variational parameters {φ  η  γ} [22].
+
+x  y  z = 1  . . .   K.
+
+log p(E | α  λ) ≥ Eq[log p(E  s  θ  B | α  λ)] − Eq[log q(s  θ  B)]
+
+(2)
+To simplify the notation  we decompose the variational objective L(φ  η  γ) into a global term and
+a summation of local terms  one term for each triangular motif (see Appendix for details).
+
+= L(φ  η  γ).
+.
+
+L(φ  η  γ) = g(η  γ) +
+
+(cid:96)(φijk  η  γ).
+
+(3)
+
+(cid:88)
+
+(i j k)∈I
+
+(cid:89)
+
+N(cid:89)
+
+K(cid:89)
+
+K(cid:89)
+
+(cid:88)
+
+The global term g(η  γ) depends only on the global variational parameters η  which govern the
+posterior of the triangle-generating probabilities B  as well as the per-node mixed-membership pa-
+rameters γ. Each local term (cid:96)(φijk  η  γ) depends on per-triangle parameters φijk as well as the
+global parameters. Deﬁne L(η  γ)
+= maxφ L(φ  η  γ)  which is the variational objective achieved
+.
+by ﬁxing the global parameters η  γ and optimizing the local parameters φ. By equation (3) 
+
+L(η  γ) = g(η  γ) +
+
+max
+φijk
+
+(i j k)∈I
+
+(cid:96)(φijk  η  γ).
+
+(4)
+Stochastic variational inference is a stochastic gradient ascent algorithm [3] that maximizes L(η  γ) 
+based on noisy estimates of its gradient with respect to η and γ. Whereas computing the true
+gradient ∇L(η  γ) involves a costly summation over all triangular motifs as in (4)  an unbiased
+noisy approximation of the gradient can be obtained much more cheaply by summing over a small
+subsample of triangles. With this unbiased estimate of the gradient and a suitable adaptive step size 
+the algorithm is guaranteed to converge to a stationary point of the variational objective L(η  γ) [18].
+1 We tested a naive mean-ﬁeld approximation  and it performed very poorly. This is because the tensor of
+
+role probabilities q(x  y  z) is often of high rank  whereas naive mean-ﬁeld is a rank-1 approximation.
+
+4
+
+Algorithm 1 Stochastic Variational Inference
+1: t = 0. Initialize the global parameters η and γ.
+2: Repeat the following steps until convergence.
+(1) Sample a mini-batch of triangles S.
+(2) Optimize the local parameters qijk(x  y  z) for all sampled triangles in parallel by (6).
+(3) Accumulate sufﬁcient statistics for the natural gradients of η  γ (and then discard qijk(x  y  z)).
+(4) Optimize the global parameters η and γ by the stochastic natural gradient ascent rule (7).
+(5) ρt ← τ0(τ1 + t)−κ  t ← t + 1.
+
+In our setting  the most natural way to obtain an unbiased gradient of L(η  γ) is to sample a “mini-
+batch” of triangular motifs at each iteration  and then average the gradient of local terms in (4) only
+for these sampled triangles. Formally  let m be the total number of triangles and deﬁne
+
+LS(η  γ) = g(η  γ) +
+
+m
+|S|
+
+max
+φijk
+
+(cid:96)(φijk  η  γ) 
+
+(5)
+
+(cid:88)
+
+(i j k)∈S
+
+(cid:88)
+
+a
+
+(a b c)∈A δabc
+
+ijk = 1.
+
+δabc
+ijk
+
+(a b c)∈A
+
+δaaa
+ijk
+
+I[x = y = z = a] +
+
+ijk (x (cid:54)= y).
+(cid:88)
+
+It is easy to verify that
+
+where S is a mini-batch of triangles sampled uniformly at random.
+ES[LS(η  γ)] = L(η  γ)  hence ∇LS(η  γ) is unbiased: ES[∇LS(η  γ)] = ∇L(η  γ).
+Exact Local Update. To obtain the gradient ∇LS(η  γ)  one needs to compute the optimal local
+variational parameters φijk (keeping η and γ ﬁxed) for each sampled triangle (i  j  k) in the mini-
+batch S; these optimal φijk’s are then used in equation (5) to compute ∇LS(η  γ). Taking partial
+(cid:110)Eq[log B0 2]I[Eijk = 4] + Eq[log(B0 1/3)]I[Eijk (cid:54)= 4] + Eq[log θi x + log θj x + log θk x]
+(cid:111)
+derivatives of (3) with respect to each local term φxyz
+ijk and setting them to zero  we get for distinct
+x  y  z ∈ {1  . . .   K} 
+ijk ∝ exp
+φxyz
+See Appendix for the update equations of φxxx
+O(K) Approximation to Local Update. For each sampled triangle (i  j  k)  the exact local update
+requires O(K 3) work to solve for all φxyz
+ijk   making it unscalable. To enable a faster local up-
+date  we replace qijk(x  y  z | φijk) in (1) with a simpler “mixture-of-deltas” variational distribution 
+
+ijk and φxxy
+
+.
+(6)
+
+I[x = a  y = b  z = c] 
+
+qijk(x  y  z | δijk) =
+
+where A is a randomly chosen set of triples (a  b  c) with size O(K)  and (cid:80)
+(cid:80)
+
+ijk +
+In other words  we assume the probability mass of the variational poste-
+rior q(si jk  sj ik  sk ij) falls entirely on the K “diagonal” role combinations (a  a  a) as well as
+O(K) randomly chosen “off-diagonals” (a  b  c). Conveniently  the δ update equations are identical
+to their φ counterparts as in (6)  except that we normalize over the δ’s instead.
+In our implementation  we generate A by picking 3K combinations of the form (a  a  b)  (a  b  a) or
+(a  a  b)  and another 3K combinations of the form (a  b  c)  thus mirroring the parameter structure
+of B. Furthermore  we re-pick A every time we perform the local update on some triangle (i  j  k) 
+thus avoiding any bias due to a single choice of A. We ﬁnd that this approximation works as well
+as the full parameterization in (1)  yet requires only O(K) work per sampled triangle. Note that
+any choice of A yields a valid lower bound to the true log-likelihood; this follows from standard
+variational inference theory.
+Global Update. We appeal to stochastic natural gradient ascent [2  20  10] to optimize the global
+parameters η and γ  as it greatly simpliﬁes the update rules while maintaining the same asymptotic
+convergence properties as classical stochastic gradient. The natural gradient ˜∇LS(η  γ) is obtained
+by a premultiplication of the ordinary gradient ∇LS(η  γ) with the inverse of the Fisher information
+of the variational posterior q. See Appendix for the exact forms of the natural gradients with respect
+to η and γ. To update the parameters η and γ  we apply the stochastic natural gradient ascent rule
+(7)
+where the step size is given by ρt = τ0(τ1 + t)−κ. To ensure convergence  the τ0  τ1  κ are set such
+t ρt = ∞ (Section 5 has our experimental values). The global update only
+
+ηt+1 = ηt + ρt ˜∇ηLS(ηt  γt)  γt+1 = γt + ρt ˜∇γLS(ηt  γt) 
+
+t < ∞ and(cid:80)
+
+that(cid:80)
+
+t ρ2
+
+costs O(N K) time per iteration due to the parsimonious O(K) parameterization of our PTM.
+Our full inferential procedure is summarized in Algorithm 1. Within a mini-batch S  steps 2-3
+can be trivially parallelized across triangles. Furthermore  the local parameters qijk(x  y  z) can
+
+a δaaa
+
+5
+
+be discarded between iterations  since all natural gradient sufﬁcient statistics can be accumulated
+during the local update. This saves up to tens of gigabytes of memory on million-node networks.
+5 Experiments
+We demonstrate that our stochastic variational algorithm achieves latent space recovery accuracy
+comparable to or better than prior work  but in only a fraction of the time. In addition  we perform
+heldout link prediction and likelihood lower bound (i.e. perplexity) experiments on several large
+real networks  showing that our approach is orders of magnitude more scalable than previous work.
+5.1 Generating Synthetic Data
+We use two latent space models as the simulator for our experiments — the MMSB model
+[1]
+(which the MMSB batch variational algorithm solves for)  and a model that produces power-law net-
+works from a latent space (see Appendix for details). Brieﬂy  the MMSB model produces networks
+with “blocks” of nodes characterized by high edge probabilities  whereas the Power-Law model pro-
+duces “communities” centered around a high-degree hub node. We show that our algorithm rapidly
+and accurately recovers latent space roles based on these two notions of node-relatedness.
+For both models  we synthesized ground truth role vectors θi’s to generate networks of varying difﬁ-
+culty. We generated networks with N ∈ {500  1000  2000  5000  10000} nodes  with the number of
+roles growing as K = N/100  to simulate the fact that large networks can have more roles [24]. We
+generated “easy” networks where each θi contains 1 to 2 nonzero roles  and “hard” networks with 1
+to 4 roles per θi. A full technical description of our networks can be found in the Appendix.
+5.2 Latent Space Recovery on Synthetic Data
+Task and Evaluation. Given one of the synthetic networks  the task is to recover estimates ˆθi’s
+of the original latent space vectors θi’s used to generate the network. Because we are comparing
+different algorithms (with varying model assumptions) on different networks (generated under their
+own assumptions)  we standardize our evaluation by thresholding all outputs ˆθi’s at 1/8 = 0.125
+(because there are no more than 4 roles per θi)  and use Normalized Mutual Information (NMI) [12 
+23]  a commonly-used measure of overlapping cluster accuracy  to compare the ˆθi’s with the true
+θi’s (thresholded similarly). In other words  we want to recover the set of non-zero roles.
+Competing Algorithms and Initialization. We tested the following algorithms:
+
+• Our PTM stochastic variational algorithm. We used δ = 50 subsampling2 (i.e. (cid:0)50
+
+(cid:1) = 1225 triangles
+
+algorithm has O(N δ2K 3) time complexity  and is single-threaded.
+
+Because of block sampling  complexity is still O(N δ2K 3). Single-threaded.
+
+per node)  hyperparameters α = λ = 0.1  and a 10% minibatch size with step-size τ0(τ1 + t)κ  where
+τ0 = 100  τ1 = 10000  κ = −0.5  and t is the iteration number. Our algorithm has a runtime complexity
+of O(N δ2K). Since our algorithm can be run in parallel  we conduct all experiments using 4 threads —
+compared to single-threaded execution  we observe this reduces runtime to about 40%.
+• MMTM collapsed blocked Gibbs sampler  according to [8]. We also used δ = 50 subsampling. The
+• PTM collapsed blocked Gibbs sampler. Like the above MMTM Gibbs  but using our PTM model.
+• MMSB batch variational [1]. This algorithm has O(N 2K 2) time complexity  and is single-threaded.
+All these algorithms are locally-optimal search procedures  and thus sensitive to initial values. In
+particular  if nodes from two different roles are initialized to have the same role  the output is likely
+to merge all nodes in both roles into a single role. To ensure a meaningful comparison  we therefore
+provide the same ﬁxed initialization to all algorithms — for every role x  we provide 2 example
+nodes i  and initialize the remaining nodes to have random roles. In other words  we seed 2% of the
+nodes with one of their true roles  and let the algorithms proceed from there3.
+Recovery Accuracy. Results of our method  MMSB Variational  MMTM Gibbs and PTM
+Gibbs are in Figure 1. Our method exhibits high accuracy (i.e. NMI close to 1) across almost all
+networks  validating its ability to recover latent roles under a range of network sizes N and roles
+K. In contrast  as N (and thus K) increases  MMSB Variational exhibits degraded performance
+despite having converged  while MMTM/PTM Gibbs converge to and become stuck in local minima
+2 We chose δ = 50 because almost all our synthetic networks have median degree ≤ 50. Choosing δ above
+
+2
+
+the median degree ensures that more than 50% of the nodes will receive all their assigned triangles.
+
+3 In general  one might not have any ground truth roles or labels to seed the algorithm with. For such cases 
+our algorithm can be initialized as follows: rank all nodes according to the number of 3-triangles they touch 
+and then seed the top K nodes with different roles x. The intuition is that “good” roles may be deﬁned as
+having a high ratio of 3-triangles to 2-triangles among participating nodes.
+
+6
+
+Latent space recovery on Synthetic Power-Law and MMSB Networks
+
+Accuracy vs MMSB  MMTM
+
+Runtime
+
+Full vs Mini-Batch
+
+Figure 1: Synthetic Experiments. Left/Center: Latent space recovery accuracy (measured using Normalized
+Mutual Information) and runtime per data pass for our method and baselines. With the MMTM/PTM Gibbs and
+MMSB Variational algorithms  the larger networks did not complete within 12 hours. The runtime plots
+for MMSB easy and Power-Law easy experiments are very similar to the hard experiments  so we omit them.
+Right: Convergence of our stochastic variational algorithm (with 10% minibatches) versus a batch variational
+version of our algorithm. On N = 1  000 networks  our minibatch algorithm converges within 1-2 data passes.
+
+Link Prediction on Synthetic and Real Networks
+
+Dictionary
+
+Roget
+1.0K
+3.6K
+0.65
+0.72
+
+Odlis
+2.9K
+16K
+0.81
+0.88
+
+Biological
+
+Yeast
+2.4K
+6.6K
+0.75
+0.81
+
+arXiv Collaboration
+AstroPh
+GrQc
+5.2K
+18.7K
+200K
+14K
+0.86
+0.82
+0.77
+—
+
+Internet
+Stanford
+
+282K
+2.0M
+0.94
+—
+
+Social
+Youtube
+1.1M
+3.0M
+0.71
+—
+
+Network Type
+
+Name
+Nodes N
+Edges
+
+Our Method AUC
+
+MMSB Variational AUC
+
+MMSB
+2.0K
+40K
+0.93
+0.91
+
+Synthetic
+
+Power-law
+
+2.0K
+40K
+0.97
+0.94
+
+Table 2: Link Prediction Experiments  measured using AUC. Our method performs similarly to MMSB
+Variational on synthetic data. MMSB performs better on smaller  non-social networks  while we perform
+better on larger  social networks (or MMSB fails to complete due to lack of scalability). Roget  Odlis and
+Yeast networks are from Pajek datasets (http://vlado.fmf.uni-lj.si/pub/networks/data/);
+the rest are from Stanford Large Network Dataset Collection (http://snap.stanford.edu/data/).
+(even after many iterations and trials)  without reaching a good solution4. We believe our method
+maintains high accuracy due to its parsimonious O(K) parameter structure — compared to MMSB
+Variational’s O(K 2) block matrix and MMTM Gibbs’s O(K 3) tensor of triangle parameters.
+Having fewer parameters may lead to better parameter estimates  and better task performance.
+Runtime. On the larger networks  MMSB Variational and MMTM/PTM Gibbs did not even
+ﬁnish execution due to their high runtime complexity. This can be seen in the runtime graphs  which
+plot the time taken per data pass5: at N = 5  000  all 3 baselines require orders of magnitude more
+time than our method does at N = 10  000. Recall that K = O(N )  and that our method has time
+complexity O(N δ2K)  while MMSB Variational has O(N 2K 2)  and MMTM/PTM Gibbs has
+O(N δ2K 3) — hence  our method runs in O(N 2) on these synthetic networks  while the others run
+in O(N 4). This highlights the need for network methods that are linear in N and K.
+Convergence of stochastic vs. batch algorithms. We also demonstrate that our stochastic varia-
+tional algorithm with 10% mini-batches converges much faster to the correct solution than a non-
+stochastic  full-batch implementation. The convergence graphs in Figure 1 plot NMI as a function of
+data passes  and show that our method converges to the (almost) correct solution in 1-2 data passes.
+In contrast  the batch algorithm takes 10 or more data passes to converge.
+5.3 Heldout Link Prediction on Real and Synthetic Networks
+We compare MMSB Variational and our method on a link prediction task  in which 10% of
+the edges are randomly removed (set to zero) from the network  and  given this modiﬁed network 
+the task is to rank these heldout edges against an equal number of randomly chosen non-edges.
+For MMSB  we simply ranked according to the link probability under the MMSB model. For our
+
+4 With more generous initializations (20 out of 100 ground truth nodes per role)  MMTM/PTM Gibbs
+converge correctly. In practice however  this is an unrealistic amount of prior knowledge to expect. We believe
+that more sophisticated MCMC schemes may ﬁx this convergence issue with MMTM/PTM models.
+
+5One data pass is deﬁned as performing variational inference on m triangles  where m is equal to the total
+
+number of triangles. This takes the same amount of time for both the stochastic and batch algorithms.
+
+7
+
+0.51251000.20.40.60.811 000s of nodes NNMINMI: MMSB easy  Our methodMMTM GibbsPTM GibbsMMSB Variational0.51251000.20.40.60.811 000s of nodes NNMINMI: MMSB hard  Our methodMMTM GibbsPTM GibbsMMSB Variational0.512510020040060080010001 000s of nodes NSeconds per data passRuntime: MMSB hard  Our methodMMTM GibbsPTM GibbsMMSB Variational024681000.20.40.60.81Data passesNMIConvergence: MMSB Hard  N=1000  10% mini−batchesFull batch variational0.51251000.20.40.60.811 000s of nodes NNMINMI: Power−Law easy  Our methodMMTM GibbsPTM GibbsMMSB Variational0.51251000.20.40.60.811 000s of nodes NNMINMI: Power−Law hard  Our methodMMTM GibbsPTM GibbsMMSB Variational0.512510020040060080010001 000s of nodes NSeconds per data passRuntime: Power−Law hard  Our methodMMTM GibbsPTM GibbsMMSB Variational024681000.20.40.60.81Data passesNMIConvergence: Power−Law Hard  N=1000  10% mini−batchesFull batch variationalName
+
+Brightkite
+Brightkite
+
+Slashdot Feb 2009
+Slashdot Feb 2009
+
+Stanford Web
+Stanford Web
+
+Berkeley-Stanford Web
+
+Youtube
+
+Real Networks — Statistics  Experimental Settings and Runtime
+
+Edges
+Nodes
+δ
+50
+214K
+58K
+||
+||
+||
+50
+504K
+82K
+||
+||
+||
+2.0M 20
+282K
+||
+||
+50
+685K
+6.6M 30
+1.1M 3.0M 50
+
+2 3-Tris (for δ)
+
+Frac. 3-Tris
+
+Roles K Threads
+
+Runtime (10 data passes)
+
+3.5M
+||
+9.0M
+||
+
+11.4M
+25.0M
+57.6M
+36.0M
+
+0.11
+||
+0.030
+||
+0.57
+0.42
+0.55
+0.053
+
+64
+300
+100
+300
+5
+100
+100
+100
+
+4
+4
+4
+4
+4
+4
+8
+8
+
+34 min
+2.6 h
+2.4 h
+6.7 h
+10 min
+6.3 h
+15.2 h
+9.1 h
+
+Table 3: Real Network Experiments. All networks were taken from the Stanford Large Network Dataset
+Collection; directed networks were converted to undirected networks via symmetrization. Some networks were
+run with more than one choice of settings. Runtime is the time taken for 10 data passes (which was more than
+sufﬁcient for convergence on all networks  see Figure 2).
+
+Real Networks — Heldout lower bound of our method
+
+Figure 2: Real Network Experiments. Training and heldout variational lower bound (equivalent to perplex-
+ity) convergence plots for all experiments in Table 3. Each plot shows both lower bounds over 10 data passes
+(i.e. 100 iterations with 10% minibatches). In all cases  we observe convergence between 2-5 data passes  and
+the shape of the heldout curve closely mirrors the training curve (i.e. no overﬁtting).
+method  we ranked possible links i − j by the probability that the triangle (i  j  k) will include edge
+i − j  marginalizing over all choices of the third node k and over all possible role choices for nodes
+i  j  k. Table 2 displays results for a variety of networks  and our triangle-based method does better
+on larger social networks than the edge-based MMSB. This matches what has been observed in the
+network literature [24]  and further validates our triangle modeling assumptions.
+5.4 Real World Networks — Convergence on Heldout Data
+Finally  we demonstrate that our approach is capable of scaling to large real-world networks  achiev-
+ing convergence in a fraction of the time reported by recent work on scalable network modeling.
+Table 3 lists the networks that we tested on  ranging in size from N = 58K to N = 1.1M. With
+a few exceptions  the experiments were conducted with δ = 50 and 4 computational threads. In
+particular  for every network  we picked δ to be larger than the average degree  thus minimizing the
+amount of triangle data lost to subsampling. Figure 2 plots the training and heldout variational lower
+bound for several experiments  and shows that our algorithm always converges in 2-5 data passes.
+We wish to highlight two experiments  namely the Brightkite network for K = 64  and the Stanford
+network for K = 5 (the ﬁrst and ﬁfth rows respectively in Table 3). Gopalan et al. ([5]) reported
+convergence on Brightkite in 8 days using their scalable a-MMSB algorithm with 4 threads  while
+Ho et al. ([8]) converged on Stanford in 18.5 hours using the MMTM Gibbs algorithm on 1 thread.
+In both settings  our algorithm is orders of magnitude faster — using 4 threads  it converged on
+Brightkite and Stanford in just 12 and 4 minutes respectively  as seen in Figure 2.
+In summary  we have constructed a latent space network model with O(N K) parameters and de-
+vised a stochastic variational algorithm for O(N K) inference. Our implementation allows network
+analysis with millions of nodes N and hundreds of roles K in hours on a single multi-core machine 
+with competitive or improved accuracy for latent space recovery and link prediction. These results
+are orders of magnitude faster than recent work on scalable latent space network modeling [5  8].
+Acknowledgments
+This work was supported by AFOSR FA9550010247  NIH 1R01GM093156 and DARPA
+FA87501220324 to Eric P. Xing. Qirong Ho is supported by an A-STAR  Singapore fellowship.
+Junming Yin is supported by a Ray and Stephanie Lane Research Fellowship.
+
+8
+
+00.10.20.30.40.50.60.7−1.5−1−0.5x 107Training LBHoursBrightkite K=64  4 threads00.10.20.30.40.50.60.7−2−1.5−1x 106Heldout LB00.511.522.53−2−1.5−1−0.5x 107Training LBHoursBrightkite K=300  4 threads00.511.522.53−2.5−2−1.5−1x 106Heldout LB00.511.522.5−4−3−2−1x 107Training LBHoursSlashdot K=100  4 threads00.511.522.5−6−4−20x 106Heldout LB01234567−3.5−3−2.5−2−1.5−1x 107Training LBHoursSlashdot K=300  4 threads01234567−4.5−4−3.5−3−2.5−2x 106Heldout LB00.020.040.060.080.10.120.140.16−3−2.5−2−1.5−1x 107Training LBHoursStanford K=5  4 threads00.020.040.060.080.10.120.140.16−4.5−4−3.5−3−2.5x 106Heldout LB01234567−10−50x 107Training LBHoursStanford K=100  4 threads01234567−1.5−1−0.5x 107Heldout LB0246810121416−1.8−1.6−1.4−1.2−1−0.8−0.6x 108Training LBHoursBerk−Stan K=100  8 threads0246810121416−2.4−2.2−2−1.8−1.6−1.4−1.2x 107Heldout LB0246810−1.5−1−0.5x 108Training LBHoursYoutube K=100  8 threads0246810−2−1.5−1x 107Heldout LBReferences
+[1] E. Airoldi  D. Blei  S. Fienberg  and E. Xing. Mixed membership stochastic blockmodels. Journal of
+
+Machine Learning Research  9:1981–2014  2008.
+
+[2] S. Amari. Natural gradient works efﬁciently in learning. Neural Computation  10(2):251–276  1998.
+[3] L. Bottou. Stochastic learning. Advanced Lectures on Machine Learning  pages 146–168  2004.
+[4] M. Carman  F. Crestani  M. Harvey  and M. Baillie. Towards query log based personalization using
+topic models. In Proceedings of the 19th ACM international conference on Information and knowledge
+management (CIKM ’10)  pages 1849–1852  2010.
+
+[5] P. Gopalan  D. Mimno  S. Gerrish  M. Freedman  and D. Blei. Scalable inference of overlapping commu-
+
+nities. In Advances in Neural Information Processing Systems 25  pages 2258–2266. 2012.
+
+[6] M. Granovetter. The strength of weak ties. American Journal of Sociology  78(6):1360–1380  1973.
+[7] Q. Ho  A. Parikh  and E. Xing. A multiscale community blockmodel for network exploration. Journal of
+
+the American Statistical Association  107(499)  2012.
+
+[8] Q. Ho  J. Yin  and E. Xing. On triangular versus edge representations — towards scalable modeling of
+
+networks. In Advances in Neural Information Processing Systems 25  pages 2141–2149. 2012.
+
+[9] P. Hoff  A. Raftery  and M. Handcock. Latent space approaches to social network analysis. Journal of the
+
+American Statistical Association  97(460):1090–1098  2002.
+
+[10] M. Hoffman  D. Blei  C. Wang  and J. Paisley. Stochastic variational inference. Journal of Machine
+
+Learning Research  14:1303–1347  2013.
+
+[11] D. Hunter  S. Goodreau  and M. Handcock. Goodness of ﬁt of social network models. Journal of the
+
+American Statistical Association  103(481):248–258  2008.
+
+[12] A. Lancichinetti  S. Fortunato  and J. Kert´esz. Detecting the overlapping and hierarchical community
+
+structure in complex networks. New Journal of Physics  11(3):033015+  2009.
+
+[13] Y. Low  D. Agarwal  and A. Smola. Multiple domain user personalization. In Proceedings of the 17th
+ACM SIGKDD international conference on Knowledge discovery and data mining (KDD ’11)  pages
+123–131  2011.
+
+[14] K. Miller  T. Grifﬁths  and M. Jordan. Nonparametric latent feature models for link prediction. In Ad-
+
+vances in Neural Information Processing Systems 22  pages 1276–1284. 2009.
+
+[15] R. Milo  S. Shen-Orr  S. Itzkovitz  N. Kashtan  D. Chklovskii  and U. Alon. Network motifs: Simple
+
+building blocks of complex networks. Science  298(5594):824–827  2002.
+
+[16] M. Morris  M. Handcock  and D. Hunter. Speciﬁcation of exponential-family random graph models:
+
+Terms and computational aspects. Journal of Statistical Software  24(4)  2008.
+
+[17] M. Newman  S. Strogatz  and D. Watts. Random graphs with arbitrary degree distributions and their
+
+applications. Physical Review E  64(2)  2001.
+
+[18] H. Robbins and S. Monro. A stochastic approximation method. The Annals of Mathematical Statistics 
+
+22(3):400–407  1951.
+
+[19] P. Sarkar and A. Moore. Dynamic social network analysis using latent space models. ACM SIGKDD
+
+Explorations Newsletter  7(2):31–40  2005.
+
+[20] M. Sato. Online model selection based on the variational Bayes. Neural Computation  13(7):1649–1681 
+
+2001.
+
+[21] G. Simmel and K. Wolff. The Sociology of Georg Simmel. Free Press  1950.
+[22] M. Wainwright and M. Jordan. Graphical models  exponential families  and variational inference. Foun-
+
+dations and Trends in Machine Learning  1(1-2):1–305  2008.
+
+[23] J. Xie  S. Kelley  and B. Szymanski. Overlapping community detection in networks: the state of the art
+
+and comparative study. ACM Computing Surveys  45(4)  2013.
+
+[24] J. Yang and J. Leskovec. Deﬁning and evaluating network communities based on ground-truth. In Pro-
+
+ceedings of the ACM SIGKDD Workshop on Mining Data Semantics. ACM  2012.
+
+9
+
+,Junming Yin
+Qirong Ho
+Eric Xing
+Kaito Fujii
+Hisashi Kashima

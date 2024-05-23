@@ -1,0 +1,1391 @@
+2019,Staying up to Date with Online Content Changes Using Reinforcement Learning for Scheduling,From traditional Web search engines to virtual assistants and Web accelerators  services that rely on online information need to continually keep track of remote content changes by explicitly requesting content updates from remote sources (e.g.  web pages). We propose a novel optimization objective for this setting that has several practically desirable properties  and efficient algorithms for it with optimality guarantees even in the face of mixed content change observability and initially unknown change model parameters. Experiments on 18.5M URLs crawled daily for 14 weeks show significant advantages of this approach over prior art.,Staying up to Date with Online Content Changes
+Using Reinforcement Learning for Scheduling
+
+Andrey Kolobov
+Microsoft Research
+Redmond  WA-98052
+
+akolobov@microsoft.com
+
+Yuval Peres
+
+yperes@gmail.com
+
+Cheng Lu
+
+Microsoft Bing
+
+Bellevue  WA-98004
+
+Cheng.Lu@microsoft.com
+
+Eric Horvitz
+
+Microsoft Research
+Redmond  WA-98052
+
+horvitz@microsoft.com
+
+Abstract
+
+From traditional Web search engines to virtual assistants and Web accelerators 
+services that rely on online information need to continually keep track of remote
+content changes by explicitly requesting content updates from remote sources
+(e.g.  web pages). We propose a novel optimization objective for this setting that
+has several practically desirable properties  and efﬁcient algorithms for it with
+optimality guarantees even in the face of mixed content change observability and
+initially unknown change model parameters. Experiments on 18.5M URLs crawled
+daily for 14 weeks show signiﬁcant advantages of this approach over prior art.
+
+Introduction
+
+1
+As the Web becomes more and more dynamic  services that rely on web data face the increasingly
+challenging problem of keeping up with online content changes. Whether it be a continuous-query
+system [26]  a virtual assistant like Cortana or Google Now  or an Internet search engine  such a
+service tracks many remote sources of information – web pages or data streams [27]. Users expect
+these services  which we call trackers  to surface the latest information from the sources. This is
+easy if sources push content updates to the tracker  but few sources do. Instead  major trackers such
+as search engines must continually decide when to re-pull (crawl) data from sources to pick up the
+changes. A policy that makes these decisions well solves the freshness crawl scheduling problem.
+Freshness crawl scheduling has several challenging aspects. For most sources  the tracker ﬁnds
+out whether they have changed only when it crawls them. To guess when the changes happen  and
+hence should be downloaded  the tracker needs a predictive model whose parameters are initially
+unknown. Thus  the tracker needs to learn these models and optimize a freshness-related objective
+when scheduling crawls. For some web pages  however  sitemap polling and other means can provide
+trustworthy near-instantaneous signals that the page has changed in a meaningful way  though not
+what the change is exactly. But even with these remote change observations and known change model
+parameters  freshness crawl scheduling remains highly nontrivial because the tracker cannot react
+to every individual predicted or actual change. The tracker’s infrastructure imposes a bandwidth
+constraint on the average daily number of crawls  usually just a fraction of the change event volume.
+Last but not least  Google and Bing track many billions of pages [32] with vastly different importance
+and change frequency characteristics. The sheer size of this constrained learning and optimization
+problem makes low-polynomial algorithms for it a must  despite the availability of big-data platforms.
+This paper presents a holistic approach to freshness crawl scheduling that handles all of the above
+aspects in a computationally efﬁcient manner with optimality guarantees using a type of reinforcement
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+learning (RL) [29]. This problem has been studied extensively from different angles  as described
+in the Related Work section. The scheduling aspect per se  under various objectives and assuming
+known model parameters  has been the focus of many papers  e.g.  [2  10  13  25  35]. In distinction
+from these works  our approach has all of the following properties: (i) optimality; (ii) computational
+efﬁciency; (iii) guarantee that every source changing at a non-zero rate will be occasionally crawled;
+(iv) ability to take advantage of remote change observations  if available. No other work has (iv)  and
+only [35] has (i)-(iii). Moreover  learning change models previously received attention [11] purely as
+a preprocessing step. Our RL approach integrates it with scheduling  with convergence guarantees.
+Speciﬁcally  our contributions are: (1) A natural freshness optimization objective based on harmonic
+numbers  and analysis showing how its mathematical properties enable efﬁcient optimal scheduling.
+(2) Efﬁcient optimization procedures for this bandwidth-constrained objective under complete  mixed 
+and lacking remote change observability. (3) A reinforcement learning algorithm that integrates
+these approaches with model estimation of [11] and converges to the optimal policy  lifting the
+known-parameter assumption. (4) An approximate crawl scheduling algorithm that requires learning
+far fewer parameters  and identifying a condition under which its solution is optimal.
+2 Problem formalization
+
+In settings we consider  a service we call tracker monitors a set W of information sources. A source
+w ∈ W can be a web page  a data stream  a ﬁle  etc  whose content occasionally changes. To pick up
+changes from a source  the tracker needs to crawl it  i.e.  download its content. When source w has
+changes the tracker hasn’t picked up  the tracker is stale w.r.t. w; otherwise  it is fresh w.r.t. w. We
+assume near-instantaneous crawl operations  and a ﬁxed set of sources W . Growing W to improve
+information completeness [27] is also an important but distinct problem; we do not consider it here.
+Discrete page changes. We deﬁne a content change at a source as an alteration at least minimally
+important to the tracker. In practice  trackers compute a source’s content digest using data extractors 
+shingles [4]  or similarity hashes [7]  and consider content changed when its digest changes.
+Models of change process and importance. We model each source w ∈ W ’s changes as a Poisson
+process with change rate ∆w. Many prior works adopted it for web pages [2  8  9  10  11  12  35] as a
+good balance between ﬁdelity and computational convenience. We also associate an importance score
+µw with each source  and denote these parameters jointly as (cid:126)µ. Importance score µw can be thought
+of as characterizing the time-homogeneous Poisson rate at which the page is served in response to the
+query stream  although in general it can be any positive weight measuring source signiﬁcance [2].
+While scores µw are deﬁned by  and known to  the tracker  change rates ∆w need to be learned.
+Change observability. For most sources  the tracker can ﬁnd out whether the source has changed
+only by crawling it. In this case  even crawling doesn’t tell the tracker how many times the source
+has changed since the last crawl. We denote the set of these sources as W − and say that the tracker
+receives incomplete change observations about them. However  for other sources  which we denote as
+W o  the tracker may receive near-instant notiﬁcation whenever they change  i.e.  get complete remote
+change observations. E.g.  for web pages these signals may be available from browser telemetry or
+sitemaps. Thus the tracker’s set of sources can be represented as W = W o∪ W − and W o∩ W − = 0.
+Bandwidth constraints. Even if the tracker receives complete change observations  it generally
+cannot afford to do a crawl upon each of them. The tracker’s network infrastructure and considerations
+of respect to other Internet users limit its crawl rate (the average number of requests per day); the
+total change rate of tracked sources may be much higher. We call this limit bandwidth constraint R.
+Optimizing freshness. The tracker operates in continuous time and starts fresh w.r.t. all sources. Our
+scheduling problem’s solution is a policy π — a rule that at every instant t chooses (potentially stochas-
+tically) a source to crawl or decides that none should be crawled. Executing π produces a crawl se-
+quence of time-source pairs CrSeq = (t1  w1)  (t2  w2)  . . .  denoted CrSeqw = (t1  w)  (t2  w)  . . .
+for a speciﬁc source w. Similarly  the (Poisson) change process at the sources generates a change
+sequence ChSeq = (t(cid:48)
+i; its restriction to
+source w is ChSeqw. We denote the joint process governing changes at all sources as P ((cid:126)∆).
+3 Minimizing harmonic staleness penalty
+
+i is a change time of source w(cid:48)
+
+2)  . . .  where t(cid:48)
+
+1  w(cid:48)
+
+1)  (t(cid:48)
+
+2  w(cid:48)
+
+We view maximizing freshness as minimizing costs the tracker incurs for the lack thereof  and
+associate the time-averaged expected staleness penalty J π with every scheduling policy π:
+
+2
+
+(cid:34)
+
+1
+T
+
+(cid:90) T
+
+(cid:88)
+
+0
+
+w∈W
+
+(cid:35)
+
+µwC(Nw(t))dt
+
+(1)
+
+J π = lim
+T→∞
+
+E
+
+CrSeq∼π 
+
+ChSeq∼P ((cid:126)∆)
+
+Here  T is a planning horizon  Nw(t) is the number of uncrawled changes source w has accumulated
+by time t  and C : Z+ → R+ is a penalty function  to be chosen later  that assigns a cost to every
+possible number of uncrawled changes. Note that Nw(t) implicitly depends on the most recent time
+w was crawled as well as on change sequence ChSeq  so the expectation is both over possible change
+sequences and possible crawl sequences CrSeq generatable by π. Minimizing staleness means
+ﬁnding π∗ = argminπ∈Π J π under bandwidth constraint  where Π is a suitably chosen policy class.
+Choosing C(n) that is efﬁcient to optimize and induces "well-behaving" policies is of utmost
+importance. E.g.  C(n) = 1n>0  which imposes a ﬁxed penalty if a source has any changes since
+last crawl [2  10]  can be optimized efﬁciently in O(|W| log(|W|)) time over the class Π of policies
+that crawl each source w according to a Poisson process with a source-speciﬁc rate ρw. However  for
+many sources  the optimal ρ∗
+w is 0 under this C(n) [2]. This is unacceptable in practice  as it leaves
+the tracker stale w.r.t. some sources forever  raising a question: why monitor these sources at all?
+In this paper  we propose and analyze the following penalty:
+
+C(n) = H(n) =
+
+1
+i
+
+if n > 0  and 0 if n = 0
+
+(2)
+
+n(cid:88)
+
+i=1
+
+H(n) for n > 0 is the n-th harmonic number and has several desirable properties as staleness penalty:
+It is strictly monotonically increasing. Thus  it penalizes the tracker for every change that happened
+at a source since the previous crawl  not just the ﬁrst one as in [10].
+It is discrete-concave  providing diminishing penalties: intuitively  while all undownloaded changes
+at a source matter  the ﬁrst one matters most  as it marks the transition from freshness to staleness.
+"Good" policies w.r.t. this objective don’t starve any source as long as that source changes. This
+is because  as it turns out  policies that ignore changing sources incur J π = ∞ if C(n) is as in Eq. 2
+(see Prop. 1 in Section 4). In fact  this paper’s optimality results and high-level approaches are valid
+for any concave C(n) ≥ 0 s.t. limn→∞ C(n) = ∞  though possibly at a higher computational cost.
+It allows for efﬁciently ﬁnding optimal policies under practical policy classes. Indeed  C(n) =
+H(n) isn’t the only penalty function satisfying the above properties. For instance  C(n) = nd
+for 0 < d < 1 and C(n) = logd(1 + n) for d > 1 behave similarly  but result in much more
+computationally expensive optimization problems  as do other alternatives we have considered.
+
+4 Optimization under known change process
+
+We now derive procedures for optimizing Eq. 1 with C(n) = H(n) (Eq. 2) under the bandwidth
+constraint for sources with incomplete and complete change observations  assuming that we know the
+change process parameters (cid:126)∆ exactly. In Section 5 we will lift the known-parameters assumption. We
+assume (cid:126)µ  (cid:126)∆ > 0  because sources that are unimportant or never change don’t need to be crawled.
+
+4.1 Case of incomplete change observations
+
+When the tracker can ﬁnd out about changes at a source only by crawling it  we consider randomized
+policies that sample crawl times for each source w from a Poisson process with rate ρw:
+
+Π− = {CrSeqw ∼ P oisson(ρw) ∀w ∈ W −|(cid:126)ρ ≥ 0}
+
+(3)
+This policy class reﬂects the intuition that  since each source changes according to a Poisson process 
+i.e.  roughly periodically  it should also be crawled roughly periodically. In fact  as Azar et al. [2]
+show  any π ∈ Π− can be de-randomized into a deterministic policy that is approximately periodic
+for each w. Since every π ∈ Π− is fully determined by the corresponding vector (cid:126)ρ  we can easily
+
+express a bandwidth constraint on π ∈ Π− as(cid:80)
+
+w∈W − ρw = R.
+
+To optimize over Π−  we ﬁrst express policy cost (Eq. 1) in terms of Π−’s policy parameters (cid:126)ρ ≥ 0:
+
+3
+
+Proposition 1. For π ∈ Π−  J π from Eq. 1 is equivalent to
+
+J π = − (cid:88)
+
+(cid:18) ρw
+
+(cid:19)
+
+(4)
+
+µw ln
+
+w∈W −
+
+∆w + ρw
+
+Proof. See the Supplement. Note that J π = ∞ if ρw = 0 for any w ∈ W −. The proof relies on
+(cid:4)
+properties of Poisson processes  particularly memorylessness.
+Thus  ﬁnding π∗ ∈ Π− can be formalized as follows:
+Problem 1. [Finding π∗ ∈ Π−]
+INPUT: bandwidth R > 0; positive importance and change rate vectors (cid:126)µ  (cid:126)∆ > 0.
+
+= −J π = (cid:80)
+
+π
+
+w∈W −
+
+(cid:16) ρw
+
+(cid:17)
+
+µw ln
+
+∆w+ρw
+
+subject to
+
+(cid:80)
+
+w∈W −
+
+OUTPUT: Crawl rates (cid:126)ρ = (ρw)w∈W − maximizing J
+
+ρw = R  ρw ≥ 0 for all w ∈ W −.
+
+The next result readily identiﬁes the opti-
+mal solution to this problem:
+Proposition 2. For (cid:126)µ  (cid:126)∆ > 0  policy
+π∗ ∈ Π− parameterized by (cid:126)ρ∗ > 0 that
+satisﬁes the following equation system is
+unique  minimizes harmonic penalty J π
+in Eq. 2  and is therefore optimal in Π−:
+
+(cid:40)
+(cid:80)
+
+ρw =
+
+√
+
+w+ 4µw ∆w
+
+λ −∆w
+
+∆2
+
+2
+
+w∈W − ρw = R
+
+  for all w ∈ W −
+
+(5)
+
+Algorithm 1: LAMBDACRAWL-INCOMLOBS:
+ﬁnding the optimal crawl scheduling policy π∗ ∈
+Π− under incomplete change observations (Prob-
+lem 1)
+Input: R ≥ 0 – bandwidth;
+
+(cid:126)µ > 0  (cid:126)∆ > 0 – importance and change rates;
+ > 0 – desired precision on λ
+
+Output: (cid:126)ρ – vector of crawl rates for each source.
+
+w∈W −{µw}
+
+w∈W −{µw}
+
+w∈W −{∆w}R+R2
+
+|W −| max
+
+w∈W −{∆w} min
+
+1 λlower ←(cid:91) |W −|2 min
+2 λupper ←(cid:91) |W −|2 max
+3 λ ←(cid:91) BisectionSearch(λlower  λupper  )
+(cid:113)
+5 foreach w ∈ W − do ρw ←(cid:91) −∆w +
+
+4 // see  e.g.  Burden & Faires [6]
+
+w∈W−{∆w} max
+
+|W −| min
+
+w∈W −{∆w}R+R2
+
+6 Return (cid:126)ρ
+
+w + 4µw ∆w
+∆2
+2
+
+λ
+
+
+
+π
+
+)|W −|).
+
+Proof. See the Supplement. The main in-
+sight is that for any (cid:126)µ  (cid:126)∆ > 0 the Lagrange multiplier method  which gives rise to Eq. system 5 
+= −J π (Eq. 4) with (cid:126)ρ > 0  which thus must correspond to
+identiﬁes the only maximizer of J
+π∗ ∈ Π−. Crucially  that solution always has λ > 0.
+(cid:4)
+Eq. system 5 is non-linear  but the r.h.s. of Eqs. involving λ monotonically decreases in λ > 0  so 
+e.g.  bisection search [6] on λ > 0 can ﬁnd (cid:126)ρ∗ as in Algorithm 1.
+Proposition 3. LAMBDACRAWL-INCOMLOBS (Algorithm 1) ﬁnds an -approximation to Problem
+1’s optimal solution in time O(log2( λupper−λlower
+Proof. See the Supplement. The key step is showing that the solution λ is in [λlower  λupper]. (cid:4)
+Note that a convex problem like this could also be handled using interior-point methods  but the most
+suitable ones have higher  cubic per-iteration complexity [5].
+4.2 Case of complete change observations
+If the tracker receives a notiﬁcation every time a source changes  the policy class Π− in Eq. 3 is
+clearly suboptimal  because it ignores these observations. At the same time  crawling every source on
+w∈W o ∆w can easily
+exceed bandwidth R. These extremes suggest a policy class whose members trigger crawls for only a
+fraction of the observations  dictated by a source-speciﬁc probability pw:
+
+every change signal is unviable  because the total change rate of all sources(cid:80)
+
+Πo ={for all w ∈ W o  on each observation ow crawl w with probability pw |0 ≤ (cid:126)p ≤ 1}
+
+Proposition 4. For π ∈ Πo  J π from Eq. 1 is equivalent to J π = −(cid:80)
+
+(6)
+As with Π−  to ﬁnd π∗ ∈ Πo we ﬁrst express J π from Eq. 1 in terms of Πo’s policy parameters (cid:126)p:
+w∈W o µw ln (pw) if (cid:126)p > 0
+and J π = ∞ if pw = 0 for any w ∈ W o.
+Proof. See the Supplement. The key insight is that under any π ∈ Πo  the number of w’s uncrawled
+(cid:4)
+changes at time t is geometrically distributed with parameter pw.
+
+4
+
+Under any π ∈ Πo  the crawl rate ρw of any source is related to its change rate ∆w: every time w
+changes we get an observation and crawl w with probability pw. Thus  ρw = pw∆w. Also  bandwidth
+w∈W o ∆w isn’t sensible  because with complete change observations the tracker doesn’t
+beneﬁt from more crawls than there are changes. Thus  we frame ﬁnding π∗ ∈ Πo as follows:
+Problem 2. [Finding π∗ ∈ Πo]
+
+R > (cid:80)
+INPUT: bandwidth R s.t. 0 < R ≤(cid:80)
+OUTPUT: Crawl probabilities (cid:126)p = (pw)w∈W o subject to(cid:80)
+
+w∈W o; importance and change rate vectors (cid:126)µ  (cid:126)∆ > 0.
+
+w∈W o pw∆w = R and 0 ≤ pw ≤
+
+1 for all w ∈ W o  maximizing J
+Non-linear optimization under inequality constraints could generally take exponential time in the
+constraint number. Our main result in this subsection is a polynomial optimal algorithm for Problem 2.
+First  consider a relaxation of Problem 2
+that ignores the inequality constraints:
+Proposition 5. The optimal solution (cid:126)ˆp∗ to
+the relaxation of Problem 2 that ignores in-
+equality constraints is unique and assigns
+ˆp∗
+w =
+
+Algorithm 2: LAMBDACRAWL-COMPLOBS:
+ﬁnding the optimal crawl scheduling policy
+π∗ ∈ Πo under complete change observations
+(Problem 2)
+
+= −J π =(cid:80)
+
+1 LAMBDACRAWL-COMPLOBS:
+
+w(cid:48)∈W o µw(cid:48) for all w ∈ W o.
+
+w∈W o µw ln (pw).
+
+(cid:80)
+
+Rµw
+
+∆w
+
+π
+
+R s.t. 0 ≤ R ≤(cid:80)
+
+2
+
+Input: (cid:126)µ  (cid:126)∆ – importance and change rate vectors
+w∈W ∆w – bandwidth;
+Output: (cid:126)p∗ – vector specifying optimal per-page crawl
+
+// ignore w
+
+7
+8
+9
+10
+11
+
+12
+
+13
+
+14
+
+algorithm
+
+rem \ {w}
+
+// reduce remaining
+
+// remaining sources to consider
+
+µw(cid:48) for all w ∈ W o
+
+foreach w ∈ W o
+w ≥ 1 then
+p∗
+
+V iolationDetected ←(cid:91) F alse
+
+probabilities upon receiving a change
+observation.
+rem (cid:54)= ∅ do
+4 while W o
+foreach w ∈ W o
+rem do
+(cid:80)
+5
+ˆp∗
+Rµw
+6
+w(cid:48)∈W o
+
+3 Wrem ←(cid:91) W o
+w ←(cid:91)
+w ←(cid:91) 1
+R ←(cid:91) R − ∆w
+rem ←(cid:91) W o
+
+Proof. See the Supplement. The proof
+(cid:4)
+applies Lagrange multipliers.
+Our
+LAMBDACRAWL-
+COMPLOBS (Algorithm 2)’s high-level
+approach is to iteratively (lines 4-14)
+solve Problem 2’s relaxations as in Prop.
+5 (lines 5-6)  each time detecting sources
+that activate (either meet or exceed) the
+pw ≤ 1 constraints (line 9). (Note that
+w ≤ 0.)
+the relaxed solution never has ˆp∗
+Our key insight  which we prove in the
+Supplement  is that any such source has
+p∗
+w = 1. Therefore  we set p∗
+w = 1 for
+each of them  adjust the overall bandwidth
+constraint for the remaining sources to
+Rrem = R − p∗
+w∆w = R − ∆w  and
+remove w from further consideration
+(lines 10-12). Eventually  we arrive at a
+(possibly empty) set of sources for which
+Prop. 5’s solution obeys all constraints
+under the remaining bandwidth (lines
+15-16). Since Prop. 5’s solution is optimal in this base case  the overall algorithm is optimal too.
+Proposition 6. LAMBDACRAWL-COMPLOBS is optimal for Problem 2 and runs in time O(|W o|2).
+(cid:4)
+Proof. See the Supplement. The proof critically relies on the concavity of J
+The O(|W o|2) bound is loose. Each iteration usually discovers several active constraints at once  and
+for many sources the constraint is never activated  so the actual running time is close to O(|W o|).
+4.3 Crawl scheduling under mixed observability
+In practice  trackers have to simultaneously handle sources with and without complete change data
+under a common bandwidth budget R. Consider a policy class that combines Π− and Πo:
+Π(cid:9) =
+
+bandwidth
+W o
+onwards
+V iolationDetected = T rue
+
+For all w ∈ W o:{on each change observation ow  crawl w with probability pw|(cid:126)p}
+
+(cid:26)For all w ∈ W −:{CrSeqw ∼ P oisson(ρw)|(cid:126)ρ} 
+(cid:19)
+
+For π ∈ Π(cid:9)  Prop.s 1 and 4 imply that J π from Eq. 1 is equivalent to
+
+if V iolationDetected == F alse then break
+
+16
+17 Return (cid:126)p∗ = (p∗
+
+15 foreach w ∈ W o
+
+w ←(cid:91) ˆp∗
+
+w)w∈W o
+
+rem do
+
+∆w
+
+rem
+
+p∗
+
+w
+
+(7)
+
+rem do
+
+if ˆp∗
+
+π.
+
+rem
+
+µw ln (pw)
+
+(8)
+
+J π = − (cid:88)
+
+µw ln
+
+w∈W −
+
+− (cid:88)
+
+w∈W o
+
+(cid:18) ρw
+
+∆w + ρw
+
+5
+
+Optimization over π ∈ Π(cid:9) can be stated as follows:
+Problem 3. [Finding π∗ ∈ Π(cid:9)]
+INPUT: bandwidth R > 0; importance and change rate vectors (cid:126)µ  (cid:126)∆ > 0.
+OUTPUT: Crawl rates (cid:126)ρ = (ρw)w∈W − and crawl probabilities (cid:126)p = (pw)w∈W o maximizing
+
+(cid:18) ρw
+
+(cid:19)
+
+(cid:88)
+
+subj. to(cid:80)
+
+π
+
+J
+
+w∈W − ρw +(cid:80)
+
+= −J π =
+
+µw ln
+
+(9)
+w∈W o pw∆w = R  ρw > 0 for all w ∈ W −  0 < pw ≤ 1 for all w ∈ W o.
+
+µw ln (pw)
+
+∆w + ρw
+
+w∈W −
+
+w∈W o
+
++
+
+(cid:88)
+
+∗
+
+:
+
+w∈Wo
+
+1 Ro
+2 Ro
+
+min  Ro
+
+max  )
+
+w∈Wo
+
+∆w}
+∗
+
+Output: J
+
+∗
+
+change observations  R  (cid:126)µ  (cid:126)∆  no-obs
+
+Input: Ro – bandwidth for sources with complete
+
+[0  min{R (cid:80)
+
+Output: (cid:126)ρ∗  (cid:126)p∗ – crawl rates and probabilities for
+
+sources without and with complete change
+observations.
+
+(cid:126)µ > 0  (cid:126)∆ > 0 – importance and change rates;
+no-obs   > 0 – desired precisions
+
+max ←(cid:91) min{R (cid:80)
+min ←(cid:91) 0
+3 (cid:126)ρ∗  (cid:126)p∗ ←(cid:91)
+
+OptMaxSearch(Split-Eval-J
+
+  Ro
+4 // E.g.  Golden section search [20]
+5 Return (cid:126)ρ∗  (cid:126)p∗
+6
+7 SPLIT-EVAL-J
+
+Algorithm 3: LAMBDACRAWL: ﬁnding optimal
+mixed-observability policy π∗ ∈ Π(cid:9) (Problem 3)
+Input: R > 0 – bandwidth;
+
+The optimization objective (Eq. 9) is
+strictly concave as a sum of concave func-
+tions over the constrained region  and
+therefore has a unique maximizer. Find-
+ing it amounts to deciding how to split
+the total bandwidth R into Ro for sources
+with complete change observations and
+R− = R − Ro for the rest. For any candi-
+date split  LAMBDACRAWL-COMPLOBS
+and LAMBDACRAWL-INCOMLOBS give
+us the reward-maximizing policy param-
+eters (cid:126)p∗(Ro) and (cid:126)ρ∗(R−)  respectively 
+and Eq.
+9 then tells us the overall
+∗
+(Ro  R−) of that split. We also
+value J
+know that for the optimal split  Ro∗ ∈
+∆w}]  as discussed
+immediately before Problem 2. Thus  we
+can ﬁnd Problem 3’s maximizer to any
+desired precision using a method such as
+Golden-section search [20] on Ro. LAMB-
+DACRAWL (Algorithm 3) implements this
+idea  where SPLIT-EVAL-J
+(line 7) eval-
+(Ro  R−) and OptMaxSearch de-
+uates J
+notes an optimal search method.
+Proposition 7. LAMBDACRAWL (Algo-
+ )) calls to
+rithm 3) ﬁnds an -approximation to Problem 3’s optimal solution using O(log( R
+LAMBDACRAWL-INCOMLOBS and LAMBDACRAWL-COMPLOBS.
+Proof. This follows directly from the optimality of LAMBDACRAWL-INCOMLOBS and
+LAMBDACRAWL-COMPLOBS (Prop.s 2 and 6)  as well as of OptMaxSearch such as Golden section 
+(cid:4)
+which makes O(log( R
+5 Reinforcement learning for scheduling
+All our algorithms so far assume known change rates  but in reality change rates are usually unavailable
+and vary with time  requiring constant re-learning. In this section we modify LAMBDACRAWL into a
+model-based reinforcement learning (RL) algorithm that learns change rates on the ﬂy.
+For a source w  suppose the tracker observes binary change indicators {zj}U
+observation times and zj = 1 iff w changed since tj−1 at least once. Consider two cases:
+Incomplete change observations for w. Here  the tracker generates the sequence {zj}U
+j=1 for each
+source w by crawling it. If zj = 1  the tracker still doesn’t know exactly how many times the source
+changed since time tj−1. Denoting atj = tj − tj−1  j ≥ 1  ˆ∆ that solves
+
+8 (cid:126)ρ ←(cid:91) LAMBDACRAWL-INCOMLOBS(R −
+9 (cid:126)p ←(cid:91) LAMBDACRAWL-COMPLOBS(Ro  (cid:126)µW o   (cid:126)∆W o )
+10 Return(cid:80)
+
+j=1  where {tj}U
+
+Ro  (cid:126)µW −   (cid:126)∆W −   no-obs)
+
+(Eq. 9) for the given split
+
+(cid:16) ρw
+
+ )) iterations.
+
+(cid:17)
+
++(cid:80)
+
+w∈W − µw ln
+
+∆w +ρw
+
+w∈W o µw ln (pw)
+
+j=0 are
+
+∗
+
+∗
+
+(cid:88)
+
+− (cid:88)
+
+aj
+
+eaj ∆ − 1
+
+j:zj =1
+
+j:zj =0
+
+aj = 0 
+
+(10)
+
+is an MLE of ∆ for the given source [11]. The l.h.s. of the equation is monotonically decreasing in
+∆  so ˆ∆ can be efﬁciently found numerically. This estimator is consistent under mild conditions [11] 
+e.g.  if the sequence {aj}∞
+
+j=1 doesn’t converge to 0  i.e.  if the observations are spaced apart.
+
+6
+
+Complete change observations for w.
+In this case  for all j  zj = 1: an observa-
+tion indicating exactly one change arrives
+on every change. Here a consistent MLE
+of ∆ is the observation rate [30]:
+
+ˆ∆ = (U + 1)/tU  
+
+(11)
+
+rate
+
+Algorithm 4: LAMBDALEARNANDCRAWL: ﬁnd-
+ing optimal crawl scheduling policy π∗ ∈ Π(cid:9)
+(Problem 3) under initially unknown change model
+Input: R > 0 – bandwidth;
+
+(cid:126)µ > 0 
+
+(cid:126)ˆ∆0 > 0 – importance and initial change
+
+guesses
+
+n  (cid:126)p∗
+
+sufﬁx length for learning (cid:126)∆ in that epoch
+
+3 foreach 1 ≤ n ≤ Nepochs do
+
+sufﬁx
+
+2 obs_hist ←(cid:91) ()
+
+1 // obs_hist[S(n)] is S(n)-length observation history
+
+no-obs   > 0 – desired precisions
+Tepoch > 0 – duration of an epoch
+Nepochs > 0 – number of epochs
+S(n) – for each epoch n  observation history
+
+(cid:126)ρ∗
+n  (cid:126)p∗
+(cid:126)ˆ∆n−1  no-obs  )
+// (cid:126)Znew holds observations for all sources from start
+to
+// end of epoch n. Execute policy ((cid:126)ρ∗
+
+LAMBDALEARNANDCRAWL  a model-
+based RL version of LAMBDACRAWL that
+uses these estimators to learn model pa-
+rameters simultaneously with scheduling
+is presented in Algorithm 4. It operates
+in epochs of length Tepoch time units each
+(lines 3-13). At the start of each epoch
+n  it calls LAMBDACRAWL (Algorithm
+3) on the available (cid:126)ˆ∆n−1 change rate es-
+timates to produce a policy ((cid:126)ρ∗
+n) opti-
+mal with respect to them (line 4). Execut-
+ing this policy during the current epoch 
+for the time period of Tepoch  and record-
+ing the observations extends the observa-
+tion history (lines 7-8). (Note though that
+for sources w ∈ W o  the observations
+don’t depend on the policy.) It then re-
+estimates change rates using a sufﬁx of
+the augmented observation history (lines
+10-13). Under mild assumptions  LAMB-
+DALEARNANDCRAWL converges to the
+optimal policy:
+Proposition 8. LAMBDALEARNAND-
+CRAWL (Algorithm 4) converges in
+probability to the optimal policy un-
+der
+i.e. 
+limNepochs→∞((cid:126)ρNepochs  (cid:126)pNepochs ) = ((cid:126)ρ∗  (cid:126)p∗)  if (cid:126)∆ is stationary and S(n)  the length of the his-
+tory’s training sufﬁx  satisﬁes S(Nepoch) = length(obs_hist).
+Proof. See the Supplement. It follows from the consistency and positivity of the change rate estimates 
+(cid:4)
+as well as LAMBDACRAWL’s optimality
+
+n ←(cid:91) LAMBDACRAWL(R  (cid:126)µ 
+(cid:126)Znew ←(cid:91) ExecuteAndObserve((cid:126)ρ∗
+ˆ∆nw ←(cid:91) Solve( (cid:80)
+(cid:80)
+ˆ∆nw ←(cid:91) Solve(
+
+Append(obs_hist  (cid:126)Znew)
+// Learn new (cid:126)∆ estimates using Eqs. 10 and 11
+foreach w ∈ W − do
+
++ 0.5
+aj − 0.5 = 0  obs_hist[S(n)])
+
+eaj ∆−1
+
+j:zjw =1
+
+n  (cid:126)p∗
+n  (cid:126)p∗
+
+n) to get it
+n  Tepoch)
+
+the true change rates (cid:126)∆ 
+
+j:zjw =0
+
+foreach w ∈ W o do
+
+US(n)+0.5
+S(n)+0.5   obs_hist[S(n)])
+
+e0.5∆−1 −
+
+4
+
+5
+
+6
+
+7
+
+8
+
+9
+10
+11
+
+12
+
+13
+
+aj
+
+LAMBDALEARNANDCRAWL in practice requires attention to several aspects:
+Stationarity of (cid:126)∆. Source change rates may vary with time  so the length of history sufﬁx for
+estimating (cid:126)∆ should be shorter than the entire available history.
+Singularities of (cid:126)ˆ∆ estimators. The MLE in Eq. 10 yields ˆ∆w = ∞ if all crawls detect a change (the
+r.h.s. is 0). Similarly  Eq. 11 produces ˆ∆w = 0 if no observations about w arrive in a given period. To
+avoid these singularities without affecting consistency  we smooth the estimates by adding imaginary
+observation intervals of length 0.5 to Eq. 10 and imaginary 0.5 observation to Eq. 11 (lines 11 13).
+Number of parameters. Learning a change rate separately for each source can be slow. Instead 
+we can generalize change rates across sources (e.g.  [12]). Alternatively  sometimes we can avoid
+learning for most pages altogether:
+Proposition 9. Suppose the tracker’s set of sources W − is such that for some constant c > 0 
+= c for all w ∈ W −. Then minimizing harmonic penalty under incomplete change observations
+
+µw
+∆w
+
+(Problem 1) has ρ∗
+
+w =
+
+(cid:80)
+µwR−
+w(cid:48)∈W− µw(cid:48) .
+
+c µw into Eq. system 5. (cid:4)
+Proof. See the Supplement. The proof proceeds by plugging in ∆w = 1
+Thus  if the importance-to-change-rate ratio is roughly equal across all sources  then their crawl rates
+don’t depend on change rates or even the ratio constant itself. Thus  we don’t need to learn them for
+sources w ∈ W − and can hope for faster convergence  although for some quality loss (see Section 7).
+
+7
+
+6 Related work
+Scheduling for Posting  Polling  and Maintenance. Besides monitoring information sources 
+mathematically related settings arise in smart broadcasting in social networks [19  31  33  36]  per-
+sonalized teaching [31]  database synchronization [14]  and job and maintenance service scheduling
+[1  3  15  16]. In web crawling context (see Olston & Najork [22] for a survey)  the closest works are
+[10]  [35]  [25]  and [2]. Like [10] and [2]  we use Lagrange multipliers for optimization  and adopt
+the Poisson change model of [10] and many works since. Our contributions differ from prior art in
+several ways: (1) optimization objectives (see below) and guarantees; (2) special crawl scheduling
+under complete change observations; (3) reinforcement learning of model parameters during crawling.
+Optimization objectives. Our objective falls in the class of convex separable resource allocation
+problems [17]. So do most other related objectives: binary freshness/staleness [2  10]  age [8]  and
+embarrassment [35]. The latter is implemented via specially constructed importance scores [35]  so
+our algorithms can be used for it too. Other separable objectives include information longevity [23].
+In contrast  Pandey & Olston [25] focus on an objective that depends on user behavior and cannot be
+separated into contributions from individual sources. While intuitively appealing  their measure can
+be optimized only via many approximations [25]  and the algorithm for it is ultimately heuristic.
+Acquiring model parameters. Importance can be deﬁned and quickly determined from information
+readily available to search engines  e.g.  page relevance to queries [35]  query-independent popularity
+such as PageRank [24]  and other features [25  28]. Learning change rates is more delicate. Change
+rate estimators we use are due to [11]; our contribution in this regard is integrating them into crawl
+scheduling while providing theoretical guarantees  as well as identifying conditions when estimation
+can be side-stepped using an approximation (Prop. 9). While many works adopted the homogeneous
+Poisson change process [2  8  9  10  11  12  35]  its non-homogeneous variant [14]  quasi-deterministic
+[35]  and general marked temporal point process [31] change models were also considered. Change
+models can also be inferred via generalization using source co-location [12] or similarity [28].
+RL. Our setting could be viewed as a restless multi-armed bandit (MAB) [34]  a MAB type that
+allows an arm to change its reward/cost distribution without being pulled. However  no known restless
+MAB class allows arms to incur a cost/reward without being pulled  as in our setting. This distinction
+makes existing MAB analysis such as [18] inapplicable to our model. RL with events and policies
+obeying general marked temporal point processes was studied in [31]. However  it relies on DNNs
+and as a result doesn’t provide guarantees of convergence  optimality  other policy properties  or a
+mechanism for imposing strict constraints on bandwidth  and is far more expensive computationally.
+7 Empirical evaluation
+Our experimental evaluation assesses the relative performance of LAMBDACRAWL  LAMB-
+DACRAWLAPPROX  and existing alternatives  evaluates the beneﬁt of using completes change
+observations  and shows empirical convergence properties of RL for crawl scheduling (Sec. 5). Please
+refer to the Supplement  Sec. 9  for details of the experiment setup. All the data and code we
+used are available at https://github.com/microsoft/Optimal-Freshness-Crawl-Scheduling.
+Metrics. We assessed the algorithms in terms of two criteria. One is the harmonic policy cost J π
+h  
+deﬁned as in Eq. 1 with C(n) as in Eq. 2  which LAMBDACRAWL optimizes directly. The other is the
+binary policy cost J π
+b   also deﬁned as in Eq. 1 but with C(n) = 1n>0. It was used widely in previous
+works  e.g.  [2  10  35]  and is optimized directly by BinaryLambdaCrawl [2]. LAMBDACRAWL
+doesn’t claim optimality for it  but we can still use it to evaluate LAMBDACRAWL’s policy.
+Data and baselines. The experiments used web page change and importance data collected by
+crawling 18  532  314 URLs daily for 14 weeks. We compared LAMBDACRAWL (labeled LC in the
+ﬁgures)  LAMBDACRAWLAPPROX (LCA  LC with Prop. 9’s approximation)  and their RL variants
+LLC (Alg. 4) and LLCA to BinaryLambdaCrawl (BLC) [2]  the state-of-the-art optimal algorithm for
+h = ∞ (see Fig. 1)  we also
+the binary cost J π
+used our own variant  BLC  with the non-starvation guarantee  and its RL ﬂavor BLLC. Finally  we
+used ChangeRateCrawl (CC) [10  35] and UniformCrawl (UC) [9  23] heuristics. In each run of an
+experiment  the bandwidth R was 20% of the total number of URLs used in that run.
+Results. We conducted three experiments  whose results support the following claims:
+(1) LAMBDACRAWL’s harmonic staleness cost J π
+h is a more robust objective than the binary cost
+b widely studied previously: optimizing the former yields policies that are also near-optimal w.r.t.
+J π
+the latter  while the converse is not true. In this experiment  whose results are shown in Fig. 1  we
+
+b . Since BLC may crawl-starve sources and hence get J π
+
+8
+
+π
+J
+
+t
+s
+o
+c
+
+y
+c
+i
+l
+o
+P
+
+600
+
+400
+
+200
+
+0
+
+∞
+∞
+∞
+
+π
+J
+
+t
+s
+o
+c
+y
+c
+i
+l
+o
+P
+
+8 000
+
+6 000
+
+4 000
+
+2 000
+
+0
+
+∞
+∞
+∞
+
+LC-CO LC-IO BLC BLC
+
+500
+
+400
+
+π
+J
+
+t
+s
+o
+c
+
+y
+c
+i
+l
+o
+P
+
+300
+
+0
+
+LLC
+BLLC
+
+LLCA
+
+5
+
+10
+
+15
+
+20
+
+Number of epochs (days)
+
+LCA BLC BLC
+
+LC
+Harmonic J π
+h
+
+Binary J π
+b
+
+b (Fig. 1).
+
+Harmonic J π
+h
+
+Binary J π
+b
+Figure 2: Beneﬁt of using com-
+plete change observations. Here
+we use only the URLs that pro-
+vide them (4% of our dataset)  via
+sitemaps and other signals. On this
+URL subset  LAMBDACRAWL re-
+duces to LC-ComplObs (LC-CO 
+Alg. 2) that heeds these signals 
+while LC-IncomplObs (LC-IO  Alg.
+1)  BLC  and BLC ignore them. As
+a result  LC-CO’s policy cost both
+w.r.t. J π
+b is at least 50%
+lower (!) than the other algorithms’.
+
+h and J π
+
+h ) and binary (J π
+
+Figure 3: Convergence of the RL-
+based LLC  LLCA  and BLLC ini-
+tialized with uniform change rate es-
+timates of 1/day. Dashed lines show
+h of LC 
+asymptotic policy costs (J π
+LCA  and BLC from Fig. 1); plots
+have conﬁdence intervals. LLC con-
+verges notably faster than BLLC 
+LLCA even more so  as it learns
+fewer parameters. LLCA’s asymp-
+totic policy is worse than LLC’s but
+better than BLLC’s  especially w.r.t.
+binary cost J π
+
+Figure 1: Performance w.r.t. har-
+monic (J π
+b ) pol-
+icy costs. Lower bars = better
+policies. LC is robust to both  but
+BLC & BLC [2] aren’t: LC (J π
+h -
+h = ∞) and
+optimal) beats BLC (J π
+BLC by 35% w.r.t. J π
+h   but BLC
+(J π
+b -optimal for incomplete-change-
+observation URLs) and BLC don’t
+beat LC/LCA w.r.t. J π
+b . CC (J π
+h =
+b = 963) and UC (J π
+2144 J π
+h =
+1268 J π
+b = 628) did poorly and
+were omitted from the plot.
+assumed known change rates. To obtain them  we applied the change rate estimators in Eqs. 10 and
+11 to all of the 14-week crawl data for 18.5M URLs  and used their output as ground truth. Policies
+were evaluated using equations in Props. 1  4 to get J π
+h   and Eqs. 12  13 in the Supplement to get J π
+b .
+(2) Utilizing complete change observations as LAMBDACRAWL does when they are available makes
+a very big difference in policy cost. Per Fig. 1  LC outperforms BLC even in terms of binary cost
+b   w.r.t. which BLC gives an optimatlity guarantee as long as all URLs have only incomplete
+J π
+change observations. This raises the question: can LC’s and LCA’s specialized handling of the
+complete-observation URLs  a mere 4% of our dataset  explain their overall performance advantage?
+The experiment results in Fig. 2 suggest that this is the case. Here we used only the aforementioned
+URLs with complete change observations. On this URL set  LC reduces to LC-CO (Alg. 2) and yields
+a 2× reduction in harmonic cost J π
+h compared to treating these URLs conventionally as LC-IO (Alg.
+1)  BLC  and BLC do. On the full 18.5M set of URLs  LC crawls its complete-observability subset
+even more effectively by allocating to it a disproportionately large fraction of the overall bandwidth.
+Although its handling of complete-observation URLs gives LC an edge over alternatives  note that in
+the hypothetical situation where LC treats these URLs conventionally  as reﬂected in the LC-IO’s plot
+in Fig. 2  it is still at par with BLC and BLC w.r.t. J π
+(3) When source change rates are initially unknown  the approximate LLCA converges faster w.r.t.
+h than the optimal LLC  but at the cost of higher asymptotic policy cost. Interestingly  LLCA’s
+J π
+approximation (Prop. 9) only weakly affects its asymptotic performance w.r.t. binary cost J π
+b (Fig.
+1). These factors and algorithm simplicity make this approximation a useful tradeoff in practice.
+This experiment  whose analysis is presented in Fig. 3  compared LLC  LLCA  and BLLC in settings
+where URL change rates have to be learned on the ﬂy. We chose 20 100 000-URL subsamples of
+our 18.5M-URL dataset randomly with replacement  and used them to simulate 20 21-day runs of
+each algorithm starting with change rate estimates of 1 change/day for each URL. We used "ground
+truth" change rates to generate change times for each URL. Every simulated day (epoch; see Alg.
+4)  each algorithm re-estimated change rates from observations  which were sampled according to
+the algorithm’s current policy  of simulated URL changes. For the next day  it reoptimized its policy
+for the new rate estimates  and this policy was evaluated with equations in Props. 1  4 under the
+ground-truth rates. Each algorithm’s policy costs across 20 episodes were averaged for each day.
+8 Conclusion
+We have introduced a new optimization objective and a suite of efﬁcient algorithms for it to address the
+freshness crawl scheduling problem faced by services from search engines to databases. In particular 
+we have presented LAMBDALEARNANDCRAWL  which integrates model parameter learning with
+scheduling optimization. To provide theoretical convergence rate analysis in the future  we intend to
+frame this problem as a restless multi-armed bandit setting [18  34].
+Acknowledgements. We would like to thank Lin Xiao (Microsoft Research) and Junaid Ahmed
+(Microsoft Bing) for their comments and suggestions regarding this work.
+
+b   and markedly outperforms them w.r.t. J π
+h .
+
+9
+
+References
+[1] Anily  S.  Glass  C.  and Hassin  R. The scheduling of maintenance service. Discrete Applied
+
+Mathematics  pp. 27–42  1998.
+
+[2] Azar  Y.  Horvitz  E.  Lubetzky  E.  Peres  Y.  and Shahaf  D. Tractable near-optimal policies for
+
+crawling. Proceedings of the National Academy of Sciences (PNAS)  2018.
+
+[3] Bar-Noy  A.  Bhatia  R.  Naor  J.  and Schieber  B. Minimizing service and operation costs of
+
+periodic scheduling. In SODA  pp. 11–20  1998.
+
+[4] Broder  A.  Glassman  S.  Manasse  M.  and Zweig  G. Syntactic clustering of the web. In
+
+WWW  pp. 1157–1166  1997.
+
+[5] Bubeck  S. Convex optimization: Algorithms and complexity. Foundations and Trends in
+
+Machine Learning  8(3-4):231–357  2015.
+
+[6] Burden  R. L. and Faires  J. D. Numerical Analysis. PWS Publishers  3rd edition  1985.
+
+[7] Charikar  M. Similarity estimation techniques from rounding algorithms. In STOC  pp. 380–388 
+
+2002.
+
+[8] Cho  J. and Garcia-Molina  H. Synchronizing a database to improve freshness.
+
+SIGMOD International Conference on Management of Data  2000.
+
+In ACM
+
+[9] Cho  J. and Garcia-Molina  H. The evolution of the web and implications for an incremental
+
+crawler. In VLDB  2000.
+
+[10] Cho  J. and Garcia-Molina  H. Effective page refresh policies for web crawlers. ACM Transac-
+
+tions on Database Systems  28(4):390–426  2003.
+
+[11] Cho  J. and Garcia-Molina  H. Estimating frequency of change. ACM Transactions on Internet
+
+Technology  3(3):256–290  2003.
+
+[12] Cho  J. and Ntoulas  A. Effective change detection using sampling. In VLDB  2002.
+
+[13] Coffman  E. G.  Liu  Z.  and Weber  R. R. Optimal robot scheduling for web search engines.
+
+Journal of Scheduling  1(1)  1998.
+
+[14] Gal  A. and Eckstein  J. Managing periodically updated data in relational databases. Journal of
+
+ACM  48:1141–1183  2001.
+
+[15] Glazebrook  K. D. and Mitchell  H. M. An index policy for a stochastic scheduling model with
+
+improving/deteriorating jobs. Naval Research Logistics  49:706–721  2002.
+
+[16] Glazebrook  K. D.  Mitchell  H. M.  and Ansell  P. S. Index policies for the maintenance of a
+collection of machines by a set of repairmen. European Journal of Operations Research  165
+(1):267–284  2005.
+
+[17] Ibaraki  T. and Katoh  N. Resource Allocation Problems: Algorithmic Approaches. MIT Press 
+
+1988.
+
+[18] Immorlica  N. and Kleinberg  R. Recharging bandits. In FOCS  2018.
+
+[19] Karimi  M. R.  Tavakoli  E.  Farajtabar  M.  Song  L.  and Gomez-Rodriguez  M. Smart
+
+broadcasting: Do you want to be seen? In ACM KDD  2016.
+
+[20] Kiefer  J. Sequential minimax search for a maximum. Proceedings of the American Mathemati-
+
+cal Society  4(3):502–506  1953.
+
+[21] Kolobov  A.  Peres  Y.  Lubetzky  E.  and Horvitz  E. Optimal freshness crawl under politeness
+
+constraints. In SIGIR  2019.
+
+[22] Olston  C. and Najork  M. Web crawling. Foundations and Trends in Information Retrieval  3
+
+(1):175–246  2010.
+
+10
+
+[23] Olston  C. and Pandey  S. Recrawl scheduling based on information longevity. In WWW  pp.
+
+437–446  2008.
+
+[24] Page  L.  Brin  S.  Motwani  R.  and Winograd  T. The pagerank citation ranking: Bringing
+
+order to the web. Technical report  Stanford University  MA  USA  1998.
+
+[25] Pandey  S. and Olston  C. User-centric web crawling. In WWW  2005.
+
+[26] Pandey  S.  Ramamritham  K.  and Chakrabarti  S. Monitoring the dynamic web to respond to
+
+continuous queries. In WWW  2003.
+
+[27] Pandey  S.  Dhamdhere  K.  and Olston  C. WIC: A general-purpose algorithm for monitoring
+
+web information sources. In VLDB  2004.
+
+[28] Radinsky  K. and Bennett  P. N. Predicting content change on the web. In WSDM  pp. 415–424 
+
+2013.
+
+[29] Sutton  R. and Barto  A. G. Introduction to Reinforcement Learning. MIT Press  1st edition 
+
+1998.
+
+[30] Taylor  H. and Karlin  S. An Introduction To Stochastic Modeling. Academic Press  3rd edition 
+
+1998.
+
+[31] Upadhyay  U.  De  A.  and Gomez-Rodriguez  M. Deep reinforcement learning of marked
+
+temporal point processes. In NeurIPS  2018.
+
+[32] van den Bosch  A.  Bogers  T.  and de Kunder  M. A longitudinal analysis of search engine
+
+index size. In ISSI  2015.
+
+[33] Wang  Y.  Williams  G.  and Theodorou  E. Variational policy for guiding point processes. In
+
+ICML  2017.
+
+[34] Whittle  P. Restless bandits: Activity allocation in a changing world. Applied Probability  25
+
+(A):287–298  1988.
+
+[35] Wolf  J. L.  Squillante  M. S.  Yu  P. S.  Sethuraman  J.  and Ozsen  L. Optimal crawling
+
+strategies for web search engines. In WWW  2002.
+
+[36] Zarezade  A.  Upadhyay  U.  Rabiee  H. R.  and Gomez-Rodriguez  M. Redqueen: An online
+
+algorithm for smart broadcasting in social networks. In ACM KDD  2017.
+
+11
+
+,Rizal Fathony
+Anqi Liu
+Kaiser Asif
+Brian Ziebart
+Andrey Kolobov
+Cheng Lu
+Eric Horvitz

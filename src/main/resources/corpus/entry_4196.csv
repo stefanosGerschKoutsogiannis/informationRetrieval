@@ -1,0 +1,941 @@
+2017,PASS-GLM: polynomial approximate sufficient statistics for scalable Bayesian GLM inference,Generalized linear models (GLMs)---such as logistic regression  Poisson regression  and robust regression---provide interpretable models for diverse data types. Probabilistic approaches  particularly Bayesian ones  allow coherent estimates of uncertainty  incorporation of prior information  and sharing of power across experiments via hierarchical models. In practice  however  the approximate Bayesian methods necessary for inference have either failed to scale to large data sets or failed to provide theoretical guarantees on the quality of inference. We propose a new approach based on constructing polynomial approximate sufficient statistics for GLMs (PASS-GLM). We demonstrate that our method admits a simple algorithm as well as trivial streaming and distributed extensions that do not compound error across computations. We provide theoretical guarantees on the quality of point (MAP) estimates  the approximate posterior  and posterior mean and uncertainty estimates. We validate our approach empirically in the case of logistic regression using a quadratic approximation and show competitive performance with stochastic gradient descent  MCMC  and the Laplace approximation in terms of  speed and multiple measures of accuracy---including on an advertising data set with 40 million data points and 20 000 covariates.,PASS-GLM: polynomial approximate sufﬁcient
+statistics for scalable Bayesian GLM inference
+
+Jonathan H. Huggins
+
+CSAIL  MIT
+
+Ryan P. Adams
+
+Google Brain and Princeton
+
+Tamara Broderick
+
+CSAIL  MIT
+
+jhuggins@mit.edu
+
+rpa@princeton.edu
+
+tbroderick@csail.mit.edu
+
+Abstract
+
+Generalized linear models (GLMs)—such as logistic regression  Poisson regres-
+sion  and robust regression—provide interpretable models for diverse data types.
+Probabilistic approaches  particularly Bayesian ones  allow coherent estimates of
+uncertainty  incorporation of prior information  and sharing of power across exper-
+iments via hierarchical models. In practice  however  the approximate Bayesian
+methods necessary for inference have either failed to scale to large data sets or
+failed to provide theoretical guarantees on the quality of inference. We propose a
+new approach based on constructing polynomial approximate sufﬁcient statistics
+for GLMs (PASS-GLM). We demonstrate that our method admits a simple algo-
+rithm as well as trivial streaming and distributed extensions that do not compound
+error across computations. We provide theoretical guarantees on the quality of
+point (MAP) estimates  the approximate posterior  and posterior mean and un-
+certainty estimates. We validate our approach empirically in the case of logistic
+regression using a quadratic approximation and show competitive performance
+with stochastic gradient descent  MCMC  and the Laplace approximation in terms
+of speed and multiple measures of accuracy—including on an advertising data set
+with 40 million data points and 20 000 covariates.
+
+1
+
+Introduction
+
+Scientists  engineers  and companies increasingly use large-scale data—often only available via
+streaming—to obtain insights into their respective problems. For instance  scientists might be in-
+terested in understanding how varying experimental inputs leads to different experimental outputs;
+or medical professionals might be interested in understanding which elements of patient histories
+lead to certain health outcomes. Generalized linear models (GLMs) enable these practitioners to
+explicitly and interpretably model the effect of covariates on outcomes while allowing ﬂexible noise
+distributions—including binary  count-based  and heavy-tailed observations. Bayesian approaches
+further facilitate (1) understanding the importance of covariates via coherent estimates of parameter
+uncertainty  (2) incorporating prior knowledge into the analysis  and (3) sharing of power across dif-
+ferent experiments or domains via hierarchical modeling. In practice  however  an exact Bayesian
+analysis is computationally infeasible for GLMs  so an approximation is necessary. While some
+approximate methods provide asymptotic guarantees on quality  these methods often only run suc-
+cessfully in the small-scale data regime. In order to run on (at least) millions of data points and thou-
+sands of covariates  practitioners often turn to heuristics with no theoretical guarantees on quality.
+In this work  we propose a novel and simple approximation framework for probabilistic inference in
+GLMs. We demonstrate theoretical guarantees on the quality of point estimates in the ﬁnite-sample
+setting and on the quality of Bayesian posterior approximations produced by our framework. We
+show that our framework trivially extends to streaming data and to distributed architectures  with
+no additional compounding of error in these settings. We empirically demonstrate the practicality
+
+31st Conference on Neural Information Processing Systems (NIPS 2017)  Long Beach  CA  USA.
+
+of our framework on datasets with up to tens of millions of data points and tens of thousands of
+covariates.
+Large-scale Bayesian inference. Calculating accurate approximate Bayesian posteriors for large
+data sets together with complex models and potentially high-dimensional parameter spaces is a long-
+standing problem. We seek a method that satisﬁes the following criteria: (1) it provides a posterior
+approximation; (2) it is scalable; (3) it comes equipped with theoretical guarantees; and (4) it
+provides arbitrarily good approximations. By posterior approximation we mean that the method
+outputs an approximate posterior distribution  not just a point estimate. By scalable we mean that
+the method examines each data point only a small number of times  and further can be applied to
+streaming and distributed data. By theoretical guarantees we mean that the posterior approximation
+is certiﬁed to be close to the true posterior in terms of  for example  some metric on probability
+measures. Moreover  the distance between the exact and approximate posteriors is an efﬁciently
+computable quantity. By an arbitrarily good approximation we mean that  with a large enough
+computational budget  the method can output an approximation that is as close to the exact posterior
+as we wish.
+Markov chain Monte Carlo (MCMC) methods provide an approximate posterior  and the approxi-
+mation typically becomes arbitrarily good as the amount of computation time grows asymptotically;
+thereby MCMC satisﬁes criteria 1  3  and 4. But scalability of MCMC can be an issue. Conversely 
+variational Bayes (VB) and expectation propagation (EP) [27] have grown in popularity due to their
+scalability to large data and models—though they typically lack guarantees on quality (criteria 3
+and 4). Subsampling methods have been proposed to speed up MCMC [1  5  6  21  25  41] and
+VB [18]. Only a few of these algorithms preserve guarantees asymptotic in time (criterion 4)  and
+they often require restrictive assumptions. On the scalability front (criterion 2)  many though not
+all subsampling MCMC methods have been found to require examining a constant fraction of the
+data at each iteration [2  6  7  30  31  38]  so the computational gains are limited. Moreover  the
+random data access required by these methods may be infeasible for very large datasets that do not
+ﬁt into memory. Finally  they do not apply to streaming and distributed data  and thus fail criterion
+2 above. More recently  authors have proposed subsampling methods based on piecewise determin-
+istic Markov processes (PDMPs) [8  9  29]. These methods are promising since subsampling data
+here does not change the invariant distribution of the continuous-time Markov process. But these
+methods have not yet been validated on large datasets nor is it understood how subsampling affects
+the mixing rates of the Markov processes. Authors have also proposed methods for coalescing in-
+formation across distributed computation (criterion 2) in MCMC [12  32  34  35]  VB [10  11]  and
+EP [15  17]—and in the case of VB  across epochs as streaming data is collected [10  11]. (See An-
+gelino et al. [3] for a broader discussion of issues surrounding scalable Bayesian inference.) While
+these methods lead to gains in computational efﬁciency  they lack rigorous justiﬁcation and provide
+no guarantees on the quality of inference (criteria 3 and 4).
+To address these difﬁculties  we are inspired in part by the observation that not all Bayesian models
+require expensive posterior approximation. When the likelihood belongs to an exponential family 
+Bayesian posterior computation is fast and easy. In particular  it sufﬁces to ﬁnd the sufﬁcient statis-
+tics of the data  which require computing a simple summary at each data point and adding these
+summaries across data points. The latter addition requires a single pass through the data and is
+trivially streaming or distributed. With the sufﬁcient statistics in hand  the posterior can then be
+calculated via  e.g.  MCMC  and point estimates such as the MLE can be computed—all in time in-
+dependent of the data set size. Unfortunately  sufﬁcient statistics are not generally available (except
+in very special cases) for GLMs. We propose to instead develop a notion of approximate sufﬁcient
+statistics. Previously authors have suggested using a coreset—a weighted data subset—as a sum-
+mary of the data [4  13  14  16  19  24]. While these methods provide theoretical guarantees on the
+quality of inference via the model evidence  the resulting guarantees are better suited to approximate
+optimization and do not translate to guarantees on typical Bayesian desiderata  such as the accuracy
+of posterior mean and uncertainty estimates. Moreover  while these methods do admit streaming
+and distributed constructions  the approximation error is compounded across computations.
+Our contributions. In the present work we instead propose to construct our approximate sufﬁcient
+statistics via a much simpler polynomial approximation for generalized linear models. We therefore
+call our method polynomial approximate sufﬁcient statistics for generalized linear models (PASS-
+GLM). PASS-GLM satisﬁes all of the criteria laid of above. It provides a posterior approximation
+with theoretical guarantees (criteria 1 and 3). It is scalable since is requires only a single pass over
+
+2
+
+the data and can be applied to streaming and distributed data (criterion 2). And by increasing the
+number of approximate sufﬁcient statistics  PASS-GLM can produce arbitrarily good approxima-
+tions to the posterior (criterion 4).
+The Laplace approximation [39] and variational methods with a Gaussian approximation family
+[20  22] may be seen as polynomial (quadratic) approximations in the log-likelihood space. But we
+note that the VB variants still suffer the issues described above. A Laplace approximation relies on
+a Taylor series expansion of the log-likelihood around the maximum a posteriori (MAP) solution 
+which requires ﬁrst calculating the MAP—an expensive multi-pass optimization in the large-scale
+data setting. Neither Laplace nor VB offers the simplicity of sufﬁcient statistics  including in stream-
+ing and distributed computations. The recent work of Stephanou et al. [36] is similar in spirit to ours 
+though they address a different statistical problem: they construct sequential quantile estimates using
+Hermite polynomials.
+In the remainder of the paper  we begin by describing generalized linear models in more detail in
+Section 2. We construct our novel polynomial approximation and specify our PASS-GLM algorithm
+in Section 3. We will see that streaming and distributed computation are trivial for our algorithm
+and do not compound error. In Section 4.1  we demonstrate ﬁnite-sample guarantees on the quality
+of the MAP estimate arising from our algorithm  with the maximum likelihood estimate (MLE)
+as a special case.
+In Section 4.2  we prove guarantees on the Wasserstein distance between the
+exact and approximate posteriors—and thereby bound both posterior-derived point estimates and
+uncertainty estimates.
+In Section 5  we demonstrate the efﬁcacy of our approach in practice by
+focusing on logistic regression. We demonstrate experimentally that PASS-GLM can be scaled
+with almost no loss of efﬁciency to multi-core architectures. We show on a number of real-world
+datasets—including a large  high-dimensional advertising dataset (40 million examples with 20 000
+dimensions)—that PASS-GLM provides an attractive trade-off between computation and accuracy.
+
+2 Background
+
+Generalized linear models. Generalized linear models (GLMs) combine the interpretability of
+linear models with the ﬂexibility of more general outcome distributions—including binary  ordinal 
+and heavy-tailed observations. Formally  we let Y ⊆ R be the observation space  X ⊆ Rd be the
+covariate space  and Θ ⊆ Rd be the parameter space. Let D := {(xn  yn)}N
+n=1 be the observed data.
+We write X ∈ RN×d for the matrix of all covariates and y ∈ RN for the vector of all observations.
+We consider GLMs
+
+log p(y | X  θ) =(cid:80)N
+
+n=1 log p(yn | g−1(xn · θ)) =(cid:80)N
+
+n=1 φ(yn  xn · θ) 
+
+where µ := g−1(xn · θ) is the expected value of yn and g−1 : R → R is the inverse link function.
+We call φ(y  s) := log p(y | g−1(s)) the GLM mapping function.
+Examples include some of the most widely used models in the statistical toolbox. For in-
+stance  for binary observations y ∈ {±1}  the likelihood model is Bernoulli  p(y = 1| µ) = µ 
+and the link function is often either the logit g(µ) = log µ
+1−µ (as in logistic regression) or the pro-
+bit g(µ) = Φ−1(µ)  where Φ is the standard Gaussian CDF. When modeling count data y ∈ N  the
+likelihood model might be Poisson  p(y | µ) = µye−µ/y!  and g(µ) = log(µ) is the typical log link.
+Other GLMs include gamma regression  robust regression  and binomial regression  all of which are
+commonly used for large-scale data analysis (see Examples A.1 and A.3).
+If we place a prior π0(dθ) on the parameters  then a full Bayesian analysis aims to approximate the
+(typically intractable) GLM posterior distribution πD(dθ)  where
+p(y | X  θ) π0(dθ)
+
+(cid:82) p(y | X  θ(cid:48)) π0(dθ(cid:48))
+
+.
+
+πD(dθ) =
+
+The maximum a posteriori (MAP) solution gives a point estimate of the parameter:
+
+θMAP := arg max
+
+(1)
+where LD(θ) := log p(y | X  θ) is the data log-likelihood. The MAP problem strictly generalizes
+ﬁnding the maximum likelihood estimate (MLE)  since the MAP solution equals the MLE when
+using the (possibly improper) prior π0(θ) = 1.
+
+πD(θ) = arg max
+
+θ∈Θ
+
+θ∈Θ
+
+log π0(θ) + LD(θ) 
+
+3
+
+base measure ς
+
+Algorithm 1 PASS-GLM inference
+Require: data D  GLM mapping function φ : R → R  degree M  polynomial basis (ψm)m∈N with
+
+1: Calculate basis coefﬁcients bm ←(cid:82) φψmdς using numerical integration for m = 0  . . .   M
+3: for k ∈ Nd with(cid:80)
+for k ∈ Nd with(cid:80)
+
+(cid:46) Can be done with any combination of batch  parallel  or streaming
+
+2: Calculate polynomial coefﬁcients b(M )
+
+m ←(cid:80)M
+
+k=m αk mbm for m = 0  . . .   M
+
+j kj ≤ M do
+
+Initialize tk ← 0
+4:
+5: for n = 1  . . .   N do
+6:
+7:
+
+j kj ≤ M do
+Update tk ← tk + (ynxn)k
+
+8: Form approximate log-likelihood ˜LD(θ) =(cid:80)
+
+k∈Nd:(cid:80)
+9: Use ˜LD(θ) to construct approximate posterior ˜πD(θ)
+
+j kj≤m
+
+(cid:0)m
+
+k
+
+(cid:1)b(M )
+
+m tkθk
+
+Computation and exponential families. In large part due to the high-dimensional integral im-
+plicit in the normalizing constant  approximating the posterior  e.g.  via MCMC or VB  is often
+prohibitively expensive. Approximating this integral will typically require many evaluations of the
+(log-)likelihood  or its gradient  and each evaluation may require Ω(N ) time.
+Computation is much more efﬁcient  though  if the model is in an exponential family (EF). In the EF
+case  there exist functions t  η : Rd → Rm  such that1
+
+log p(yn | xn  θ) = t(yn  xn) · η(θ) =: LD EF(θ; t(yn  xn)).
+
+Thus  we can rewrite the log-likelihood as
+
+LD(θ) =(cid:80)N
+
+where t(D) :=(cid:80)N
+
+n=1 LD EF(θ; t(yn  xn)) =: LD EF(θ; t(D)) 
+
+n=1 t(yn  xn). The sufﬁcient statistics t(D) can be calculated in O(N ) time 
+after which each evaluation of LD EF(θ; t(D)) or ∇LD EF(θ; t(D)) requires only O(1) time. Thus 
+instead of K passes over N data (requiring O(N K) time)  only O(N + K) time is needed. Even
+for moderate values of N  the time savings can be substantial when K is large.
+The Poisson distribution is an illustrative example of a one-parameter exponential family
+with t(y) = (1  y  log y!) and η(θ) = (θ  log θ  1). Thus  if we have data y (there are no covari-
+
+n yn (cid:80) log yn!). In this case it is easy to calculate that the maximum likelihood
+
+ates)  t(y) = (N (cid:80)
+estimate of θ from t(y) as t1(y)/t0(y) = N−1(cid:80)
+
+n yn.
+
+distribution
+
+rarely belong to an exponential
+in
+an
+logistic
+
+Unfortunately  GLMs
+the out-
+come
+is
+link
+the
+EF structure.
+In
+the φ notation)
+log p(yn | xn  θ) = φlogit(ynxn · θ)  where φlogit(s) := − log(1 + e−s). For Poisson regression
+with log link  log p(yn | xn  θ) = φPoisson(yn  xn · θ)  where φPoisson(y  s) := ys − es − log y!. In
+both cases  we cannot express the log-likelihood as an inner product between a function solely of
+the data and a function solely of the parameter.
+
+the
+regression  we write
+
+use
+a
+(overloading
+
+family – even if
+
+exponential
+
+destroys
+
+family 
+
+of
+
+3 PASS-GLM
+
+Since exact sufﬁcient statistics are not available for GLMs  we propose to construct approxi-
+mate sufﬁcient statistics. In particular  we propose to approximate the mapping function φ with
+an order-M polynomial φM . We therefore call our method polynomial approximate sufﬁcient
+statistics for GLMs (PASS-GLM). We illustrate our method next in the logistic regression case 
+where log p(yn | xn  θ) = φlogit(ynxn · θ). The fully general treatment appears in Appendix A.
+Let b(M )
+
+M be constants such that
+
+. . .   b(M )
+
+  b(M )
+
+0
+
+1
+
+φlogit(s) ≈ φM (s) :=(cid:80)M
+
+m=0 b(M )
+
+m sm.
+
+1Our presentation is slightly different from the standard textbook account because we have implicitly ab-
+
+sorbed the base measure and log-partition function into t and η.
+
+4
+
+(cid:80)
+k∈Nd(cid:80)
+
+j kj =m
+
+(cid:0)m
+
+k
+
+(cid:1)(yx)kθk
+
+(cid:1)b(M )
+
+(cid:1) monomials of degree at most M serving
+
+m . Thus  φM is an M-degree
+
+k
+
+d
+
+for vectors v  k ∈ Rd. Taking s = yx · θ  we obtain
+m=0 b(M )
+
+m=0 b(M )
+
+m
+
+k
+
+m=0
+
+j=1 vkj
+
+j
+
+(cid:80)
+
+=(cid:80)M
+
+j kj =m a(k  m  M )(yx)kθk 
+
+m (yx · θ)m =(cid:80)M
+(cid:1) is the multinomial coefﬁcient and a(k  m  M ) :=(cid:0)m
+
+Let vk :=(cid:81)d
+φlogit(yx · θ) ≈ φM (yx · θ) =(cid:80)M
+k∈Nd:(cid:80)
+where(cid:0)m
+polynomial approximation to φlogit(yx · θ) with the(cid:0)d+M
+where k is taken over all k ∈ Nd such that(cid:80)
+is  ψm(s) =(cid:80)m
+tion φM (s) =(cid:80)M
+
+then φ(s) =(cid:80)∞
+m =(cid:80)M
+
+If bm :=(cid:82) φψmdς 
+
+m=0 bmψm(s). Conclude that b(M )
+
+and zero otherwise.
+
+t(yx) = ([yx]k)k
+
+and
+j kj ≤ M. We next discuss the calculation of the b(M )
+
+η(θ) = (a(k  m  M )θk)k 
+
+m
+
+and the choice of M.
+Choosing the polynomial approximation. To calculate the coefﬁcients b(M )
+m   we choose a polyno-
+mial basis (ψm)m∈N orthogonal with respect to a base measure ς  where ψm is degree m [37]. That
+
+j=0 αm jsj for some αm j  and(cid:82) ψmψm(cid:48)dς = δmm(cid:48)  where δmm(cid:48) = 1 if m = m(cid:48)
+
+as sufﬁcient statistics derived from yx. Speciﬁcally  we have a exponential family model with
+
+m=0 bmψm(s) and the approxima-
+k=m αk mbm. The complete PASS-GLM
+
+M is also exponentially small in M: sups∈[−R R] |φ(cid:48)(s) − φ(cid:48)
+
+framework appears in Algorithm 1.
+Choices for the orthogonal polynomial basis include Chebyshev  Hermite  Leguerre  and Legen-
+dre polynomials [37]. We choose Chebyshev polynomials since they provide a uniform quality
+guarantee on a ﬁnite interval  e.g.  [−R  R] for some R > 0 in what follows. If φ is smooth  the
+choice of Chebyshev polynomials (scaled appropriately  along with the base measure ς  based on
+the choice of R) yields error exponentially small in M: sups∈[−R R] |φ(s) − φM (s)| ≤ CρM for
+some 0 < ρ < 1 and C > 0 [26]. We show in Appendix B that the error in the approximate deriva-
+M (s)| ≤ C(cid:48)ρM   where C(cid:48) > C.
+tive φ(cid:48)
+Choosing the polynomial degree. For ﬁxed d  the number of monomials is O(M d) while for ﬁxed
+M the number of monomials is O(dM ). The number of approximate sufﬁcient statistics can remain
+manageable when either M or d is small but becomes unwieldy if M and d are both large. Since
+our experiments (Section 5) generally have large d  we focus on the small M case here.
+In our experiments we further focus on the choice of logistic regression as a particularly popular
+GLM example with p(yn | xn  θ) = φlogit(ynxn · θ)  where φlogit(s) := − log(1 + e−s).
+In gen-
+eral  the smallest and therefore most compelling choice of M a priori is 2  and we demonstrate the
+reasonableness of this choice empirically in Section 5 for a number of large-scale data analyses. In
+addition  in the logistic regression case  M = 6 is the next usable choice beyond M = 2. This is be-
+2k+1 = 0 for all integer k ≥ 1 with 2k + 1 ≤ M. So any approximation beyond M = 2 must
+cause b(M )
+have M ≥ 4. Also  b(M )
+4k > 0 for all integers k ≥ 1 with 4k ≤ M. So choosing M = 4k  k ≥ 1 
+leads to a pathological approximation of φlogit where the log-likelihood can be made arbitrarily
+large by taking (cid:107)θ(cid:107)2 → ∞. Thus  a reasonable polynomial approximation for logistic regression
+requires M = 2 + 4k  k ≥ 0. We have discussed the relative drawbacks of other popular quadratic
+approximations  including the Laplace approximation and variational methods  in Section 1.
+
+4 Theoretical Results
+
+We next establish quality guarantees for PASS-GLM. We ﬁrst provide ﬁnite-sample and asymptotic
+guarantees on the MAP (point estimate) solution  and therefore on the MLE  in Section 4.1. We then
+provide guarantees on the Wasserstein distance between the approximate and exact posteriors  and
+show these bounds translate into bounds on the quality of posterior mean and uncertainty estimates 
+in Section 4.2. See Appendix C for extended results  further discussion  and all proofs.
+
+4.1 MAP approximation
+
+In Appendix C  we state and prove Theorem C.1  which provides guarantees on the quality of the
+MAP estimate for an arbitrary approximation ˜LD(θ) to the log-likelihood LD(θ). The approximate
+
+5
+
+MAP (i.e.  the MAP under ˜LD) is (cf. Eq. (1))
+˜θMAP := arg max
+
+θ∈Θ
+
+log π0(θ) + ˜LD(θ).
+
+Roughly  we ﬁnd in Theorem C.1 that the error in the MAP estimate naturally depends on the error
+of the approximate log-likelihood as well as the peakedness of the posterior near the MAP. In the
+latter case  if log πD is very ﬂat  then even a small error from using ˜LD in place of LD could lead
+to a large error in the approximate MAP solution. We measure the peakedness of the distribution in
+terms of the strong convexity constant2 of − log πD near θMAP.
+We apply Theorem C.1 to PASS-GLM for logistic regression and robust regression. We require the
+assumption that
+
+φM (t) ≤ φ(t) ∀t /∈ [−R  R] 
+
+(2)
+which in the cases of logistic regression and smoothed Huber regression  we conjecture holds
+for M = 2 + 4k  k ∈ N. For a matrix A  (cid:107)A(cid:107)2 denotes its spectral norm.
+Corollary 4.1. For the logistic regression model  assume that (cid:107)(∇2LD(θMAP))−1(cid:107)2 ≤ cd/N for
+some constant c > 0 and that (cid:107)xn(cid:107)2 ≤ 1 for all n = 1  . . .   N. Let φM be the order-M Chebyshev
+approximation to φlogit on [−R  R] such that Eq. (2) holds. Let ˜πD(θ) denote the posterior approx-
+imation obtained by using φM with a log-concave prior. Then there exist numbers r = r(R) > 1 
+ε = ε(M ) = O(r−M )  and α∗ ≥
+
+εd3c3+54   such that if R − (cid:107)θMAP(cid:107)2 ≥ 2
+
+(cid:113) cdε
+
+α∗   then
+
+27
+
+(cid:107)θMAP − ˜θMAP(cid:107)2
+
+2 ≤ 4cdε
+
+α∗ ≤ 4
+
+27
+
+c4d4ε2 + 8cdε.
+
+(cid:80)N
+n=1 φ(cid:48)(cid:48)
+
+The main takeaways from Corollary 4.1 are that (1) the error decreases exponentially in M thanks
+to the ε term  (2) the error does not depend on the amount of data  and (3) in order for the bound
+on the approximate MAP solution to hold  the norm of the true MAP solution must be sufﬁciently
+smaller than R.
+i.e.  ∇2LD(θ) =
+Remark 4.2. Some intuition for the assumption on the Hessian of LD 
+n   is as follows. Typically for θ near θMAP  the minimum eigenvalue
+of ∇2LD(θ) is at least N/(cd) for some c > 0. The minimum eigenvalue condition in Corollary 4.1
+holds if  for example  a constant fraction of the data satisﬁes 0 < b ≤ (cid:107)xn(cid:107)2 ≤ B < ∞ and that
+subset of the data does not lie too close to any (d − 1)-dimensional hyperplane. This condition
+essentially requires the data not to be degenerate and is similar to ones used to show asymptotic
+consistency of logistic regression [40  Ex. 5.40].
+
+logit(ynxn · θ)xnx(cid:62)
+
+The approximate MAP error bound in the robust regression case using  for example  the smoothed
+Huber loss (Example A.1)  is quite similar to the logistic regression result.
+Corollary 4.3. For robust regression with smoothed Huber loss  assume that a constant fraction of
+the data satisﬁes |xn · θMAP − yn| ≤ b/2 and that (cid:107)xn(cid:107)2 ≤ 1 for all n = 1  . . .   N. Let φM be the
+order M Chebyshev approximation to φHuber on [−R  R] such that Eq. (2) holds. Let ˜πD(θ) denote
+the posterior approximation obtained by using φM with a log-concave prior. Then if R (cid:29) (cid:107)θMAP(cid:107)2 
+there exists r > 1 such that for M sufﬁciently large  (cid:107)θMAP − ˜θMAP(cid:107)2
+
+2 = O(dr−M ).
+
+4.2 Posterior approximation
+
+distance  dW. For distributions P and Q on Rd  dW (P  Q) := supf :(cid:107)f(cid:107)L≤1 |(cid:82) f dP −(cid:82) f dQ| 
+
+We next establish guarantees on how close the approximate and exact posteriors are in Wasserstein
+where (cid:107)f(cid:107)L denotes the Lipschitz constant of f.3 This choice of distance is particularly useful
+since  if dW (πD  ˜πD) ≤ δ  then ˜πD can be used to estimate any function with bounded gradient
+with error at most δ supw (cid:107)∇f (w)(cid:107)2. Wasserstein error bounds therefore give bounds on the mean
+estimates (corresponding to f (θ) = θi) as well as uncertainty estimates such as mean absolute de-
+viation (corresponding to f (θ) = |¯θi − θi|  where ¯θi is the expected value of θi).
+
+of the Hessian of f evaluated at θ is at least  > 0.
+
+2Recall that a twice-differentiable function f : Rd → R is -strongly convex at θ if the minimum eigenvalue
+3The Lipschitz constant of function f : Rd → R is (cid:107)f(cid:107)L := supv w∈Rd
+
+(cid:107)φ(v)−φ(w)(cid:107)2
+
+.
+
+(cid:107)v−w(cid:107)2
+
+6
+
+(a)
+
+(b)
+
+Figure 1: Validating the use of PASS-GLM with M = 2. (a) The second-order Chebyshev approx-
+imation to φ = φlogit on [−4  4] is very accurate  with error of at most 0.069. (b) For a variety of
+datasets  the inner products (cid:104)ynxn  θMAP(cid:105) are mostly in the range of [−4  4].
+
+Our general result (Theorem C.3) is stated and proved in Appendix C. Similar to Theorem C.1 
+the result primarily depends on the peakedness of the approximate posterior and the error of the
+approximate gradients. If the gradients are poorly approximated then the error can be large while
+if the (approximate) posterior is ﬂat then even small gradient errors could lead to large shifts in
+expected values of the parameters and hence large Wasserstein error.
+We apply Theorem C.3 to PASS-GLM for logistic regression and Poisson regression. We give
+simpliﬁed versions of these corollaries in the main text and defer the more detailed versions to
+Appendix C. For logistic regression we assume M = 2 and Θ = Rd since this is the setting we
+use for our experiments. The result is similar in spirit to Corollary 4.1  though more straightforward
+since M = 2. Critically  we see in this result how having small error depends on |ynxn · ¯θ| ≤ R
+with high probability. Otherwise the second term in the bound will be large.
+Corollary 4.4. Let φ2 be the second-order Chebyshev approximation to φlogit on [−R  R] and
+let ˜πD(θ) = N(θ | ˜θMAP  ˜Σ) denote the posterior approximation obtained by using φ2 with a Gaus-
+n=1(cid:104)ynxn  ¯θ(cid:105)  and let σ1
+be the subgaussianity constant of the random variable (cid:104)ynxn  ¯θ(cid:105) − δ1  where n ∼ Unif{1  . . .   N}.
+Assume that |δ1| ≤ R  that (cid:107) ˜Σ(cid:107)2 ≤ cd/N  and that (cid:107)xn(cid:107)2 ≤ 1 for all n = 1  . . .   N. Then
+with σ2
+
+sian prior π0(θ) = N(θ | θ0  Σ0). Let ¯θ :=(cid:82) θπD(dθ)  let δ1 := N−1(cid:80)N
+
+0 := (cid:107)Σ0(cid:107)2  we have
+
+(cid:17)(cid:17)
+0 (R − |δ1|)
+
+2 σ−1
+
+√
+
+.
+
+dW (πD  ˜πD) = O
+
+dR4 + dσ0 exp
+
+(cid:16)
+
+(cid:16)
+
+1σ−2
+σ2
+
+0 −
+
+The main takeaway from Corollary 4.4 is that if (a) for most n  |(cid:104)xn  ¯θ(cid:105)| < R  so that φ2 is a good
+approximation to φlogit  and (b) the approximate posterior concentrates quickly  then we get a high-
+quality approximate posterior. This result matches up with the experimental results (see Section 5
+for further discussion).
+For Poisson regression  we return to the case of general M. Recall that in the Poisson regression
+model that the expectation of yn is µ = exn·θ. If yn is bounded and has non-trivial probability of
+being greater than zero  we lose little by restricting xn · θ to be bounded. Thus  we will assume that
+the parameter space is bounded. As in Corollaries 4.1 and 4.3  the error is exponentially small in M
+
+n=1 xnx(cid:62)
+
+n (cid:107)2 grows linearly in N  does not depend on the amount of data.
+
+and  as long as (cid:107)(cid:80)N
+
+Corollary 4.5. Let fM (s) be the order-M Chebyshev approximation to et on the inter-
+val [−R  R]  and let ˜πD(θ) denote the posterior approximation obtained by using the approximation
+log ˜p(yn | xn  θ) := ynxn · θ − fM (xn · θ) − log yn! with a log-concave prior on Θ = BR(0). If
+n (cid:107)2 = Ω(N/d)  and (cid:107)xn(cid:107)2 ≤ 1 for all n = 1  . . .   N 
+inf s∈[−R R] f(cid:48)(cid:48)
+then
+
+M (s) ≥ ˜ > 0  (cid:107)(cid:80)N
+
+n=1 xnx(cid:62)
+
+dW (πD  ˜πD) = O(cid:0)d˜−1M 2eR2−M(cid:1) .
+
+7
+
+-4-2024-4-3-2-10ϕ(t)ϕ2(t)-4-2024-4-3-2-10ϕ(t)ϕ2(t)6420246ynxn MAP0.00.51.01.5ChemReact6420246ynxn MAP0.00.10.20.3CovType6420246ynxn MAP0.00.51.01.52.0Webspam12441220ynxn MAP0.00.10.2CodRNA(a) WEBSPAM
+
+(b) COVTYPE
+
+(c) CHEMREACT
+
+(d) CODRNA
+
+Figure 2: Batch inference results. In all metrics smaller is better.
+
+Note that although ˜−1 does depend on R and M  as M becomes large it converges to eR. Observe
+that if we truncate a prior on Rd to be on BR(0)  by making R and M sufﬁciently large  the Wasser-
+stein distance between πD and the PASS-GLM posterior approximation ˜πD can be made arbitarily
+small. Similar results could be shown for other GLM likelihoods.
+
+5 Experiments
+
+In our experiments  we focus on logistic regression  a particularly popular GLM example.4 As
+discussed in Section 3  we choose M = 2 and call our algorithm PASS-LR2. Empirically  we ob-
+serve that M = 2 offers a high-quality approximation of φ on the interval [−4  4] (Fig. 1a).
+In
+fact sups∈[−4 4] |φ2(s) − φ(s)| < 0.069. Moreover  we observe that for many datasets  the inner
+products ynxn · θMAP tend to be concentrated within [−4  4]  and therefore a high-quality approx-
+imation on this range is sufﬁcient for our analysis.
+In particular  Fig. 1b shows histograms of
+ynxn · θMAP for four datasets from our experiments. In all but one case  over 98% of the data points
+satisfy |ynxn · θMAP| ≤ 4. In the remaining dataset (CODRNA)  only ∼80% of the data satisfy this
+condition  and this is the dataset for which PASS-LR2 performed most poorly (cf. Corollary 4.4).
+
+5.1 Large dataset experiments
+
+In order to compare PASS-LR2 to other approximate Bayesian methods  we ﬁrst restrict our attention
+to datasets with fewer than 1 million data points. We compare to the Laplace approximation and the
+adaptive Metropolis-adjusted Langevin algorithm (MALA). We also compare to stochastic gradient
+descent (SGD) although SGD provides only a point estimate and no approximate posterior. In all
+experiments  no method performs as well as PASS-LR2 given the same (or less) running time.
+Datasets. The CHEMREACT dataset consists of N = 26 733 chemicals  each with d = 100 prop-
+erties. The goal is to predict whether each chemical is reactive. The WEBSPAM corpus consists
+of N = 350 000 web pages and the covariates consist of the d = 127 features that each appear in
+at least 25 documents. The cover type (COVTYPE) dataset consists of N = 581 012 cartographic
+observations with d = 54 features. The task is to predict the type of trees that are present at each ob-
+servation location. The CODRNA dataset consists of N = 488 565 and d = 8 RNA-related features.
+The task is to predict whether the sequences are non-coding RNA.
+Fig. 2 shows average errors of the posterior mean and variance estimates as well as negative test log-
+likelihood for each method versus the time required to run the method. SGD was run for between
+1 and 20 epochs. The true posterior was estimated by running three chains of adaptive MALA for
+50 000 iterations  which produced Gelman-Rubin statistics well below 1.1 for all datasets.
+
+4Code is available at https://bitbucket.org/jhhuggins/pass-glm.
+
+8
+
+0.11.010.0100.0time(sec)0.620.640.660.68NegativeTestLLPASSLR2LaplaceSGDTruePosteriorMALA1.010.0100.0time(sec)0.11.0averagemeanerror1.010.0100.0time(sec)0.010.0320.10.321.0averagevarianceerror1.0100.0time(sec)0.50.6NegativeTestLL0.11.010.0100.0time(sec)0.10.321.03.2averagemeanerror0.11.010.0100.0time(sec)0.0320.10.321.0averagevarianceerror0.010.11.010.0time(sec)0.120.140.16NegativeTestLL0.010.11.010.0time(sec)0.010.0320.10.321.0averagemeanerror0.11.010.0time(sec)0.010.11.0averagevarianceerror0.011.0100.0time(sec)0.20.30.40.50.6NegativeTestLL1.0100.0time(sec)1.03.210.0averagemeanerror1.0100.0time(sec)1.01.62.54.0averagevarianceerror(a)
+
+(b)
+
+Figure 3: (a) ROC curves for streaming inference on 40 million CRITEO data points. SGD and
+PASS-LR2 had negative test log-likelihoods of  respectively  0.07 and 0.045. (b) Cores vs. speedup
+(compared to one core) for parallelization experiment on 6 million examples from the CRITEO
+dataset.
+
+Speed. For all four datasets  PASS-LR2 was an order of magnitude faster than SGD and 2–3 orders
+of magnitude faster than the Laplace approximation. Mean and variance estimates. For CHEM-
+REACT  WEBSPAM  and COVTYPE  PASS-LR2 was superior to or competitive with SGD  with
+MALA taking 10–100x longer to produce comparable results. Laplace again outperformed all other
+methods. Critically  on all datasets the PASS-LR2 variance estimates were competitive with Laplace
+and MALA. Test log-likelihood. For CHEMREACT and WEBSPAM  PASS-LR2 produced results
+competitive with all other methods. MALA took 10–100x longer to produce comparable results.
+For COVTYPE  PASS-LR2 was competitive with SGD but took a tenth of the time  and MALA took
+1000x longer for comparable results. Laplace outperformed all other methods  but was orders of
+magnitude slower than PASS-LR2. CODRNA was the only dataset where PASS-LR2 performed
+poorly. However  this performance was expected based on the ynxn · θMAP histogram (Fig. 1a).
+
+5.2 Very large dataset experiments using streaming and distributed PASS-GLM
+
+We next test PASS-LR2  which is streaming without requiring any modiﬁcations  on a subset of 40
+million data points from the Criteo terabyte ad click prediction dataset (CRITEO). The covariates are
+13 integer-valued features and 26 categorical features. After one-hot encoding  on the subset of the
+data we considered  d ≈ 3 million. For tractability we used sparse random projections [23] to reduce
+the dimensionality to 20 000. At this scale  comparing to the other fully Bayesian methods from
+Section 5.1 was infeasible; we compare only to the predictions and point estimates from SGD. PASS-
+LR2 performs slightly worse than SGD in AUC (Fig. 3a)  but outperforms SGD in negative test log-
+likelihood (0.07 for SGD  0.045 for PASS-LR2). Since PASS-LR2 estimates a full covariance  it
+was about 10x slower than SGD. A promising approach to speeding up and reducing memory usage
+of PASS-LR2 would be to use a low-rank approximation to the second-order moments.
+To validate the efﬁciency of distributed computation with PASS-LR2  we compared running times
+on 6M examples with dimensionality reduced to 1 000 when using 1–22 cores. As shown in Fig. 3b 
+the speed-up is close to optimal: K cores produces a speedup of about K/2 (baseline 3 minutes
+using 1 core). We used Ray to implement the distributed version of PASS-LR2 [28].5
+
+6 Discussion
+
+We have presented PASS-GLM  a novel framework for scalable parameter estimation and Bayesian
+inference in generalized linear models. Our theoretical results provide guarantees on the quality of
+point estimates as well as approximate posteriors derived from PASS-GLM. We validated our ap-
+proach empirically with logistic regression and a quadratic approximation. We showed competitive
+performance on a variety of real-world data  scaling to 40 million examples with 20 000 covariates 
+and trivial distributed computation with no compounding of approximation error.
+There a number of important directions for future work. The ﬁrst is to use randomization methods
+along the lines of random projections and random feature mappings [23  33] to scale to larger M
+and d. We conjecture that the use of randomization will allow experimentation with other GLMs for
+which quadratic approximations are insufﬁcient.
+
+5https://github.com/ray-project/ray
+
+9
+
+0.000.250.500.751.00FalsePositiveRate0.000.250.500.751.00TruePositiveRatePASSLR2(area=0.696)SGD(area=0.725)01020cores2.55.07.510.0speedupAcknowledgments
+
+JHH and TB are supported in part by ONR grant N00014-17-1-2072  ONR MURI grant N00014-11-1-0688 
+and a Google Faculty Research Award. RPA is supported by NSF IIS-1421780 and the Alfred P. Sloan Foun-
+dation.
+
+References
+[1] S. Ahn  A. Korattikara  and M. Welling. Bayesian posterior sampling via stochastic gradient Fisher
+
+scoring. In International Conference on Machine Learning  2012.
+
+[2] P. Alquier  N. Friel  R. Everitt  and A. Boland. Noisy Monte Carlo: convergence of Markov chains with
+
+approximate transition kernels. Statistics and Computing  26:29–47  2016.
+
+[3] E. Angelino  M. J. Johnson  and R. P. Adams. Patterns of scalable Bayesian inference. Foundations and
+
+Trends R(cid:13) in Machine Learning  9(2-3):119–247  2016.
+
+[4] O. Bachem  M. Lucic  and A. Krause. Practical coreset constructions for machine learning. arXiv.org 
+
+Mar. 2017.
+
+[5] R. Bardenet  A. Doucet  and C. C. Holmes. Towards scaling up Markov chain Monte Carlo: an adaptive
+
+subsampling approach. In International Conference on Machine Learning  pages 405–413  2014.
+
+[6] R. Bardenet  A. Doucet  and C. C. Holmes. On Markov chain Monte Carlo methods for tall data. Journal
+
+of Machine Learning Research  18:1–43  2017.
+
+[7] M. J. Betancourt. The fundamental incompatibility of Hamiltonian Monte Carlo and data subsampling.
+
+In International Conference on Machine Learning  2015.
+
+[8] J. Bierkens  P. Fearnhead  and G. O. Roberts. The zig-zag process and super-efﬁcient sampling for
+
+Bayesian analysis of big data. arXiv.org  July 2016.
+
+[9] A. Bouchard-Cˆot´e  S. J. Vollmer  and A. Doucet. The bouncy particle sampler: A non-reversible rejection-
+
+free Markov chain Monte Carlo method. arXiv.org  pages 1–37  Jan. 2016.
+
+[10] T. Broderick  N. Boyd  A. Wibisono  A. C. Wilson  and M. I. Jordan. Streaming variational Bayes. In
+
+Advances in Neural Information Processing Systems  Dec. 2013.
+
+[11] T. Campbell  J. Straub  J. W. Fisher  III  and J. P. How. Streaming  distributed variational inference for
+
+Bayesian nonparametrics. In Advances in Neural Information Processing Systems  2015.
+
+[12] R. Entezari  R. V. Craiu  and J. S. Rosenthal. Likelihood inﬂating sampling algorithm. arXiv.org  May
+
+2016.
+
+[13] D. Feldman  M. Faulkner  and A. Krause. Scalable training of mixture models via coresets. In Advances
+
+in Neural Information Processing Systems  pages 2142–2150  2011.
+
+[14] W. Fithian and T. Hastie. Local case-control sampling: Efﬁcient subsampling in imbalanced data sets.
+
+The Annals of Statistics  42(5):1693–1724  Oct. 2014.
+
+[15] A. Gelman  A. Vehtari  P. Jyl¨anki  T. Sivula  D. Tran  S. Sahai  P. Blomstedt  J. P. Cunningham  D. Schimi-
+novich  and C. Robert. Expectation propagation as a way of life: A framework for Bayesian inference on
+partitioned data. arXiv.org  Dec. 2014.
+
+[16] L. Han  T. Yang  and T. Zhang. Local uncertainty sampling for large-scale multi-class logistic regression.
+
+arXiv.org  Apr. 2016.
+
+[17] L. Hasenclever  S. Webb  T. Lienart  S. Vollmer  B. Lakshminarayanan  C. Blundell  and Y. W. Teh.
+Distributed Bayesian learning with stochastic natural-gradient expectation propagation and the posterior
+server. Journal of Machine Learning Research  18:1–37  2017.
+
+[18] M. D. Hoffman  D. M. Blei  C. Wang  and J. Paisley. Stochastic variational inference. Journal of Machine
+
+Learning Research  14:1303–1347  2013.
+
+[19] J. H. Huggins  T. Campbell  and T. Broderick. Coresets for scalable Bayesian logistic regression.
+
+Advances in Neural Information Processing Systems  May 2016.
+
+In
+
+[20] T. Jaakkola and M. I. Jordan. A variational approach to Bayesian logistic regression models and their
+
+extensions. In Sixth International Workshop on Artiﬁcial Intelligence and Statistics  volume 82  1997.
+
+10
+
+[21] A. Korattikara  Y. Chen  and M. Welling. Austerity in MCMC land: Cutting the Metropolis-Hastings
+
+budget. In International Conference on Machine Learning  2014.
+
+[22] A. Kucukelbir  R. Ranganath  A. Gelman  and D. M. Blei. Automatic variational inference in Stan. In
+
+Advances in Neural Information Processing Systems  June 2015.
+
+[23] P. Li  T. J. Hastie  and K. W. Church. Very sparse random projections.
+
+Knowledge Discovery and Data Mining  2006.
+
+In SIGKDD Conference on
+
+[24] M. Lucic  M. Faulkner  A. Krause  and D. Feldman. Training mixture models at scale via coresets.
+
+arXiv.org  Mar. 2017.
+
+[25] D. Maclaurin and R. P. Adams. Fireﬂy Monte Carlo: Exact MCMC with subsets of data. In Uncertainty
+
+in Artiﬁcial Intelligence  Mar. 2014.
+
+[26] J. C. Mason and D. C. Handscomb. Chebyshev Polynomials. Chapman and Hall/CRC  New York  2003.
+
+[27] T. P. Minka. Expectation propagation for approximate Bayesian inference. In Uncertainty in Artiﬁcial
+
+Intelligence. Morgan Kaufmann Publishers Inc  Aug. 2001.
+
+[28] R. Nishihara  P. Moritz  S. Wang  A. Tumanov  W. Paul  J. Schleier-Smith  R. Liaw  M. Niknami  M. I.
+Jordan  and I. Stoica. Real-time machine learning: The missing pieces. In Workshop on Hot Topics in
+Operating Systems  2017.
+
+[29] A. Pakman  D. Gilboa  D. Carlson  and L. Paninski. Stochastic bouncy particle sampler. In International
+
+Conference on Machine Learning  Sept. 2017.
+
+[30] N. S. Pillai and A. Smith. Ergodicity of approximate MCMC chains with applications to large data sets.
+
+arXiv.org  May 2014.
+
+[31] M. Pollock  P. Fearnhead  A. M. Johansen  and G. O. Roberts. The scalable Langevin exact algorithm:
+
+Bayesian inference for big data. arXiv.org  Sept. 2016.
+
+[32] M. Rabinovich  E. Angelino  and M. I. Jordan. Variational consensus Monte Carlo. arXiv.org  June 2015.
+
+[33] A. Rahimi and B. Recht. Weighted sums of random kitchen sinks: Replacing minimization with random-
+
+ization in learning. In Advances in Neural Information Processing Systems  pages 1313–1320  2009.
+
+[34] S. L. Scott  A. W. Blocker  F. V. Bonassi  H. A. Chipman  E. I. George  and R. E. McCulloch. Bayes and
+
+big data: The consensus Monte Carlo algorithm. In Bayes 250  2013.
+
+[35] S. Srivastava  V. Cevher  Q. Tran-Dinh  and D. Dunson. WASP: Scalable Bayes via barycenters of subset
+
+posteriors. In International Conference on Artiﬁcial Intelligence and Statistics  2015.
+
+[36] M. Stephanou  M. Varughese  and I. Macdonald. Sequential quantiles via Hermite series density estima-
+
+tion. Electronic Journal of Statistics  11(1):570–607  2017.
+
+[37] G. Szeg¨o. Orthogonal Polynomials. American Mathematical Society  4th edition  1975.
+
+[38] Y. W. Teh  A. H. Thiery  and S. Vollmer. Consistency and ﬂuctuations for stochastic gradient Langevin
+
+dynamics. Journal of Machine Learning Research  17(7):1–33  Mar. 2016.
+
+[39] L. Tierney and J. B. Kadane. Accurate approximations for posterior moments and marginal densities.
+
+Journal of the American Statistical Association  81(393):82–86  1986.
+
+[40] A. W. van der Vaart. Asymptotic Statistics. University of Cambridge  1998.
+
+[41] M. Welling and Y. W. Teh. Bayesian learning via stochastic gradient Langevin dynamics. In International
+
+Conference on Machine Learning  2011.
+
+11
+
+,Shreyas Saxena
+Jakob Verbeek
+Jonathan Huggins
+Tamara Broderick

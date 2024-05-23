@@ -1,0 +1,823 @@
+2017,SVD-Softmax: Fast Softmax Approximation on Large Vocabulary Neural Networks,We propose a fast approximation method of a softmax function with a very large vocabulary using singular value decomposition (SVD). SVD-softmax targets fast and accurate probability estimation of the topmost probable words during inference of neural network language models. The proposed method transforms the weight matrix used in the calculation of the output vector by using SVD. The approximate probability of each word can be estimated with only a small part of the weight matrix by using a few large singular values and the corresponding elements for most of the words. We applied the technique to language modeling and neural machine translation and present a guideline for good approximation. The algorithm requires only approximately 20\% of arithmetic operations for an 800K vocabulary case and shows more than a three-fold speedup on a GPU.,SVD-Softmax: Fast Softmax Approximation on Large
+
+Vocabulary Neural Networks
+
+Kyuhong Shim  Minjae Lee  Iksoo Choi  Yoonho Boo  Wonyong Sung
+
+Department of Electrical and Computer Engineering
+
+Seoul National University  Seoul  Korea
+
+skhu20@snu.ac.kr  {mjlee  ischoi  yhboo}@dsp.snu.ac.kr  wysung@snu.ac.kr
+
+Abstract
+
+We propose a fast approximation method of a softmax function with a very large
+vocabulary using singular value decomposition (SVD). SVD-softmax targets fast
+and accurate probability estimation of the topmost probable words during infer-
+ence of neural network language models. The proposed method transforms the
+weight matrix used in the calculation of the output vector by using SVD. The ap-
+proximate probability of each word can be estimated with only a small part of
+the weight matrix by using a few large singular values and the corresponding ele-
+ments for most of the words. We applied the technique to language modeling and
+neural machine translation and present a guideline for good approximation. The
+algorithm requires only approximately 20% of arithmetic operations for an 800K
+vocabulary case and shows more than a three-fold speedup on a GPU.
+
+1
+
+Introduction
+
+Neural networks have shown impressive results for language modeling [1–3]. Neural network-based
+language models (LMs) estimate the likelihood of a word sequence by predicting the next word wt+1
+by previous words w1:t. Word probabilities for every step are acquired by matrix multiplication
+and a softmax function. Likelihood evaluation by an LM is necessary for various tasks  such as
+speech recognition [4  5]  machine translation  or natural language parsing and tagging. However 
+executing an LM with a large vocabulary size is computationally challenging because of the softmax
+normalization. Softmax computation needs to access every word to compute the normalization factor
+V exp(zi) = exp(zk)/Z. V indicates the vocabulary size of
+
+Z  where sof tmax(zk) = exp(zk)/(cid:80)
+
+the dataset. We refer the conventional softmax algorithm as the "full-softmax."
+The computational requirement of the softmax function frequently dominates the complexity of
+neural network LMs. For example  a Long Short-Term Memory (LSTM) [6] RNN with four layers
+of 2K hidden units requires roughly 128M multiply-add operations for one inference. If the LM
+supports an 800K vocabulary  the evaluation of the output probability computation with softmax
+normalization alone demands approximately 1 600M multiply-add operations  far exceeding that of
+the RNN core itself.
+Although we should compute the output vector of all words to evaluate the denominator of the soft-
+max function  few applications require the probability of every word. For example  if an LM is used
+for rescoring purposes as in [7]  only the probabilities of one or a few given words are needed. Fur-
+ther  for applications employing beam search  the most probable top-5 or top-10 values are usually
+required. In speech recognition  since many states need to be pruned for efﬁcient implementations 
+it is not demanded to consider the probabilities of all the words. Thus  we formulate our goal: to ob-
+tain accurate top-K word probabilities with considerably less computation for LM evaluation  where
+the K considered is from 1 to 500.
+
+31st Conference on Neural Information Processing Systems (NIPS 2017)  Long Beach  CA  USA.
+
+In this paper  we present a fast softmax approximation for LMs  which does not involve alternative
+neural network architectures or additional loss during training. Our method can be directly applied
+to full-softmax  regardless of how it is trained. This method is different from those proposed in other
+papers  in that it is aimed to reduce the evaluation complexity  not to minimize the training time or
+to improve the performance.
+The proposed technique is based on singular value decomposition (SVD) [8] of the softmax weight
+matrix. Experimental results show that the proposed algorithm provides both fast and accurate
+evaluation of the most probable top-K word probabilities.
+The contributions of this paper are as follows.
+
+lating the top-K word probabilities.
+
+• We propose a fast and accurate softmax approximation  SVD-softmax  applied for calcu-
+• We provide a quantitative analysis of SVD-softmax with three different datasets and two
+• We show through experimental results that the normalization term of softmax can be ap-
+
+different tasks.
+
+proximated fairly accurately by computing only a fraction of the full weight matrix.
+
+This paper is organized as follows. In Section 2  we review related studies and compare them to our
+study. We introduce SVD-softmax in Section 3. In Section 4  we provide experimental results. In
+Section 5  we discuss more details about the proposed algorithm. Section 6 concludes the paper.
+
+2 Related work
+
+Many methods have been developed to reduce the computational burden of the softmax function.
+The most successful approaches include sampling-based softmax approximation  hierarchical soft-
+max architecture  and self-normalization techniques. Some of these support very efﬁcient training.
+However  the methods listed below must search the entire vocabulary to ﬁnd the top-K words.
+Sampling-based approximations choose a small subset of possible outputs and train only with
+those. Importance sampling (IS) [9]  noise contrastive estimation (NCE) [10]  negative sampling
+(NEG) [11]  and Blackout [12] are included in this category. These approximations train the net-
+work to increase the possibilities of positive samples  which are usually labels  and to decrease the
+probabilities of negative samples  which are randomly sampled. These strategies are beneﬁcial for
+increasing the training speed. However  their evaluation does not show any improvement in speed.
+Hierarchical softmax (HS) uniﬁes the softmax function and output vector computation by con-
+structing a tree structure of words. Binary HS [13  14] uses the binary tree structure  which is
+log(V ) in depth. However  the binary representation is heavily dependent on each word’s position 
+and therefore  a two-layer [2] or three-layer [15] hierarchy is also introduced. In particular  in the
+study in [15] several clustered words were arranged in a "short-list " where the outputs of the second
+level hierarchy were the words themselves  not the classes of the third hierarchy. Adaptive softmax
+[16] extends the idea and allocates the short-list to the ﬁrst layer  with a two-layer hierarchy. Adap-
+tive softmax achieves both a training time speedup and a performance gain. HS approaches have
+advantages for quickly gathering probability of a certain word or predetermined words. However 
+HS should also visit every word to ﬁnd the topmost likely words  where the merit of the tree structure
+is not useful.
+Self-normalization approaches [17  18] employ an additional training loss term  which leads a
+normalization factor Z close to 1. The evaluation of selected words can be achieved signiﬁcantly
+faster than by using full-softmax if the denominator is trained well. However  the method cannot
+ensure that the denominator always appears correctly  and should also consider every word for top-K
+estimation.
+Differentiated Softmax (D-softmax) [19] restricts the effective parameters  using the fraction of
+the full output matrix. The matrix allocates higher dimensional representation to frequent words
+and only a lower dimensional vector to rare words. From this point of view  there is a commonality
+between our method and D-softmax in that the length of vector used in the output vector compu-
+tation varies among words. However  the determination of the length of each portion is somewhat
+heuristic and requires speciﬁed training procedures in D-softmax. The word representation learned
+
+2
+
+Figure 1: Illustration of the proposed SVD-softmax algorithm. The softmax weight matrix is de-
+composed by singular value decomposition (b). Only a part of the columns is used to compute the
+preview outputs (c). Selected rows  which are chosen by sorting the preview outputs  are recomputed
+with full-width (d). For simplicity  the bias vector is omitted.
+
+by D-softmax is restricted from the start  and may therefore be lacking in terms of expressiveness.
+In contrast  our algorithm ﬁrst trains words with a full-length vector and dynamically limits the
+dimension during evaluation. In SVD-softmax  the importance of each word is also dynamically
+determined during the inference.
+
+3 SVD-softmax
+
+The softmax function transforms a D-dimensional real-valued vector h to a V -dimensional proba-
+bility distribution. The probability calculation consists of two stages. First  we acquire the output
+vector of size V   denoted as z  from h by matrix multiplication as
+
+(1)
+where A ∈ RV ×D is a weight matrix  h ∈ RD is an input vector  b ∈ RV is a bias vector  and
+z ∈ RV is the computed output vector. Second  we normalize the output vector to compute the
+probability yk of each word as
+
+z = Ah + b
+
+yk = sof tmax(zk) =
+
+(cid:80)V
+
+exp(Akh + bk)
+i=1 exp(Aih + bi)
+
+=
+
+(cid:80)V
+
+exp(zk)
+i=1 exp(zi)
+
+=
+
+exp(zk)
+
+Z
+
+(2)
+
+The computational complexity of calculating the probability distribution over all classes and only
+one class is the same  because the normalization factor Z requires every output vector elements to
+be computed.
+
+3.1 Singular value decomposition
+
+SVD is a factorization method that decomposes a matrix into two unitary matrices U  V with sin-
+gular vectors in columns and one diagonal matrix Σ with non-negative real singular values in de-
+scending order. SVD is applied to the weight matrix A as
+
+A = UΣVT
+
+(3)
+where U ∈ RV ×D  Σ ∈ RD×D  and V ∈ RD×D. We multiply Σ and U to factorize the original
+matrix into two parts: UΣ and VT. Note that U× Σ multiplication is negligible in evaluation time
+because we can keep the result as a single matrix.
+Larger singular values in Σ are multiplied to the leftmost columns of U. As a result  the elements
+of the B(= UΣ) matrix are statistically arranged in descending order of magnitude  from the ﬁrst
+column to the last. The leftmost columns of B are more inﬂuential than the rightmost columns.
+
+3
+
+𝐴𝑈Σ𝑽𝑽𝑽(a)Base(b)After SVD(c)Preview window(d)Additional full-view vectors|𝑉||𝐷||𝐷||𝑊||𝑁|Algorithm 1 Algorithm of the proposed SVD-softmax.
+1: input: trained weight matrix A  input vector h  bias vector b
+2: hyperparameter: width of preview window W   number of full-view vectors N.
+3: initialize: decompose A = UΣVT   B = UΣ
+4: ˜h = VT × h
+5: ˜z = B[:  : W ] × ˜h[: W ] + b
+6: Sort ˜z in descending order
+7: CN = Top-N word indices of ˜z
+8: for all id in CN do
+˜z[id] = B[id  :] × ˜h + b[id]
+9:
+10: end for
+
+compute preview outputs with only W dimensions
+select N words of largest preview outputs
+
+update selected words by full-view vector multiplication
+
+compute probability distribution using softmax
+
+11: ˜Z =(cid:80)
+
+V exp ˜zi
+12: ˜y = exp(˜z)/ ˜Z
+13: return ˜y
+
+3.2 Softmax approximation
+
+Algorithm 1 shows the softmax approximation procedure  which is also illustrated in Figure 1.
+Previous methods needed to compare every output vector elements to ﬁnd the top-K words. Instead
+of using the full-length vector  we consult every word with a window of restricted length W . We
+call this the "preview window" and the results the "preview outputs." Note that adding the bias b
+in preview outputs computation is crucial for the performance. Since larger singular values are
+multiplied to several leftmost columns  it is reasonable to assume that the most important portion of
+the output vector is already computed with the preview window.
+However  we ﬁnd that the preview outputs do not sufﬁce to obtain accurate results. To increase the
+accuracy  N largest candidates CN are selected by sorting V preview outputs. The selected candi-
+dates are recomputed with the full-length window. We call the candidates the "full-view" vectors. As
+a result  N outputs are computed exactly while (V − N ) outputs are only an approximation based
+on the preview outputs. In other words  only the selected indices use the full window for output
+vector computation. Finally  the softmax function is applied to the output vector to normalize the
+probability distribution. The modiﬁed output vector ˜zk is formulated as
+
+(cid:26)Bk
+
+˜zk =
+
+˜h + bk 
+
+if k ∈ CN
+Bk[: W ]˜h[: W ] + bk  otherwise
+
+(4)
+
+where B ∈ RV ×D and ˜h = V T h ∈ RD. Note that if k ∈ CN   ˜zk is equal to zk. The computational
+complexity is reduced from O(V × D) to O(V × W + N × D).
+
+3.3 Metrics
+
+To observe the accuracy of every word probability  we use Kullback-Leibler divergence (KLD) as a
+metric. KLD shows the closeness of the approximated distribution to the actual one. Perplexity  or
+negative log-likelihood (N LL)  is a useful measurement for likelihood estimation. The gap between
+full-softmax and SVD-softmax N LL should be small. For the evaluation of a given word  the
+accuracy of probability depends only on the normalization factor Z  and therefore we monitor also
+the denominator of the softmax function.
+We deﬁne "top-K coverage " which represents how many top-K words of full-softmax are included
+in the top-K words of SVD-softmax. For the beam-search purpose  it is important to correctly select
+the top-K words  as beam paths might change if the order is mingled.
+
+4 Experimental results
+
+The experiments were performed on three datasets and two different applications: language model-
+ing and machine translation. The WikiText-2 [20] and One Billion Word benchmark (OBW) [21]
+
+4
+
+Table 1: Effect of the number of hidden units on the WikiText-2 language model. The number of
+full-view vectors is ﬁxed to 3 300 for the table  which is about 10% of the size of the vocabulary.
+Top-K denotes top-K coverage deﬁned in 3.3. The values are averaged.
+
+D
+
+256
+
+512
+
+1024
+
+W
+16
+32
+32
+64
+64
+128
+
+˜Z/Z
+0.9813
+0.9914
+0.9906
+0.9951
+0.9951
+0.9971
+
+KLD N LL (full/SVD) Top-10 Top-100 Top-1000
+952.71
+0.03843
+986.94
+0.01134
+974.87
+0.01453
+0.00638
+993.35
+992.62
+0.00656
+0.00353
+998.28
+
+4.408 / 4.518
+4.408 / 4.441
+3.831 / 3.907
+3.831 / 3.852
+3.743 / 3.789
+3.743 / 3.761
+
+9.97
+10.00
+10.00
+10.00
+10.00
+10.00
+
+99.47
+99.97
+99.89
+99.99
+99.99
+100.00
+
+datasets were used for language modeling. The neural machine translation (NMT) from German to
+English was trained with a dataset provided by the OpenNMT toolkit [22].
+We ﬁrst analyzed the extent to which the preview window size W and the number of full-view
+vectors N affect the overall performance and searched the best working combination.
+
+4.1 Effect of the number of hidden units on preview window size
+
+To ﬁnd the relationship between the preview window’s width and the approximation quality  three
+LMs trained with WikiText-2 were tested. WikiText is a text dataset  which was recently intro-
+duced [20]. The WikiText-2 dataset contains 33 278-word vocabulary and approximately 2M train-
+ing tokens. An RNN with a single LSTM layer [6] was used for language modeling. Traditional
+full-softmax was used for the output layer. The number of LSTM units was the same as the input
+embedding dimension. Three models were trained on WikiText-2 with the number of hidden units
+D being 256  512  and 1 024.
+The models were trained with stochastic gradient descent (SGD) with an initial learning rate of 1.0
+and momentum of 0.95. The batch size was set to 20  and the network was unrolled for 35 timesteps.
+Dropout [23] was applied to the LSTM output with a drop ratio of 0.5. Gradient clipping [24] of
+maximum norm value 5 was applied.
+The preview window widths W selected were 16  32  64  and 128 and the number of full-view
+candidates N were 5% and 10% of the full vocabulary size for all three models. One thousand
+sequential frames were used for the evaluation. Table 1 shows the results of selected experiments 
+which indicates that the sufﬁcient preview window size is proportional to the hidden layer dimension
+D. In most cases  1/8 of D is an adequate window width  which costs 12.5% of multiplications.
+Over 99% of the denominator is covered. KLD and N LL show that the approximation produces
+almost the same results as the original. The top-K words are also computed precisely. We also
+checked the order of the top-K words that were preserved. The result showed that using too short
+window width affects the performance badly.
+
+4.2 Effect of the vocabulary size on the number of full-view vectors
+
+The OBW dataset was used to analyze the effect of vocabulary size on SVD-softmax. This bench-
+mark is a huge dataset with a 793 472-word vocabulary. The model used 256-dimension word em-
+bedding  an LSTM layer of 2 048 units  and a full-softmax output layer. The RNN LM was trained
+with SGD with an initial learning rate of 1.0.
+We explored multiple models by employing a vocabulary size of 8 004  80 004  401 951  and
+793 472  abbreviated as 8K  80K  400K  and 800K below. The 800K model follows the prepro-
+cessing consensus  keeping words that appear more than three times. The 400K vocabulary follows
+the same process as the 800K but without case sensitivity. The 8K and 80K data models were cre-
+ated by choosing the topmost frequent 8K and 80K words  respectively. Because of the limitation
+of GPU memory  the 800K model was trained with half-precision parameters. We used the full data
+for training.
+
+5
+
+Table 2: Effect of the number of full-view vector size N on One Billion Word benchmark language
+model. The preview window width is ﬁxed to 256 in this table. We omitted the ratio of approximated
+˜Z and real Z  because the ratio is over 0.997 for all cases in the table. The multiplication ratio is to
+full-softmax  including the overhead of VT × h.
+
+V
+
+8K
+
+80K
+
+400K
+
+800K
+
+N
+1024
+2048
+4096
+8192
+16384
+32768
+32768
+65536
+
+N LL (full/SVD) Top-10 Top-50 Top-100 Top-500 Mult. ratio
+
+2.685 / 2.698
+2.685 / 2.687
+3.589 / 3.6051
+3.589 / 3.591
+3.493 / 3.495
+3.493 / 3.495
+4.688 / 4.718
+4.688 / 4.690
+
+9.98
+9.99
+10.00
+10.00
+10.00
+10.00
+10.00
+10.00
+
+49.81
+49.99
+49.94
+49.99
+50.00
+50.00
+49.99
+49.99
+
+99.36
+99.89
+99.85
+99.97
+100.00
+100.00
+99.96
+99.96
+
+469.48
+496.05
+497.73
+499.56
+499.90
+499.98
+499.99
+499.89
+
+0.493
+0.605
+0.195
+0.240
+0.171
+0.201
+0.168
+0.200
+
+Table 3: SVD-softmax on machine translation task. The baseline perplexity and BLEU score are
+10.57 and 21.98  respectively.
+
+W
+
+200
+
+100
+
+50
+
+N
+5000
+2500
+1000
+5000
+2500
+1000
+5000
+2500
+1000
+
+Perplexity BLEU
+21.99
+21.99
+22.00
+22.00
+22.00
+22.01
+22.00
+21.99
+22.00
+
+10.57
+10.57
+10.58
+10.58
+10.59
+10.65
+10.60
+10.68
+11.04
+
+The preview window width and the number of full-view vectors were selected in the powers of 2.
+The results were computed on randomly selected 2 000 consecutive frames.
+Table 2 shows the experimental results. With a ﬁxed hidden dimension of 2 048  the required pre-
+view window width does not change signiﬁcantly  which is consistent with the observations in Sec-
+tion 4.1. However  the number of full-view vectors N should increase as the vocabulary size grows.
+In our experiments  using 5% to 10% of the total vocabulary size as candidates sufﬁced to achieve a
+successful approximation. The results prove that the proposed method is scalable and more efﬁcient
+when applied to large vocabulary softmax.
+
+4.3 Result on machine translation
+
+NMT is based on neural networks and contains an internal softmax function. We applied SVD-
+softmax to a German to English NMT task to evaluate the actual performance of the proposed
+algorithm.
+The baseline network  which employs the encoder-decoder model with an attention mechanism
+[25  26]  was trained using the OpenNMT toolkit. The network was trained with concatenated
+data which contained a WMT 2015 translation task [27]  Europarl v7 [28]  common crawl [29] 
+and news commentary v10 [30]  and evaluated with newstest 2013. The training and evaluation
+data were tokenized and preprocessed by following the procedures in previous studies [31  32] to
+conduct case-sensitive translation with 50 004 frequent words. The baseline network employed 500-
+dimension word embedding  encoder- and decoder-networks with two unidirectional LSTM layers
+with 500 units each  and a full-softmax output layer. The network was trained with SGD with
+an initial learning rate of 1.0 while applying dropout [23] with ratio 0.3 between adjacent LSTM
+layers. The rest of the training settings followed the OpenNMT training recipe  which is based on
+
+6
+
+Figure 2: Singular value plot of three WikiText-2 language models that differ in hidden vector
+dimension D ∈ {256  512  1024}. The left hand side ﬁgure represents the singular value for each
+element  while the right hand side ﬁgure illustrates the value proportional to D. The dashed line
+implies 0.125 = 1/8 point. Both are from the same data.
+
+previous studies [31  33]. The performance of the network was evaluated according to perplexity
+and the case-sensitive BLEU score [34]  which was computed with the Moses toolkit [35]. During
+translation  a beam search was conducted with beam width 5.
+To evaluate our algorithm  the preview window widths W selected were 25  50  100  and 200  and
+the numbers of full-view candidates N chosen were 1 000  2 500  and 5 000.
+Table 3 shows the experimental results for perplexity and the BLEU score with respect to the preview
+window dimension W and the number of full-view vectors N. The full-softmax layer in the baseline
+model employed a hidden dimension D of 500 and computed the probability for V = 50 004 words.
+The experimental results show that a speed up can be achieved with preview width W = 100  which
+is 1/5 of D  and the number of full-view vectors N = 2 500 or 5 000  which is 1/5 or 1/10 of
+V . The parameters chosen did not affect the translation performance in terms of perplexity. For a
+wider W   it is possible to use a smaller N. The experimental results show that SVD-softmax is also
+effective when applied to NMT tasks.
+
+5 Discussion
+
+In this section  we provide empirical evidence of the reasons why SVD-softmax operates efﬁciently.
+We also present the results of an implementation on a GPU.
+
+5.1 Analysis of W   N  and D
+
+We ﬁrst explain the reason the required preview window width W is proportional to the hidden
+vector size D. Figure 2 shows the singular value distribution of WikiText-2 LM softmax weights.
+We observed that the distributions are similar for all three cases when the singular value indices are
+scaled with D. Thus  it is important to preserve the ratio between W and D. The ratio of singular
+values in a D/8 window over the total sum of singular values for 256  512  and 1 024 hidden vector
+dimensions is 0.42  0.38  and 0.34  respectively.
+Furthermore  we explore the manner in which W and N affect the normalization term  i.e.  the
+denominator. Figure 3 shows how the denominator is approximated while changing W or N. Note
+that the leftmost column of Figure 3 represents that no full-view vectors were used.
+
+5.2 Computational efﬁciency
+
+The modeled number of multiplications in Table 2 shows that the computation required can be
+decreased to 20%. After factorization  the overhead of matrix multiplication VT   which is O(D2) 
+is a ﬁxed cost. In most cases  especially with a very large vocabulary  V is signiﬁcantly larger than
+D  and the additional computation cost is negligible. However  as V decreases  the portion of the
+overhead increases.
+
+7
+
+01020304050607001282563845126407688961024S(256)S(512)S(1024)0102030405060700.000.200.400.600.801.00S(256)S(512)S(1024)0.125Figure 3: Heatmap of approximated normalization factor ratio ˜Z/Z. The x and y axis represent
+N and W   respectively. The WikiText-2 language model with D = 1 024 was used. Note that the
+maximum values of N and W are 1 024 and 33 278  respectively. The gray line separates the area
+by 0.99 as a threshold. Best viewed in color.
+
+Table 4: Measured time (ms) of full-softmax and SVD-softmax on a GPU and CPU. The experiment
+was conducted on a NVIDIA GTX Titan-X (Pascal) GPU and Intel i7-6850 CPU. The second col-
+umn indicates the full-softmax  while the other columns represent each step of SVD-softmax. The
+cost of the sorting  exponential  and sum is omitted  as their time consumption is negligible.
+
+Full-softmax
+
+A × h
+(262k  2k)
+
+×2k
+14.12
+1541.43
+
+Device
+
+GPU
+CPU
+
+SVD-softmax
+
+VT × h Preview window Full-view vectors
+(2k  2k)
+×2k
+0.33
+25.32
+
+×256
+2.98
+189.27
+
+×2k
+1.12
+88.98
+
+(262k  256)
+
+(16k  2k)
+
+Sum (speedup)
+
+-
+
+4.43 (×3.19)
+303.57 (×5.08)
+
+We provide an example of time consumption on a CPU and GPU. Assume the weight A is a 262K
+(V = 218) by 2K (D = 211) matrix and SVD-softmax is applied with preview window width of
+256 and the number of full-view vectors is 16K (N = 214). This corresponds to W/D = 1/8 and
+N/V = 1/16. The setting well simulates the real LM environment and the use of the recommended
+SVD-softmax hyperparameters discussed above. We used our highly optimized custom CUDA ker-
+nel for the GPU evaluation. The matrix B was stored in row-major order for convenient full-view
+vector evaluation.
+As observed in Table 4  the time consumption is reduced by approximately 70% on the GPU and
+approximately 80% on the CPU. Note that the GPU kernel is fully parallelized while the CPU code
+employs a sequential logic. We also tested various vocabulary sizes and hidden dimensions on the
+custom kernel  where a speedup is mostly observed  although it is less effective for small vocabulary
+cases.
+
+5.3 Compatibility with other methods
+
+The proposed method is compatible with a neural network trained with sampling-based softmax
+approximations. SVD-softmax is also applicable to hierarchical softmax and adaptive softmax 
+especially when the vocabulary is large. Hierarchical methods need large weight matrix multipli-
+cation to gather every word probability  and SVD-softmax can reduce the computation. We tested
+SVD-softmax with various softmax approximations and observed that a signiﬁcant amount of mul-
+tiplication is removed while the performance is not signiﬁcantly affected as it is by full softmax.
+
+8
+
+6 Conclusion
+
+We present SVD-softmax  an efﬁcient softmax approximation algorithm  which is effective for com-
+puting top-K word probabilities. The proposed method factorizes the matrix by SVD  and only part
+of the SVD transformed matrix is previewed to determine which words are worth preserving. The
+guideline for hyperparameter selection was given empirically. Language modeling and NMT exper-
+iments were conducted. Our method reduces the number of multiplication operations to only 20% of
+that of the full-softmax with little performance degradation. The proposed SVD-softmax is a simple
+yet powerful computation reduction technique.
+
+Acknowledgments
+
+This work was supported in part by the Brain Korea 21 Plus Project and the Na-
+tional Research Foundation of Korea (NRF) grant funded by the Korea government (MSIP)
+(No.2015R1A2A1A10056051).
+
+References
+[1] Tomas Mikolov  Martin Karaﬁát  Lukas Burget  Jan Cernock`y  and Sanjeev Khudanpur  “Re-
+
+current neural network based language model ” in Interspeech  2010  vol. 2  p. 3.
+
+[2] Tomáš Mikolov  Stefan Kombrink  Lukáš Burget  Jan ˇCernock`y  and Sanjeev Khudanpur  “Ex-
+tensions of recurrent neural network language model ” in Acoustics  Speech and Signal Pro-
+cessing (ICASSP)  2011 IEEE International Conference on. IEEE  2011  pp. 5528–5531.
+
+[3] Yann N Dauphin  Angela Fan  Michael Auli  and David Grangier  “Language modeling with
+
+gated convolutional networks ” arXiv preprint arXiv:1612.08083  2016.
+
+[4] William Chan  Navdeep Jaitly  Quoc Le  and Oriol Vinyals  “Listen  attend and spell: A
+neural network for large vocabulary conversational speech recognition ” in Acoustics  Speech
+and Signal Processing (ICASSP)  2016 IEEE International Conference on. IEEE  2016  pp.
+4960–4964.
+
+[5] Kyuyeon Hwang and Wonyong Sung  “Character-level incremental speech recognition with
+recurrent neural networks ” in Acoustics  Speech and Signal Processing (ICASSP)  2016 IEEE
+International Conference on. IEEE  2016  pp. 5335–5339.
+
+[6] Sepp Hochreiter and Jürgen Schmidhuber  “Long short-term memory ” Neural Computation 
+
+vol. 9  no. 8  pp. 1735–1780  1997.
+
+[7] Xunying Liu  Yongqiang Wang  Xie Chen  Mark JF Gales  and Philip C Woodland  “Efﬁcient
+lattice rescoring using recurrent neural network language models ” in Acoustics  Speech and
+Signal Processing (ICASSP)  2014 IEEE International Conference on. IEEE  2014  pp. 4908–
+4912.
+
+[8] Gene H Golub and Christian Reinsch  “Singular value decomposition and least squares solu-
+
+tions ” Numerische Mathematik  vol. 14  no. 5  pp. 403–420  1970.
+
+[9] Yoshua Bengio  Jean-Sébastien Senécal  et al.  “Quick training of probabilistic neural nets by
+
+importance sampling. ” in AISTATS  2003.
+
+[10] Andriy Mnih and Yee Whye Teh  “A fast and simple algorithm for training neural probabilistic
+
+language models ” arXiv preprint arXiv:1206.6426  2012.
+
+[11] Tomas Mikolov  Ilya Sutskever  Kai Chen  Greg S Corrado  and Jeff Dean  “Distributed repre-
+sentations of words and phrases and their compositionality ” in Advances in Neural Information
+Processing Systems  2013  pp. 3111–3119.
+
+[12] Shihao Ji  SVN Vishwanathan  Nadathur Satish  Michael J Anderson  and Pradeep Dubey 
+“Blackout: Speeding up recurrent neural network language models with very large vocabular-
+ies ” arXiv preprint arXiv:1511.06909  2015.
+
+9
+
+[13] Frederic Morin and Yoshua Bengio 
+
+“Hierarchical probabilistic neural network language
+
+model ” in AISTATS. Citeseer  2005  vol. 5  pp. 246–252.
+
+[14] Andriy Mnih and Geoffrey E Hinton  “A scalable hierarchical distributed language model ” in
+
+Advances in Neural Information Processing Systems  2009  pp. 1081–1088.
+
+[15] Hai-Son Le  Ilya Oparin  Alexandre Allauzen  Jean-Luc Gauvain  and François Yvon  “Struc-
+tured output layer neural network language model ” in Acoustics  Speech and Signal Process-
+ing (ICASSP)  2011 IEEE International Conference on. IEEE  2011  pp. 5524–5527.
+
+[16] Edouard Grave  Armand Joulin  Moustapha Cissé  David Grangier  and Hervé Jégou  “Efﬁ-
+
+cient softmax approximation for GPUs ” arXiv preprint arXiv:1609.04309  2016.
+
+[17] Jacob Devlin  Rabih Zbib  Zhongqiang Huang  Thomas Lamar  Richard M Schwartz  and John
+Makhoul  “Fast and robust neural network joint models for statistical machine translation ” in
+ACL (1). Citeseer  2014  pp. 1370–1380.
+
+[18] Jacob Andreas  Maxim Rabinovich  Michael I Jordan  and Dan Klein  “On the accuracy of
+self-normalized log-linear models ” in Advances in Neural Information Processing Systems 
+2015  pp. 1783–1791.
+
+[19] Welin Chen  David Grangier  and Michael Auli  “Strategies for training large vocabulary neural
+
+language models ” arXiv preprint arXiv:1512.04906  2015.
+
+[20] Stephen Merity  Caiming Xiong  James Bradbury  and Richard Socher  “Pointer sentinel mix-
+
+ture models ” arXiv preprint arXiv:1609.07843  2016.
+
+[21] Ciprian Chelba  Tomas Mikolov  Mike Schuster  Qi Ge  Thorsten Brants  Phillipp Koehn  and
+Tony Robinson  “One billion word benchmark for measuring progress in statistical language
+modeling ” arXiv preprint arXiv:1312.3005  2013.
+
+[22] Guillaume Klein  Yoon Kim  Yuntian Deng  Jean Senellart  and Alexander M Rush  “Open-
+NMT: Open-source toolkit for neural machine translation ” arXiv preprint arXiv:1701.02810 
+2017.
+
+[23] Nitish Srivastava  Geoffrey E Hinton  Alex Krizhevsky  Ilya Sutskever  and Ruslan Salakhutdi-
+nov  “Dropout: a simple way to prevent neural networks from overﬁtting ” Journal of Machine
+Learning Research  vol. 15  no. 1  pp. 1929–1958  2014.
+
+[24] Razvan Pascanu  Tomas Mikolov  and Yoshua Bengio  “On the difﬁculty of training recurrent
+
+neural networks ” ICML (3)  vol. 28  pp. 1310–1318  2013.
+
+[25] Kyunghyun Cho  Bart Van Merriënboer  Caglar Gulcehre  Dzmitry Bahdanau  Fethi Bougares 
+Holger Schwenk  and Yoshua Bengio  “Learning phrase representations using RNN encoder-
+decoder for statistical machine translation ” arXiv preprint arXiv:1406.1078  2014.
+
+[26] Ilya Sutskever  Oriol Vinyals  and Quoc V Le  “Sequence to sequence learning with neural
+
+networks ” in Advances in Neural Information Processing Systems  2014  pp. 3104–3112.
+
+[27] Ondrej Bojar  Rajen Chatterjee  Christian Federmann  Barry Haddow  Matthias Huck  Chris
+Hokamp  Philipp Koehn  Varvara Logacheva  Christof Monz  Matteo Negri  Matt Post  Car-
+olina Scarton  Lucia Specia  and Marco Turchi  “Findings of the 2015 workshop on statistical
+machine translation ” in Proceedings of the Tenth Workshop on Statistical Machine Transla-
+tion  2015  pp. 1–46.
+
+[28] Philipp Koehn  “Europarl: A parallel corpus for statistical machine translation ” in MT Summit 
+
+2005  vol. 5  pp. 79–86.
+
+[29] Common Crawl Foundation  “Common crawl ” http://commoncrawl.org  2016  Accessed:
+
+2017-04-11.
+
+[30] Jorg Tiedemann  “Parallel data  tools and interfaces in OPUS ” in LREC  2012  vol. 2012  pp.
+
+2214–2218.
+
+10
+
+[31] Minh-Thang Luong  Hieu Pham  and Christopher D Manning 
+
+“Effective approaches to
+
+attention-based neural machine translation ” arXiv preprint arXiv:1508.04025  2015.
+
+[32] Sébastien Jean  Kyunghyun Cho  Roland Memisevic  and Yoshua Bengio  “On using very large
+
+target vocabulary for neural machine translation ” arXiv preprint arXiv:1412.2007  2014.
+
+[33] Dzmitry Bahdanau  Kyunghyun Cho  and Yoshua Bengio  “Neural machine translation by
+
+jointly learning to align and translate ” arXiv preprint arXiv:1409.0473  2014.
+
+[34] Kishore Papineni  Salim Roukos  Todd Ward  and Wei-Jing Zhu  “Bleu: a method for au-
+tomatic evaluation of machine translation ” in Proceedings of the 40th annual meeting on
+Association for Computational Linguistics. Association for Computational Linguistics  2002 
+pp. 311–318.
+
+[35] Philipp Koehn  Hieu Hoang  Alexandra Birch  Chris Callison-Burch  Marcello Federico 
+Nicola Bertoldi  Brooke Cowan  Wade Shen  Christine Moran  Richard Zens  et al.  “Moses:
+Open source toolkit for statistical machine translation ” in Proceedings of the 45th Annual
+Meeting of the Association for Computational Linguistics on Interactive Poster and Demon-
+stration Sessions. Association for Computational Linguistics  2007  pp. 177–180.
+
+11
+
+,Kyuhong Shim
+Minjae Lee
+Iksoo Choi
+Yoonho Boo
+Wonyong Sung
+Trong Dinh Thac Do
+Longbing Cao

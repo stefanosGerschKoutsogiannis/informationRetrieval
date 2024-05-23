@@ -1,0 +1,1092 @@
+2019,Importance Resampling for Off-policy Prediction,Importance sampling (IS) is a common reweighting strategy for off-policy prediction in reinforcement learning.  While it is consistent and unbiased  it can result in high variance updates to the weights for the value function. In this work  we explore a resampling strategy as an alternative to reweighting. We propose Importance Resampling (IR) for off-policy prediction  which resamples experience from a replay buffer and applies standard on-policy updates. The approach avoids using importance sampling ratios in the update  instead correcting the distribution before the update. We characterize the bias and consistency of IR  particularly compared to Weighted IS (WIS). We demonstrate in several microworlds that IR has improved sample efficiency and lower variance updates  as compared to IS and several variance-reduced IS strategies  including variants of WIS and V-trace which clips IS ratios. We also provide a demonstration showing IR improves over IS for learning a value function from images in a racing car simulator.,Importance Resampling for Off-policy Prediction
+
+Matthew Schlegel
+University of Alberta
+
+mkschleg@ualberta.ca
+
+Wesley Chung
+
+University of Alberta
+wchung@ualberta.ca
+
+Daniel Graves
+
+Huawei
+
+daniel.graves@huawei.com
+
+Jian Qian
+
+University of Alberta
+jq1@ulberta.ca
+
+Martha White
+
+University of Alberta
+whitem@ulberta.ca
+
+Abstract
+
+Importance sampling (IS) is a common reweighting strategy for off-policy predic-
+tion in reinforcement learning. While it is consistent and unbiased  it can result
+in high variance updates to the weights for the value function. In this work  we
+explore a resampling strategy as an alternative to reweighting. We propose Im-
+portance Resampling (IR) for off-policy prediction  which resamples experience
+from a replay buffer and applies standard on-policy updates. The approach avoids
+using importance sampling ratios in the update  instead correcting the distribution
+before the update. We characterize the bias and consistency of IR  particularly
+compared to Weighted IS (WIS). We demonstrate in several microworlds that IR
+has improved sample efﬁciency and lower variance updates  as compared to IS
+and several variance-reduced IS strategies  including variants of WIS and V-trace
+which clips IS ratios. We also provide a demonstration showing IR improves over
+IS for learning a value function from images in a racing car simulator.
+
+1
+
+Introduction
+
+An emerging direction for reinforcement learning systems is to learn many predictions  formalized
+as value function predictions contingent on many different policies. The idea is that such predictions
+can provide a powerful abstract model of the world. Some examples of systems that learn many value
+functions are the Horde architecture composed of General Value Functions (GVFs) [Sutton et al. 
+2011  Modayil et al.  2014]  systems that use options [Sutton et al.  1999  Schaul et al.  2015a] 
+predictive representation approaches [Sutton et al.  2005  Schaul and Ring  2013  Silver et al.  2017]
+and systems with auxiliary tasks [Jaderberg et al.  2017]. Off-policy learning is critical for learn-
+ing many value functions with different policies  because it enables data to be generated from one
+behavior policy to update the values for each target policy in parallel.
+The typical strategy for off-policy learning is to reweight updates using importance sampling (IS).
+For a given state s  with action a selected according to behavior µ  the IS ratio is the ratio between the
+probability of the action under the target policy ⇡ and the behavior: ⇡(a|s)
+µ(a|s). The update is multiplied
+by this ratio  adjusting the action probabilities so that the expectation of the update is as if the actions
+were sampled according to the target policy ⇡. Though the IS estimator is unbiased and consistent
+[Kahn and Marshall  1953  Rubinstein and Kroese  2016]  it can suffer from high or even inﬁnite
+variance due to large magnitude IS ratios  in theory [Andradottir et al.  1995] and in practice [Precup
+et al.  2001  Mahmood et al.  2014  2017].
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+There have been some attempts to modify off-policy prediction algorithms to mitigate this variance.1
+Weighted IS (WIS) algorithms have been introduced [Precup et al.  2001  Mahmood et al.  2014 
+Mahmood and Sutton  2015]  which normalize each update by the sample average of the ratios.
+These algorithms improve learning over standard IS strategies  but are not straightforward to extend
+to nonlinear function approximation. In the ofﬂine setting  a reweighting scheme  called importance
+sampling with unequal support [Thomas and Brunskill  2017]  was introduced to account for samples
+where the ratio is zero  in some cases signiﬁcantly reducing variance. Another strategy is to rescale
+or truncate the IS ratios  as used by V-trace [Espeholt et al.  2018] for learning value functions and
+Tree-Backup [Precup et al.  2000]  Retrace [Munos et al.  2016] and ABQ [Mahmood et al.  2017]
+for learning action-values. Truncation of IS-ratios in V-trace can incur signiﬁcant bias  and this
+additional truncation parameter needs to be tuned.
+An alternative to reweighting updates is to instead correct the distribution before updating the estima-
+tor using weighted bootstrap sampling: resampling a new set of data from the previously generated
+samples [Smith et al.  1992  Arulampalam et al.  2002]. Consider a setting where a buffer of data is
+stored  generated by a behavior policy. Samples for policy ⇡ can be obtained by resampling from this
+buffer  proportionally to ⇡(a|s)
+µ(a|s) for state-action pairs (s  a) in the buffer. In the sampling literature 
+this strategy has been proposed under the name Sampling Importance Resampling (SIR) [Rubin 
+1988  Smith et al.  1992  Gordon et al.  1993]  and has been particularly successful for Sequential
+Monte Carlo sampling [Gordon et al.  1993  Skare et al.  2003]. Such resampling strategies have
+also been popular in classiﬁcation  with over-sampling or under-sampling typically being preferred
+to weighted (cost-sensitive) updates [Lopez et al.  2013].
+A resampling strategy has several potential beneﬁts for off-policy prediction.2 Resampling could
+even have larger beneﬁts for learning approaches  as compared to averaging or numerical integration
+problems  because updates accumulate in the weight vector and change the optimization trajectory
+of the weights. For example  very large importance sampling ratios could destabilize the weights.
+This problem does not occur for resampling  as instead the same transition will be resampled mul-
+tiple times  spreading out a large magnitude update across multiple updates. On the other extreme 
+with small ratios  IS will waste updates on transitions with very small IS ratios. By correcting the
+distribution before updating  standard on-policy updates can be applied. The magnitude of the up-
+dates vary less—because updates are not multiplied by very small or very large importance sampling
+ratios—potentially reducing variance of stochastic updates and simplifying learning rate selection.
+We hypothesize that resampling (a) learns in a fewer number of updates to the weights  because it
+focuses computation on samples that are likely under the target policy and (b) is less sensitive to
+learning parameters and target and behavior policy speciﬁcation.
+In this work  we investigate the use of resampling for online off-policy prediction for known  un-
+changing target and behavior policies. We ﬁrst introduce Importance Resampling (IR)  which sam-
+ples transitions from a buffer of (recent) transitions according to IS ratios. These sampled transitions
+are then used for on-policy updates. We show that IR has the same bias as WIS  and that it can be
+made unbiased and consistent with the inclusion of a batch correction term—even under a slid-
+ing window buffer of experience. We provide additional theoretical results characterizing when we
+might expect the variance to be lower for IR than IS. We then empirically investigate IR on three mi-
+croworlds and a racing car simulator  learning from images  highlighting that (a) IR is less sensitive
+to learning rate than IS and V-trace (IS with clipping) and (b) IR converges more quickly in terms
+of the number of updates.
+
+2 Background
+
+We consider the problem of learning General Value Functions (GVFs) [Sutton et al.  2011]. The
+agent interacts in an environment deﬁned by a set of states S  a set of actions A and Markov transi-
+tion dynamics  with probability P(s0|s  a) of transitions to state s0 when taking action a in state s. A
+GVF is deﬁned for policy ⇡ : S⇥A! [0  1]  cumulant c : S⇥A⇥S! R and continuation function
+1There is substantial literature on variance reduction for another area called off-policy policy evaluation 
+but which estimates only a single number or value for a policy (e.g.  see [Thomas and Brunskill  2016]). The
+resulting algorithms differ substantially  and are not appropriate for learning the value function.
+
+2We explicitly use the term prediction rather than policy evaluation to make it clear that we are not learning
+
+value functions for control. Rather  our goal is to learn value functions solely for the sake of prediction.
+
+2
+
+ : S⇥A⇥S ! [0  1]  with Ct+1
+transition (St  At  St+1). The value for a state s 2S is
+
+def= c(St  At  St+1) and t+1
+
+def= (St  At  St+1) for a (random)
+
+V (s) def= E⇡ [Gt|St = s]
+
+where Gt
+
+def= Ct+1 + t+1Ct+2 + t+1t+2Ct+3 + . . . .
+
+The operator E⇡ indicates an expectation with actions selected according to policy ⇡. GVFs encom-
+pass standard value functions  where the cumulant is a reward. Otherwise  GVFs enable predictions
+about discounted sums of others signals into the future  when following a target policy ⇡. These val-
+ues are typically estimated using parametric function approximation  with weights ✓ 2 Rd deﬁning
+approximate values V✓(s).
+In off-policy learning  transitions are sampled according to behavior policy  rather than the target
+policy. To get an unbiased sample of an update to the weights  the action probabilities need to be
+adjusted. Consider on-policy temporal difference (TD) learning  with update ↵ttr✓V✓(s) for a
+def= Ct+1 + t+1V✓(St+1)  V✓(s). If
+given St = s  for learning rate ↵t 2 R+ and TD-error t
+actions are instead sampled according to a behavior policy µ : S⇥A! [0  1]  then we can use
+importance sampling (IS) to modify the update  giving the off-policy TD update ↵t⇢ttr✓V✓(s) for
+IS ratio ⇢t
+µ(At|St). Given state St = s  if µ(a|s) > 0 when ⇡(a|s) > 0  then the expected value
+of these two updates are equal. To see why  notice that
+
+def= ⇡(At|St)
+
+Eµ [↵t⇢ttr✓V✓(s)|St = s] = ↵tr✓V✓(s)Eµ [⇢tt|St = s]
+
+which equals E⇡ [↵t⇢ttr✓V✓(s)|St = s] because
+⇡(a|s)
+µ(a|s)E [t|St = s  At = a] = E⇡ [t|St = s] .
+
+Eµ [⇢tt|St = s] =Xa2A
+
+µ(a|s)
+
+Though unbiased  IS can be high-variance. A lower variance alternative is Weighted IS (WIS). For
+i=1  batch WIS uses a normalized estimate
+a batch consisting of transitions {(si  ai  si+1  ci+1 ⇢ i)}n
+for the update. For example  an ofﬂine batch WIS TD algorithm  denoted WIS-Optimal below 
+would use update ↵t
+tr✓V✓(s). Obtaining an efﬁcient WIS update is not straightforward 
+however  when learning online and has resulted in algorithms in the SGD setting (i.e. n = 1)
+specialized to tabular [Precup et al.  2001] and linear functions [Mahmood et al.  2014  Mahmood
+and Sutton  2015]. We nonetheless use WIS as a baseline in the experiments and theory.
+
+⇢tPn
+
+i=1 ⇢i
+
+3
+
+Importance Resampling
+
+In this section  we introduce Importance Resampling (IR) for off-policy prediction and characterize
+its bias and variance. A resampling strategy requires a buffer of samples  from which we can re-
+sample. Replaying experience from a buffer was introduced as a biologically plausible way to reuse
+old experience [Lin  1992  1993]  and has become common for improving sample efﬁciency  partic-
+ularly for control [Mnih et al.  2015  Schaul et al.  2015b]. In the simplest case—which we assume
+here—the buffer is a sliding window of the most recent n samples  {(si  ai  si+1  ci+1 ⇢ i)}t
+i=tn  at
+time step t > n. We assume samples are generated by taking actions according to behavior µ. The
+transitions are generated with probability dµ(s)µ(a|s)P(s0|s  a)  where dµ : S! [0  1] is the sta-
+tionary distribution for policy µ. The goal is to obtain samples according to dµ(s)⇡(a|s)P(s0|s  a) 
+as if we had taken actions according to policy ⇡ from states3 s ⇠ dµ.
+The IR algorithm is simple: resample a mini-batch of size k on each step t from the buffer of
+size n  proportionally to ⇢i in the buffer. Using the resampled mini-batch we can update our value
+function using standard on-policy approaches  such as on-policy TD or on-policy gradient TD. The
+key difference to IS and WIS is that the distribution itself is corrected  before the update  whereas
+IS and WIS correct the update itself. This small difference  however  can have larger ramiﬁcations
+practically  as we show in this paper.
+
+3The assumption that states are sampled from dµ underlies most off-policy learning algorithms. Only a few
+attempt to adjust probabilities dµ to d⇡  either by multiplying IS ratios before a transition [Precup et al.  2001]
+or by directly estimating state distributions [Hallak and Mannor  2017  Liu et al.  2018]. In this work  we focus
+on using resampling to correct the action distribution—the standard setting. We expect  however  that some
+insights will extend to how to use resampling to correct the state distribution  particularly because wherever IS
+ratios are used it should be straightforward to use our resampling approach.
+
+3
+
+We consider two variants of IR: with and without bias correction. For point ij sampled from the
+buffer  let ij be the on-policy update for that transition. For example  for TD  ij = ijr✓V✓(sij ).
+The ﬁrst step for either variant is to sample a mini-batch of size k from the buffer  proportionally
+to ⇢i. Bias-Corrected IR (BC-IR) additionally pre-multiplies with the average ratio in the buffer
+¯⇢ def= 1
+
+i=1 ⇢i  giving the following estimators for the update direction
+
+nPn
+
+XIR
+
+def= 1
+k
+
+ij
+
+XBC
+
+def= ¯⇢
+k
+
+ij
+
+kXj=1
+
+kXj=1
+
+BC-IR negates bias introduced by the average ratio in the buffer deviating signiﬁcantly from the true
+mean. For reasonably large buffers  ¯⇢ will be close to 1 making IR and BC-IR have near-identical
+updates4. Nonetheless  they do have different theoretical properties  particularly for small buffer
+sizes n  so we characterize both.
+Across most results  we make the following assumption.
+Assumption 1. A buffer Bt = {Xt+1  ...  Xt+n} is constructed from the most recent n transitions
+sampled by time t + n  which are generated sequentially from an irreducible  ﬁnite MDP with a ﬁxed
+policy µ.
+To denote expectations under p(x) = dµ(s)µ(a|s)P(s0|s  a) and q(x) = dµ(s)⇡(a|s)P(s0|s  a)  we
+overload the notation from above  using operators Eµ and E⇡ respectively. To reduce clutter  we
+write E to mean Eµ  because most expectations are under the sampling distribution. All proofs can
+be found in Appendix B.
+
+3.1 Bias of IR
+We ﬁrst show that IR is biased  and that its bias is actually equal to WIS-Optimal  in Theorem 3.1.
+Theorem 3.1. [Bias for a ﬁxed buffer of size n] Assume a buffer B of n transitions sampled i.i.d
+according to p(x = (s  a  s0)) = dµ(s)µ(a|s)P(s0|s  a). Let XWIS⇤
+i be the
+WIS-Optimal estimator of the update. Then 
+
+j=1 ⇢j
+
+i=1
+
+⇢iPn
+
+def= Pn
+
+and so the bias of XIR is proportional to
+
+E[XIR] = E[XWIS⇤]
+
+1
+n
+
+(E⇡[]2
+
+i=1 ⇢ii).
+
+⇢ = Var( 1
+
+nPn
+
+j=1 ⇢j); 2
+
+ = Var( 1
+
+nPn
+
+⇢  ⇢ ⇢)
+
+(1)
+where E⇡[] is the expected update across all transitions  with actions from S taken by the tar-
+get policy ⇡; 2
+i=1 ⇢ii); and covariance (⇢ ) =
+j=1 ⇢j  1
+Cov( 1
+
+Bias(XIR) = E[XIR]  E⇡[] /
+nPn
+
+Theorem 3.1 is the only result which follows a different set of assumptions  primarily due to using the
+bias characterization of XWIS⇤ found in Owen [2013]. The bias of IR will be small for reasonably
+large n  both because it is proportional to 1/n and because larger n will result in lower variance
+of the average ratios and average update for the buffer in Equation (1). In particular  as n grows 
+these variances decay proportionally to n. Nonetheless  for smaller buffers  such bias could have an
+impact. We can  however  easily mitigate this bias with a bias-correction term  as shown in the next
+corollary and proven in Appendix B.2.
+Corollary 3.1.1. BC-IR is unbiased: E[XBC] = E⇡[].
+
+nPn
+
+3.2 Consistency of IR
+Consistency of IR in terms of an increasing buffer  with n ! 1  is a relatively straightforward
+extension of prior results for SIR  with or without the bias correction  and from the derived bias of
+both estimators (see Theorem B.1 in Appendix B.3). More interesting  and reﬂective of practice  is
+consistency with a ﬁxed length buffer and increasing interactions with the environment  t ! 1. IR 
+without bias correction  is asymptotically biased in this case; in fact  its asymptotic bias is the one
+characterized above for a ﬁxed length buffer in Theorem 3.1. BC-IR  on the other hand  is consistent 
+even with a sliding window  as we show in the following theorem.
+
+4 ¯⇢ ⇡ E[⇢(a|s)] = E[ ⇡(a|s)
+
+µ(a|s) ] =Ps a
+
+⇡(a|s)
+µ(a|s) µ(a|s)dµ(s) = 1.
+
+4
+
+def= 1
+
+def= 1
+
+t=1 X (t)
+
+T PT
+
+tive sample size is between 1 and n  with one estimator (Pn
+
+Theorem 3.2. Let Bt = {Xt+1  ...  Xt+n} be the buffer of the most recent n transitions sampled
+according to Assumption 1. Deﬁne the sliding-window estimator Xt
+BC. Then  if
+E⇡[||] < 1  then XT converges to E⇡[] almost surely as T ! 1.
+3.3 Variance of Updates
+It might seem that resampling avoids high-variance in updates  because it does not reweight with
+large magnitude IS ratios. The notion of effective sample size from statistics  however  provides
+some intuition about why large magnitude IS ratios can also negatively affect IR  not just IS. Effec-
+i [Kong et al.  1994 
+Martino et al.  2017]. When the effective sample size is low  this indicates that most of the probabil-
+ity is concentrated on a few samples. For high magnitude ratios  IR will repeatedly sample the same
+transitions  and potentially never sample some of the transitions with small IS ratios.
+Fortunately  we ﬁnd that  despite this dependence on effective sample size  IR can signiﬁcantly
+reduce variance over IS. In this section  we characterize the variance of the BC-IR estimator. We
+choose this variant of IR  because it is unbiased and so characterizing its variance is a more fair
+comparison to IS. We deﬁne the mini-batch IS estimator XIS
+j=1 ⇢zj zj   where indices
+zj are sampled uniformly from {1  . . .   n}. This contrasts the indices i1  . . .   ik for XBC that are
+sampled proportionally to ⇢i.
+We begin by characterizing the variance  under a ﬁxed dataset B. For convenience  let µB =
+E⇡[|B]. We characterize the sum of the variances of each component in the update estimator 
+which equivalently corresponds to normed deviation of the update from its mean 
+m=1 Var(m | B) = E[k  µBk2
+
+i=1 ⇢i)2 /Pn
+
+kPk
+
+2 | B]
+
+i=1 ⇢2
+
+V( | B) def= tr Cov( | B) =Pd
+
+2 > c
+⇢j
+
+2 < c
+⇢j
+
+for samples where ⇢j  ¯⇢  and that
+for samples where ⇢j < ¯⇢  for some c > 0. Then the BC-IR estimator has lower
+
+for an unbiased stochastic update  2 Rd. We show two theorems that BC-IR has lower variance
+than IS  with two different conditions on the norm of the update. We ﬁrst start with more general
+conditions  and then provide a theorem for conditions that are likely only true in early learning.
+Theorem 3.3. Assume that  for a given buffer B  kjk2
+kjk2
+variance than the IS estimator: V(XBC | B) < V(XIS | B).
+The conditions in Theorem 3.3 preclude having update norms for samples with small ⇢ be quite
+⇢—and a small norm for samples with large ⇢. These conditions can
+large—larger than a number / 1
+be relaxed to a statement on average  where the cumulative weighted magnitude of the update norm
+for samples with ⇢ below the median needs to be smaller than for samples with ⇢ above the mean
+(see the proof in Appendix B.5).
+We next consider a setting where the magnitude of the update is independent of the given state
+and action. We expect this condition to hold in early learning  where the weights are randomly
+initialized  and thus randomly incorrect across the state-action space. As learning progresses  and
+value estimates become more accurate in some states  it is unlikely for this condition to hold.
+Theorem 3.4. Assume ⇢ and the magnitude of the update kk2
+Then the BC-IR estimator will have equal or lower variance than the IS estimator: V(XBC | B) 
+V(XIS | B).
+These results have focused on variance of each estimator  for a ﬁxed buffer  which provided insight
+into variance of updates when executing the algorithms. We would  however  also like to characterize
+variability across buffers  especially for smaller buffers. Fortunately  such a characterization is a
+simple extension on the above results  because variability for a given buffer already demonstrates
+variability due to different samples. It is easy to check that E[E[µIR | B]] = E[µIS | B] = E⇡[].
+The variances can be written using the law of total variance
+
+2 | B] = E[⇢j | B] E[kjk2
+
+2 are independent
+
+E[⇢jkjk2
+
+2 | B]
+
+V(XBC) = E[V(XBC | B)] + V(E[XBC | B]) = E[V(XBC | B)] + V(µB)
+V(XIS) = E[V(XIS | B)] + V(µB)
+
+=) V(XBC)  V(XIS) = E[V(XBC | B)  V(XIS | B)]
+
+with expectation across buffers. Therefore  the analysis of V(XBC | B) directly applies.
+
+5
+
+4 Empirical Results
+
+nPn
+
+We investigate the two hypothesized beneﬁts of resampling as compared to reweighting: improved
+sample efﬁciency and reduced variance. These beneﬁts are tested in two microworld domains—
+a Markov chain and the Four Rooms domain—where exhaustive experiments can be conducted.
+We also provide a demonstration that IR reduces sensitivity over IS and VTrace in a car simulator 
+TORCs  when learning from images 5.
+We compare IR and BC-IR against several reweighting strategies  including importance sam-
+pling (IS); two online approaches to weighted important sampling  WIS-Minibatch with weighting
+j=1 ⇢j; and V-trace6  which corresponds to
+clipping importance weights [Espeholt et al.  2018]. We also compare to WIS-TD(0) [Mahmood
+and Sutton  2015]  when applicable  which uses an online approximation to WIS  with a stepsize
+selection strategy (as described in Appendix A.2). This algorithm uses only one sample at a time 
+rather than a mini-batch  and so is only included in Figure 2. Where appropriate  we also include
+baselines using On-policy sampling; WIS-Optimal which uses the whole buffer to get an update;
+and Sarsa(0) which learns action-values—which does not require IS ratios—and then produces esti-
+
+j=1 ⇢j and WIS-Buffer with weighting ⇢i/ k
+
+⇢i/Pk
+
+mate V (s) =Pa ⇡(s  a)Q(s  a). WIS-Optimal is included as an optimal baseline  rather than as a
+
+competitor  as it estimates the update using the whole buffer on every step.
+In all the experiments  the data is generated off-policy. We compute the absolute value error (AVE)
+or the absolute return error (ARE) on every step. For the sensitivity plots we take the average over
+all the interactions as speciﬁed for the environment — resulting in MAVE and MARE respectively.
+The error bars represent the standard error over runs  which are featured on every plot — although
+not visible in some instances. For the microworlds  the true value function is found using dynamic
+programming with threshold 1015  and we compute AVE over all the states. For TORCs and
+continuous Four Rooms  the true value function is approximated using rollouts from a random subset
+of states generated when running the behavior policy µ  and the ARE is computed over this subset.
+For the Torcs domain  the same subset of states is used for each run due to computational constraints
+and report the mean squared return error (MSRE). Plots showing sensitivity over number of updates
+show results for complete experiments with updates evenly spread over all the interactions. A tabular
+representation is used in the microworld experiments  tilecoded features with 64 tilings and 8 tiles
+is used in continuous Four Rooms  and a convolutional neural network is used for TORCs  with an
+architecture previously deﬁned for self-driving cars [Bojarski et al.  2016].
+
+Investigating Convergence Rate
+
+4.1
+We ﬁrst investigate the convergence rate of IR. We report learning curves in Four Rooms  as well as
+sensitivity to the learning rate. The Four Rooms domain [Stolle and Precup  2002] has four rooms
+in an 11x11 grid world. The four rooms are positioned in a grid pattern with each room having
+two adjacent rooms. Each adjacent room is separated by a wall with a single connecting hallway.
+The target policy takes the down action deterministically. The cumulant for the value function is 1
+when the agent hits a wall and 0 otherwise. The continuation function is  = 0.9  with termination
+when the agent hits a wall. The resulting value function can be thought of as distance to the bottom
+wall. The behavior policy is uniform random everywhere except for 25 randomly selected states
+which take the action down with probability 0.05 with remaining probability split equally amongst
+the other actions. The choice of behavior and target policy induce high magnitude IS ratios.
+As shown in Figure 1  IR has noticeable improvements over the reweighting strategies tested. The
+fact that IR resamples more important transitions from the replay buffer seems to signiﬁcantly in-
+crease the learning speed. Further  IR has a wider range of usable learning rates. The same effect is
+seen even as we reduce the total number of updates  where the uniform sampling methods perform
+signiﬁcantly worse as the interactions between updates increases—suggesting improved sample ef-
+ﬁciency. WIS-Buffer performs almost equivalently to IS  because for reasonably size buffers  its
+nPn
+normalization factor 1
+j=1 ⇢j ⇡ 1 because E[⇢] = 1. WIS-Minibatch and V-trace both reduce
+5Experimental code for every domain except Torcs can be found at https://mkschleg.github.io/
+
+Resampling.jl
+
+6Retrace  ABQ and TreeBackup also use clipping to reduce variance. But  they are designed for learning
+action-values and for mitigating variance in eligibility traces. When trace parameter  = 0—as we assume
+here—there are no IS ratios and these methods become equivalent to using Sarsa(0) for learning action-values.
+
+6
+
+(BC)IR
+
+Clip = 1.0
+
+IS
+
+WIS-Minibatch
+
+Clip = 0.5*max
+
+WIS-Buﬀer
+
+Clip = 0.9*max
+
+0.6
+MAVE
+0.5
+0.4
+0.3
+0.2
+0.1
+0.0
+
+0.5
+0.4
+0.3
+0.2
+0.1
+0.0
+
+0
+
+1000
+1000
+
+2000
+3000
+2000
+3000
+Step (102)
+
+4000
+4000
+
+5000
+5000
+
+104.0 
+
+104.5 
+
+105.5 
+Number of Updates (log)
+
+105.0 
+
+WIS-Optimal
+
+Sarsa
+1.0
+0.8
+0.6
+0.4
+0.2
+0.0
+
+0
+
+10
+
+20
+Learning Rate
+
+30
+
+Figure 1: Four Rooms experiments (n = 2500  k = 16  25 runs): left Learning curves for each
+method  with updates every 16 steps. IR and WIS-Optimal are overlapping. center Sensitivity over
+the number of interactions between updates. right Learning rate sensitivity plot.
+
+the variance signiﬁcantly  with their bias having only a limited impact on the ﬁnal performance
+compared to IS. Even the most aggressive clipping parameter for V-trace—a clipping of 1.0— out-
+performs IS. The bias may have limited impact because the target policy is deterministic  and so
+only updates for exactly one action in a state. Sarsa—which is the same as Retrace(0)—performs
+similarly to the reweighting strategies.
+The above results highlight the convergence rate improvements from IR  in terms of number of
+updates  without generalization across values. Conclusions might actually be different with function
+approximation  when updates for one state can be informative for others. For example  even if in one
+state the target policy differs signiﬁcantly from the behavior policy  if they are similar in a related
+state  generalization could overcome effective sample size issues. We therefore further investigate if
+the above phenomena arise under function approximation with RMSProp learning rate selection.
+
+0.40
+
+0.35
+
+0.30
+
+0.25
+
+IR
+
+WIS-TD(0)
+WIS-Minibatch
+IS
+
+0.20
+
+IR + WIS-TD(0)
+
+IR- WIS- TD(0)
+NormIS
+IR
+WISBatch
+VTrace_1.0
+WIS- TD(0)
+
+V-trace
+
+0.40
+
+0.35
+
+0.30
+
+0.25
+
+0.20
+
+IR
+IS
+WIS-Minibatch
+WISBatch
+V-trace
+VTrace_1.0
+IS
+IR
+
+101.0 
+3.0
+Number of Updates (10^n)
+
+102.0 
+4.0
+
+101.5 
+3.5
+
+102.5 
+4.5
+
+103.0 
+5.0
+
+103.0 
+104.5 
+4.5
+3.0
+Number of Updates (10^n)
+Number of Updates (log)
+
+104.0 
+4.0
+
+103.5 
+3.5
+
+105.0 
+5.0
+
+Figure 2: Convergence rates in Continuous Four Rooms averaged over 25 runs with 100000 inter-
+actions with the environment. left uniform random behavior policy and target policy which takes
+the down action with probability 0.9 and probability 0.1/3 for all other actions. Learning used in-
+cremental updates (as speciﬁed in appendix A.2). right uniform random behavior and target policy
+with persistent down action selection learned with mini-batch updates with RMSProp.
+
+We conduct two experiments similar to above  in a continuous state Four Rooms variant. The agent
+is a circle with radius 0.1  and the state consists of a continuous tuple containing the x and y co-
+ordinates of the agent’s center point. The agent takes an action in one of the 4 cardinal directions
+moving 0.5 ± U(0.0  0.1) in that directions with random drift in the orthogonal direction sampled
+from N (0.0  0.01). The representation is a tile coded feature vector with 64 tilings and 8 tiles. We
+provide results for both mini-batch updating (as above) and incremental updating (i.e. updating
+on each transition of a mini-batch incrementally  see appendix A.2 for details). For the mini-batch
+experiment  the target policy deterministically takes the down action. For the incremental experi-
+ment  the target policy takes the down action with probability 0.9 and selects all other action with
+probability 0.1/3.
+We ﬁnd that generalization can mitigate some of the differences between IR and IS above in some
+settings  but in others the difference remains just as stark (see Figure 2 and Appendix C.2). If we
+use the behavior policy from the tabular domain  which skews the behavior in a sparse set of states 
+the nearby states mitigate this skew. However  if we use a behavior policy that selects all actions
+
+7
+
+(BC)IR
+
+IS
+
+MAVE
+
+1.0
+0.8
+0.6
+0.4
+0.2
+0.0
+
+0
+
+2
+
+4
+
+6
+
+Learning Rate
+
+1.0
+0.8
+0.6
+0.4
+0.2
+0.0
+
+1.25
+Var 
+0.0125
+(10-2)
+0.0100
+0.75
+0.0075
+0.50
+0.0050
+0.25
+0.0025
+0.00
+0.0000
+10
+
+WIS-Minibatch
+
+Clip = 1.0
+
+WIS-Buﬀer
+Clip = 0.5*max
+
+WIS-Optimal
+Clip = 0.9*max
+
+Sarsa
+
+OnPolicy
+
+8
+
+10
+
+0
+
+2
+
+4
+
+6
+
+Learning Rate
+
+8
+
+Less
+0
+
+Learning
+
+50
+
+100
+
+150
+
+200
+
+Learning Progress
+
+More
+250
+
+Learning
+
+Figure 4: Learning Rate sensitivity plots in the Random Walk Markov Chain  with buffer size n =
+15000 and mini-batch size k = 16. Averaged over 100 runs. The policies  written as [probability
+left  probability right] are µ = [0.9  0.1] ⇡ = [0.1  0.9] left learning rate sensitivity plot for all
+methods but V-trace. center learning rate sensitivity for V-trace with various clipping parameters
+right Variance study for IS  IR  and WISBatch. The x-axis corresponds to the training iteration 
+with variance reported for the weights at that iteration generated by WIS-Optimal. These plots show
+a correlation between the sensitivity to learning rate and magnitude of variance.
+
+uniformly  then again IR obtains noticeable gains over IS and V-trace  for reducing the required
+number of updates  as shown in Figure 2.
+We ﬁnd similar results for the incremental setting Figure 2 (left)  where resampling still outperforms
+all other methods in terms of convergence rates. Given WIS-TD(0)’s signiﬁcant degrade in perfor-
+mance as the number of updates decreases  we also compare with using WIS-TD(0) when sampling
+according to resampling IR+WIS-TD(0). Interestingly  this method outperforms all others — albeit
+only slightly against IR with constant learning rate. This result leads us to believe RMSProp may be
+a optimizer poor choice for this setting. Expanded results can be found in Appendix C.2.
+
+4.2
+
+Investigating Variance
+
+To better investigate the update variance we use a Markov chain  where we can more easily control
+dissimilarity between µ and ⇡  and so control the magnitude of the IS ratios. The Markov chain
+is composed of 8 non-terminating states and 2 terminating states on the ends of the chain  with a
+cumulant of 1 on the transition to the right-most terminal state and 0 everywhere else. We consider
+policies with probabilities [left  right] equal in all states: µ = [0.9  0.1] ⇡ = [0.1  0.9]; further policy
+settings can be found in Appendix C.1.
+We ﬁrst measure the variance of the updates for ﬁxed buffers. We compute the variance of the
+update—from a given weight vector—by simulating the many possible updates that could have
+occurred. We are interested in the variance of updates both for early learning—when the weight
+vector is quite incorrect and updates are larger—and later learning. To obtain a sequence of such
+weight vectors  we use the sequence of weights generated by WIS-Optimal. As shown in Figure 4 
+the variance of IR is lower than IS  particularly in early learning  where the difference is stark. Once
+the weight vector has largely converged  the variance of IR and IS is comparable and near zero.
+
+We can also evaluate the update variance by proxy
+using learning rate sensitivity curves. As seen in
+Figure 4 (left) and (center)  IR has the lowest sensi-
+tivity to learning rates  on-par with On-Policy sam-
+pling. IS has the highest sensitivity  along with WIS-
+Buffer and WIS-Minibatch. Various clipping pa-
+rameters with V-trace are also tested. V-trace does
+provide some level of variance reduction but incurs
+more bias as the clipping becomes more aggressive.
+
+Average
+MSRE
+0.20
+
+0.16
+
+0.12
+
+(BC)IR
+
+IS
+
+V-trace
+
+10-4
+
+10-6
+
+10-5
+
+Learning Rate
+
+4.3 Demonstration on a Car Simulator
+
+We use the TORCs racing car simulator to perform
+scaling experiments with neural networks to com-
+pare IR  IS  and V-trace. The simulator produces
+
+Figure 3: Learning rate sensitivity in TORCs 
+averaged over 10 runs. V-trace has clipping
+parameter 1.0. All the methods performed
+worse with a higher learning rate than shown
+here  so we restrict to this range.
+
+8
+
+64x128 cropped grayscale images. We use an underlying deterministic steering controller that pro-
+duces steering actions adet 2 [1  +1] and take an action with probability deﬁned by a Gaussian
+a ⇠N (adet  0.1). The target policy is a Gaussian N (0.15  0.0075)  which corresponds to steering
+left. Pseudo-termination (i.e.   = 0) occurs when the car nears the center of the road  and the
+cumulant becomes 1. Otherwise  the cumulant is zero and  = 0.9. The policy is speciﬁed using
+continuous action distributions and results in IS ratios as high as ⇠ 1000 and highly variant updates
+for IS.
+Again  we can see that IR provides beneﬁts over IS and V-trace  in Figure 3. There is even more
+generalization from the neural network in this domain  than in Four Rooms where we found gen-
+eralization did reduce some of the differences between IR and IS. Yet  IR still obtains the best
+performance  and avoids some of the variance seen in IS for two of the learning rates. Additionally 
+BC-IR actually performs differently here  having worse performance for the largest learning rate.
+This suggest IR has an effect in reducing variance.
+
+5 Conclusion
+In this paper we introduced a new approach to off-policy learning: Importance Resampling. We
+showed that IR is consistent  and that the bias is the same as for Weighted Importance Sampling.
+We also provided an unbiased variant of IR  called Bias-Corrected IR. We empirically showed that
+IR (a) has lower learning rate sensitivity than IS and V-trace  which is IS with varying clipping
+thresholds; (b) the variance of updates for IR are much lower in early learning than IS and (c) IR
+converges faster than IS and other competitors  in terms of the number of updates. These results
+conﬁrm the theory presented for IR  which states that variance of updates for IR are lower than IS
+in two settings  one being an early learning setting. Such lower variance also explains why IR can
+converge faster in terms of number of updates  for a given buffer of data.
+The algorithm and results in this paper suggest new directions for off-policy prediction  particularly
+for faster convergence. Resampling is promising for scaling to learning many value functions in
+parallel  because many fewer updates can be made for each value function. A natural next step is a
+demonstration of IR  in such a parallel prediction system. Resampling from a buffer also opens up
+questions about how to further focus updates. One such option is using an intermediate sampling
+policy. Another option is including prioritization based on error  such as was done for control with
+prioritized sweeping [Peng and Williams  1993] and prioritized replay [Schaul et al.  2015b].
+
+Acknowledgments
+We would like to thank Huawei for their support  and especially for allowing a portion of this
+work to be completed during Matthews internship in the summer of 2018. We also would like to
+acknowledge University of Alberta  Alberta Machine Intelligence Institute  IVADO  and NSERC
+for their continued funding and support  as well as Compute Canada (www.computecanada.ca)
+for the computing resources used for this work.
+
+References
+Sigrun Andradottir  Daniel P Heyman  and Teunis J Ott. On the Choice of Alternative Measures in
+
+Importance Sampling with Markov Chains. Operations Research  1995.
+
+M S Arulampalam  S Maskell  N Gordon  and T Clapp. A Tutorial on Particle Filters for Online
+
+Nonlinear/Non-Gaussian Bayesian Tracking. IEEE Transactions on Signal Processing  2002.
+
+Mariusz Bojarski  Davide Del Testa  Daniel Dworakowski  Bernhard Firner  Beat Flepp  Prasoon
+Goyal  Lawrence D Jackel  Mathew Monfort  Urs Muller  Jiakai Zhang  et al. End to end learning
+for self-driving cars. arXiv preprint arXiv:1604.07316  2016.
+
+Lasse Espeholt  Hubert Soyer  R´emi Munos  Karen Simonyan  Volodymir Mnih  Tom Ward  Yotam
+Doron  Vlad Firoiu  Tim Harley  Iain Dunning  and others. IMPALA: Scalable distributed Deep-
+RL with importance weighted actor-learner architectures. arXiv preprint arXiv:1802.01561  2018.
+
+N J Gordon  D J Salmond  Radar  AFM Smith IEE Proceedings F Signal  and 1993. Novel approach
+
+to nonlinear/non-Gaussian Bayesian state estimation. IET  1993.
+
+9
+
+Assaf Hallak and Shie Mannor.
+
+arXiv:1702.07121  2017.
+
+Consistent on-line off-policy evaluation.
+
+arXiv preprint
+
+Max Jaderberg  Volodymyr Mnih  Wojciech Marian Czarnecki  Tom Schaul  Joel Z Leibo  David
+Silver  and Koray Kavukcuoglu. Reinforcement Learning with Unsupervised Auxiliary Tasks. In
+International Conference on Representation Learning  2017.
+
+H Kahn and A W Marshall. Methods of Reducing Sample Size in Monte Carlo Computations.
+
+Journal of the Operations Research Society of America  1953.
+
+Augustine Kong  Jun S Liu  and Wing Hung Wong. Sequential imputations and Bayesian missing
+
+data problems. Journal of the American Statistical Association  1994.
+
+David A Levin and Yuval Peres. Markov chains and mixing times  volume 107. American Mathe-
+
+matical Soc.  2017.
+
+Long-Ji Lin. Self-Improving Reactive Agents Based On Reinforcement Learning  Planning and
+
+Teaching. Machine Learning  1992.
+
+Long-Ji Lin. Reinforcement Learning for Robots Using Neural Networks. PhD thesis  Carnegie
+
+Mellon University  1993.
+
+Qiang Liu  Lihong Li  Ziyang Tang  and Dengyong Zhou. Breaking the Curse of Horizon: Inﬁnite-
+Horizon Off-Policy Estimation. In S. Bengio  H. Wallach  H. Larochelle  K. Grauman  N. Cesa-
+Bianchi  and R. Garnett  editors  Advances in Neural Information Processing Systems 31. Curran
+Associates  Inc.  2018.
+
+Victoria Lopez  Alberto Fernandez  Salvador Garcia  Vasile Palade  and Francisco Herrera. An
+insight into classiﬁcation with imbalanced data: Empirical results and current trends on using
+data intrinsic characteristics. Information Sciences  2013.
+
+A R Mahmood and R.S. Sutton. Off-policy learning based on weighted importance sampling with
+
+linear computational complexity. In Conference on Uncertainty in Artiﬁcial Intelligence  2015.
+
+A Rupam Mahmood  Hado P van Hasselt  and Richard S Sutton. Weighted importance sampling
+for off-policy learning with linear function approximation. In Advances in Neural Information
+Processing Systems  2014.
+
+Ashique Rupam Mahmood  Huizhen Yu  and Richard S Sutton. Multi-step Off-policy Learning
+
+Without Importance Sampling Ratios. arXiv:1509.01240v2  2017.
+
+Luca Martino  V´ıctor Elvira  and Francisco Louzada. Effective sample size for importance sampling
+
+based on discrepancy measures. Signal Processing  2017.
+
+Volodymyr Mnih  Koray Kavukcuoglu  David Silver  Andrei A. Rusu  Joel Veness  Marc G. Belle-
+mare  Alex Graves  Martin Riedmiller  Andreas K. Fidjeland  Georg Ostrovski  Stig Petersen 
+Charles Beattie  Amir Sadik  Ioannis Antonoglou  Helen King  Dharshan Kumaran  Daan Wier-
+stra  Shane Legg  and Demis Hassabis. Human-level control through deep reinforcement learning.
+Nature  2015.
+
+Joseph Modayil  Adam White  and Richard S Sutton. Multi-timescale nexting in a reinforcement
+learning robot. Adaptive Behavior - Animals  Animats  Software Agents  Robots  Adaptive Sys-
+tems  2014.
+
+R´emi Munos  Tom Stepleton  Anna Harutyunyan  and Marc G Bellemare. Safe and Efﬁcient Off-
+
+Policy Reinforcement Learning. Advances in Neural Information Processing Systems  2016.
+
+Art B. Owen. Monte Carlo theory  methods and examples. 2013.
+
+Jing Peng and Ronald J Williams. Efﬁcient Learning and Planning Within the Dyna Framework.
+
+Adaptive Behavior  1993.
+
+Doina Precup  Richard S Sutton  and Satinder P Singh. Eligibility Traces for Off-Policy Policy
+
+Evaluation. ICML  2000.
+
+10
+
+Doina Precup  Richard S Sutton  and Sanjoy Dasgupta. Off-Policy Temporal-Difference Learning
+
+with Function Approximation. ICML  2001.
+
+Donald B Rubin. Using the SIR algorithm to simulate posterior distributions. Bayesian statistics 
+
+1988.
+
+Reuven Y Rubinstein and Dirk P Kroese. Simulation and the Monte Carlo Method. John Wiley &
+
+Sons  2016.
+
+Tom Schaul and Mark Ring. Better generalization with forecasts. In International Joint Conference
+
+on Artiﬁcial Intelligence  2013.
+
+Tom Schaul  Daniel Horgan  Karol Gregor  and David Silver. Universal Value Function Approxi-
+
+mators. In International Conference on Machine Learning  2015a.
+
+Tom Schaul  John Quan  Ioannis Antonoglou  and David Silver. Prioritized Experience Replay.
+
+arXiv:1511.05952 [cs]  2015b.
+
+David Silver  Hado van Hasselt  Matteo Hessel  Tom Schaul  Arthur Guez  Tim Harley  Gabriel
+Dulac-Arnold  David P Reichert  Neil C Rabinowitz  Andr´e Barreto  and Thomas Degris. The
+Predictron - End-To-End Learning and Planning. In AAAI Conference on Artiﬁcial Intelligence 
+2017.
+
+Øivind Skare  Erik Bølviken  and Lars Holden. Improved Sampling-Importance Resampling and
+
+Reduced Bias Importance Sampling. Scandinavian Journal of Statistics  2003.
+
+AFM Smith  AE Gelfand The American Statistician  and 1992. Bayesian statistics without tears: a
+
+sampling–resampling perspective. Taylor & Francis  1992.
+
+Martin Stolle and Doina Precup. Learning Options in Reinforcement Learning. In International
+
+Symposium on Abstraction  Reformulation  and Approximation  2002.
+
+Richard S Sutton  Doina Precup  and Satinder Singh. Between MDPs and semi-MDPs: A framework
+
+for temporal abstraction in reinforcement learning. Artiﬁcial intelligence  1999.
+
+Richard S Sutton  Eddie J Rafols  and Anna Koop. Temporal Abstraction in Temporal-difference
+
+Networks. In Advances in Neural Information Processing Systems  2005.
+
+Richard S Sutton  J Modayil  M Delp  T Degris  P.M. Pilarski  A White  and D Precup. Horde: A
+scalable real-time architecture for learning knowledge from unsupervised sensorimotor interac-
+tion. In International Conference on Autonomous Agents and Multiagent Systems  2011.
+
+Philip Thomas and Emma Brunskill. Data-Efﬁcient Off-Policy Policy Evaluation for Reinforcement
+
+Learning. In AAAI Conference on Artiﬁcial Intelligence  2016.
+
+Philip S Thomas and Emma Brunskill.
+
+Conference on Artiﬁcial Intelligence  2017.
+
+Importance Sampling with Unequal Support.
+
+In AAAI
+
+11
+
+,Nitish Srivastava
+Russ Salakhutdinov
+Ilya Shpitser
+Matthew Schlegel
+Wesley Chung
+Daniel Graves
+Jian Qian
+Martha White

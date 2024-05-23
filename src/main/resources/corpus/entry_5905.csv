@@ -1,0 +1,1105 @@
+2019,Volumetric Correspondence Networks for Optical Flow,Many classic tasks in vision -- such as the estimation of optical flow or stereo disparities -- can be cast as dense correspondence matching. Well-known techniques for doing so make use of a cost volume  typically a 4D tensor of match costs between all pixels in a 2D image and their potential matches in a 2D search window. State-of-the-art (SOTA) deep networks for flow/stereo make use of such volumetric representations as internal layers. However  such layers require significant amounts of memory and compute  making them cumbersome to use in practice. As a result  SOTA networks also employ various heuristics designed to limit volumetric processing  leading to limited accuracy and overfitting. Instead  we introduce several simple modifications that dramatically simplify the use of volumetric layers - (1) volumetric encoder-decoder architectures that efficiently capture large receptive fields  (2) multi-channel cost volumes that capture multi-dimensional notions of pixel similarities  and finally  (3) separable volumetric filtering that significantly reduces computation and parameters while preserving accuracy. Our innovations dramatically improve accuracy over SOTA on standard benchmarks while being significantly easier to work with - training converges in 10X fewer iterations  and most importantly  our networks generalize across correspondence tasks. On-the-fly adaptation of search windows allows us to repurpose optical flow networks for stereo (and vice versa)  and can also be used to implement adaptive networks that increase search window sizes on-demand.,Volumetric Correspondence Networks
+
+for Optical Flow
+
+∗
+Gengshan Yang1
+  Deva Ramanan1 2
+2Argo AI
+1Carnegie Mellon University 
+
+{gengshay  deva}@cs.cmu.edu
+
+Abstract
+
+Many classic tasks in vision – such as the estimation of optical ﬂow or stereo
+disparities – can be cast as dense correspondence matching. Well-known techniques
+for doing so make use of a cost volume  typically a 4D tensor of match costs between
+all pixels in a 2D image and their potential matches in a 2D search window. State-
+of-the-art (SOTA) deep networks for ﬂow/stereo make use of such volumetric
+representations as internal layers. However  such layers require signiﬁcant amounts
+of memory and compute  making them cumbersome to use in practice. As a
+result  SOTA networks also employ various heuristics designed to limit volumetric
+processing  leading to limited accuracy and overﬁtting. Instead  we introduce
+several simple modiﬁcations that dramatically simplify the use of volumetric
+layers - (1) volumetric encoder-decoder architectures that efﬁciently capture large
+receptive ﬁelds  (2) multi-channel cost volumes that capture multi-dimensional
+notions of pixel similarities  and ﬁnally  (3) separable volumetric ﬁltering that
+signiﬁcantly reduces computation and parameters while preserving accuracy. Our
+innovations dramatically improve accuracy over SOTA on standard benchmarks
+while being signiﬁcantly easier to work with - training converges in 7X fewer
+iterations  and most importantly  our networks generalize across correspondence
+tasks. On-the-ﬂy adaptation of search windows allows us to repurpose optical ﬂow
+networks for stereo (and vice versa)  and can also be used to implement adaptive
+networks that increase search window sizes on-demand.
+
+1
+
+Introduction
+
+Many classic tasks in vision – such as the estimation of optical ﬂow [13] or stereo disparities [34]
+– can be cast as dense correspondence matching. Well-known techniques for doing so make use
+of a cost volume  typically a 4D tensor of match costs between all pixels in a 2D image and their
+potential matches in a 2D search window. State-of-the-art (SOTA) deep networks for stereo can make
+use of 3D volumetric representations because the search window reduces to a epipolar line [11  22].
+Search windows for optical ﬂow need to be two-dimensional  implying that cost volumes have to be
+4D. Because of the added memory and compute demands  deep optical ﬂow networks have rarely
+exploited volumetric processing until recently. Even then  most employ heuristics that reshape cost
+volumes into 2D data structures that are processed with 2D spatial processing [7  18  19  39  42].
+Speciﬁcally  common workarounds reshape a 4D array (x  y  u  v) into a multichannel 2D array (x  y)
+with uv channels. This allows for use of standard 2D convolutional processing routines  but implies
+that feature channels are now tied to particular (u  v) displacements. This requires the network to
+memorize particular displacements in order to report them at test-time. In practice  such networks are
+quite difﬁcult to train because they require massive amounts of data augmentation and millions of
+training iterations to effectively memorize [7  19].
+
+∗Code will be available at github.com/gengshay-y/VCN.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+We introduce three simple modiﬁcations that signiﬁcantly improve performance and generalizability
+by enabling true volumetric processing of cost volumes:
+
+1. We propose the 4D volumetric counterpart of 2D encoder-decoder "U-Net" architectures 
+
+which are able to efﬁciently encode large receptive ﬁelds for cost volume processing.
+
+2. We propose multi-channel cost volumes that make use of multiple pixel embeddings to
+capture complementary notions of similarity (or match cost). We demonstrate that these mul-
+tiple matches allow for better handling of ambiguous correspondences  which is particularly
+helpful for ambiguous coarse matches in a coarse-to-ﬁne matching network [38].
+
+3. We implement 4D convolutional kernels with separable high-order ﬁlters. In particular  our
+separable factorization results in a spatial (x  y) ﬁlter that enforces spatial regularity of a
+ﬂow feild  and an inhibitory "winner-take-all" or WTA (u  v) ﬁlter that competes candidate
+matches for a given (x  y) pixel.
+
+Our innovations dramatically improve accuracy over SOTA on standard ﬂow benchmarks while
+being signiﬁcantly easier to work with - training converges in 7X fewer iterations. Interestingly 
+our networks appear to generalize across diverse correspondence tasks. On-the-ﬂy adaptation of
+search windows allows us to repurpose optical ﬂow networks for stereo (and vice versa)  and can
+also be used to implement adapative networks that increase search window sizes on-demand. We
+demonstrate the latter to be useful for stereo matching with noisy rectiﬁcations.
+
+2 Related Work
+
+Dense visual correspondence Finding dense pixel correspondences between a pair of images has
+been studied extensively in low-level vision. Concrete examples include stereo matching and optical
+ﬂow [13  34]. Stereo matching constrains the search space to a horizontal scanline  where a 3D
+cost volume is usually built and optimized to ensure global consistency[11  23]. Though optical
+ﬂow with small motion has been well-addressed by the classiﬁc variational approaches [37]  ﬁnding
+correspondences in the 2D target image remains a challenge when displacements are large and
+occlusion occurs [3].
+Correspondence matching with cost volume Classic stereo matching algorithms usually extract
+local patch features and create a regular 3D cost volume  where smoothness constraints are further
+enforced by energy minimization [13  34]. Recently  hand-crafted feature extraction is replaced
+with convolutional networks and cost-volume optimization step is commonly substituted by 3D
+convolutions[22  28  45]. Despite their similar formulation  “true" 4D cost volume is rarely used in
+optical ﬂow estimation until very recently. Xu et al. [42] directly construct and process a 4D cost
+volume using semi-global matching. Recent successful optical ﬂow networks also build a correlation
+cost volume and process it with 2D convolutions [7  24  39]. There also exists work in semantic
+correspondence matching on a 4D cost volume with 4D convolutions [31].
+Efﬁcient convolutional networks Recent years have seen great interest in designing computation-
+efﬁcient and memory-friendly deep convolutional networks. At operation level  depthwise separable
+convolutions [36] save computations by separating a multi-channel 2D convolution into a depthwise
+convolution and a pointwise convolution [6  14  33  46]. Efforts have also been made in using tensor
+factorization to speed up a trained network [20  25]. Different from prior works  we separate a
+4D convolution kernel into two separate 2D kernels. At architecture level  U-Net encoder-decoder
+scheme is widely used in dense prediction task [1  7  32]. Instead of directly ﬁltering the high-res
+feature maps  it saves memory and computation by downsampling the input feature maps with strided
+convolutions and upsampling them back. Typically  it is able to acquire sufﬁcient receptive ﬁelds
+with very few numbers of layers. Similarly  we downsample the 4D cost-volume in (u v) dimension
+to maintain a small memory footprint.
+
+3 Approach
+
+In this section  we ﬁrst introduce a 4D convolutional matching module for volumetric correspondence
+processing. We then show by factorizing the ﬁlter into separable components that are implemented
+with an encoder-decoder [32]  one can signiﬁcantly reduce computation and memory. Finally  we
+
+2
+
+Figure 1: We compare 2D ﬁltering of a 4D cost vol-
+ume reshaped to be a multi-channel 2D array (left)
+versus true 4D ﬁltering (right). For simplicity  we
+visualize the candidate 7 × 7 array of (u  v) match
+costs for a particular (x  y) pixel. Blue and red cir-
+cles indicate ﬁltered values  and lines connected to
+them indicate ﬁlter weights between two layers. Note
+that 2D ﬁlter weights are not shared across spatial
+locations (indicated by different colors)  while 4D
+ﬁlter weights are. During gradient-based learning of
+the 2D ﬁlter  a particular observed (u  v) displace-
+ment only backprops along the particular colored
+weights connected to it. On the other hand  the 4D
+ﬁlter will be updated for any observed (u  v) dis-
+placement  making it easier to generalize to different
+displacements.
+
+integrate volumetric ﬁltering into a coarse-to-ﬁne warping scheme [18  39]  where ambiguous matches
+and coarse-mistakes are handled by the multi-hypotheses design.
+
+4D Convolutional Matching Module
+
+3.1
+Let F1  F2 ∈ Rd×H×W be the d-dimensional pixelwise embedding of the source and target image.
+We construct a 4D cost volume by computing the cosine similarity between each pixel in the H × W
+source image with a set of candidate targets in a U × V search window:
+
+C(u  x) =
+
+F1(x) · F2(x + u)
+||F1(x)|| · ||F2(x + u)||   C(u  x) ∈ RU×V ×H×W  
+
+where x = (x  y) is the source pixel coordinate and u = (u  v) is the pixel displacement. Cosine
+similarity is used in person re-identiﬁcation and face veriﬁcation [27  41] in replacement of dot
+product  and empirically we ﬁnd it produces a better result over dot product.
+2D convolution vs 4D convolution Many recent optical ﬂow networks re-organize the 4D cost
+volume into a multichannel 2D array with N = U × V channels  and process it with multi-channel
+2D convolutions [7  18  19  39]. Instead  we leave the 4D cost volume C(u  x) as-is and ﬁlter it
+with 4D convolutions. Much as 2D ﬁlters ensure translation invariance and generalize to images of
+different sizes [26]  we posit that 4D ﬁlters may ensure a form of offset "invariance" and generalize to
+search windows of different sizes. Fig. 1 suggests that multi-channel 2D ﬁltering requires the network
+to memorize particular displacements seen during training. By explicit cost volume processing 
+volumetric ﬁltering of cost volumes is preferable because 1) It signiﬁcantly reduces the number of
+parameters and computations; 2) It is capable of processing variable-sized cost volumes on demand;
+3) It generalizes better to displacements that are not seen in the training.
+Truncated soft-argmin Given a (ﬁltered) cost volume  one natural approach to reporting the (u  v)
+displacement for a pixel (x  y) is a "winner take all" (WTA) operation that returns the argmin
+displacement. Alternatively  if the offset dimensions are normalized by a softmax  one could compute
+the expected offset by taking a weighted average of offsets with weights given by the probabilistic
+softmax (soft argmin) [22]:
+
+E[u] =
+
+uip(u = ui) 
+
+[Soft Argmin]
+
+(cid:88)
+
+i
+
+Unfortunately  WTA is not differentiable  while the soft argmin is sensitive to changes in the size of
+the search window [40]. Instead  we combine both with a "truncated soft-argmin" that zeros out the
+softmax probabilities for displacements more than M pixels away from the argmin u∗:
+
+(cid:26)p(u = ui) 
+
+0 
+
+p(cid:48)(u = ui) ∝
+
+|ui − u∗| ≤ M
+otherwise
+
+[Truncated Soft Argmin]
+
+We empirically set M = 3 for a 7 × 7 search window  and use truncated soft-argmin for training and
+testing. Later we show that a truncated soft-argmin produces a notable improvement over soft-argmin.
+
+3
+
+Figure 2: For ease of visualization  we show the 2D cost volume C(u  x) for matching pixels across a source
+and target scanline image (a). To efﬁciently ﬁlter the volume  we factor the 3 × 3 ﬁlter (b) into a 1D spatial
+convolution over positions (c) followed by a 1D WTA convolution over displacements (d).
+
+3.2 Efﬁcient Cost Volume Processing
+
+Separable 4D convolution We now show that 4D volumetric kernels can be dramatically simpliﬁed
+by factorizing into separable components. In the context of a cost volume  we propose a factorization
+of a 4D ﬁlter K(u  x) into a 2D spatial ﬁlter KS(x) and a 2D WTA KW T A(u) ﬁlter:
+
+K(u  x) ∗ C(u  x) =
+
+K(v  y)C(u − v  x − y)
+
+[4D Convolution]
+
+[Factorization]
+
+[Separable Filtering]
+
+(cid:105)
+
+(cid:105)
+
+(cid:104)
+
+(cid:88)
+(cid:88)
+(cid:88)
+= KW T A(u) ∗(cid:104)
+
+KW T A(v)
+
+=
+
+=
+
+v y
+
+v y
+
+v
+
+(cid:104)(cid:88)
+
+y
+
+KW T A(v)KS(y)
+
+C(u − v  x − y)
+
+KS(y)C(u − v  x − y)
+
+(cid:105)
+
+KS(x) ∗ C(u  x)
+
+Fig. 2 visualizes this factorization  which reduces computation by N 2 for a N × N × N × N ﬁlter
+with negligible effect on peformance  as shown in ablation study Tab. 4.
+U-Net encoder-decoder volume ﬁltering We ﬁnd it important to make use of 4D kernels with
+large receptive feilds that can take advantage of contextual cues (as is the case for 2D image ﬁltering).
+However  naively implementing large volumetric ﬁlters takes a considerabe amount of memory [22].
+We found it particularly important to include context for WTA ﬁltering. Inspired by spatial encoder-
+decoder networks [1  32] we apply two downsampling layers and two upsampling layers rather than
+stacking multiple 4D convolutional layers. In Sec. 4.3  we show that encoder-decoder architectures
+allow us to signiﬁcantly improve accuracy given alternatives with a similar compute budget.
+
+3.3 Multi-hypotheses Correspondence Matching
+
+Multi-channel cost volume Past work has suggested that cost volumes might be too restricted in
+size and serve as too much of an information bottleneck for subsequent layers of a network [5  22].
+One common solution in the stereo literature is the construction of a feature volume rather than a cost
+volume  where an additional dimension of feature channels is encoded in the volumetric tensor [22] -
+typically  one might include the difference of the two feature descriptors being compared within the
+cost volume  resulting in an additional channel of dimension |F(x)|.
+In our case  this would result in a prohibitively large volume. Instead  we propose an “intermediate”
+strategy between a traditional cost volume and a contemporary (deep) feature volume: a multi-channel
+cost volume. Intuitively  rather than simply encoding the cosine similarity between two embedding
+vectors  we record K similarities between K different feature embeddings that are trained jointly  by
+
+4
+
+source s(x)target t(x)(a)(b)(d)(c)Figure 3: Illustration of volumetric processing at one pyramid level. 1) Cost volume construction: We warp
+features of the target image using the upsampled coarse ﬂow and compute a multi-channel cost volume. 2)
+Volume processing: The multi-channel cost volume is ﬁltered with separable 4D convolutions  which is integrated
+into a volumetric U-Net architecture. We predict multiple ﬂow hypotheses using truncated soft-argmin. 3) Soft
+selection: The ﬂow hypotheses are linearly combined considering their uncertainties and the appearance feature.
+
+taking channel-wise product between each pair of potential matches [10]. While this can be thought
+of as K distinct cost volumes  we instead concatenate them into a multi-channel 4D cost volume
+RK×U×V ×H×W where K is treated as a feature channel that is kept constant in dimension during
+ﬁltering. After being processed by the volumetric U-Net  each of the K cost-volumes Ck(u  v  x  y)
+is used to compute a truncated softmax expectation.
+Multi-hypotheses selection Considering the multimodal nature of correspondence matching  we
+propose a multi-hypotheses selection module that assigns weights to each hypothesis given its value 
+uncertainty and appearance information. Inspired by Campbell et al. [4]  we treat it as a labelling
+problem and use a stacked 2D convolution network that takes the image features  K hypotheses values 
+and K entropy scores as the input  to produce a softmax distribution over the hypotheses. The ﬁnal
+correspondence prediction is computed by weighting the hypotheses with the softmax distribution.
+Coarse-to-ﬁne warping architecture  such as PWC-Net [39]  is sensitive to coarse-level failures  where
+the incorrect coarse ﬂow is used to warp the features and lead to gross errors. More importantly  small
+objects with large displacement are never considered  since only one coarse prediction is used to warp
+a group of ﬁne-pixels (usually 2 × 2). To account for the missing multi-modal information of the
+coarse scale  one solution is to create K different warpings and delta ﬁne cost volumes according to
+K different coarse-scale hypotheses  and then aggregate the results. However  processing K different
+hypotheses would be prohibitively expensive. Instead  we directly pass K coarse-level hypothesized
+correspondences to the subsequent ﬁne-scale multi-hypotheses network as additional hypotheses [43].
+Out-of-range detection During occlusions or severe displacements  the optimal predicted displace-
+ment is likely an "out-of-range" output that lies outside the search window. We use the processed cost
+volumes to train such a binary classiﬁer. Since cost volumes allow us to access a distribution over all
+candidate matches  we can use the distribution to estimate uncertainty. Speciﬁcally  for each of the K
+hypothesized cost volumes  we compute the Shannon entropy of the truncated softmax given by
+
+H[u] = −(cid:88)
+
+p(cid:48)(u = ui) · log p(cid:48)(u = ui)
+
+i
+
+Since Shannon entropy itself is not a reliable uncertainty indicator [15]  we pass them into a U-Net
+module along with the image features and expected displacements  and produce a binary variable that
+indicates whether the ground-truth displacement is out-of search range. The out-of-range detection
+module is trained with binary cross-entropy loss where the supervision comes from comparing the
+ground-truth ﬂow with the maximum search range. Empirically  adding the out-of-range detector
+regularizes the model and improves the generalization ability as shown in Sec.4.3.
+
+5
+
+Multi-channel Residual Cost Volume(𝑈 𝑉 𝐻 𝑊)×𝐾Volumetric U-NetUpsampled Coarse Prediction(2 𝐻 𝑊)Truncated Soft-argminSeparable 4D KernelsFine Prediction(2 𝐻 𝑊)Warping & Cosine SimilarityHypotheses Selection NetworkFlow Hypotheses & Uncertainties(2 𝐻 𝑊)×𝐾 (𝐻 𝑊)×𝐾Pyramid Feature Siamese NetworkFine-scale Features(𝑑 𝐻 𝑊)×2Reference FrameTarget Frame𝐶1𝐶𝑘𝐶2⋯Stage 1: Cost Volume ConstructionStage 2: ProcessingStage 3: Soft SelectionTable 1: Model size and running time. Gﬂops is mea-
+sured on KITTI-sized (0.5 megapixel) images. Number
+of training iterations is recorded for the pre-training
+stage on FlyingChairs and FlyingThings  and (S) indi-
+cates sequential training on separate modules.
+
+Method
+FlowNetS [7]
+FlowNetC [7]
+FlowNet2 [19]
+PWC-Net+ [39]
+LiteFlowNet [17]
+HD∧3F [44]
+IRR-PWC [21]
+Ours-small
+Ours
+
+#param. Gﬂops
+66.8
+38.7M
+39.2M
+69.6
+162.5M 365.6
+90.8
+9.4M
+5.4M
+151.7
+39.9M 186.1
+6.4M
+5.2M
+6.2M
+
+36.9
+96.5
+
+-
+
+#train iter.
+
+1700K
+1700K
+
+7100K (S)
+
+1700K
+
+2000K (S)
+
+-
+
+1700K
+220K
+220K
+
+Figure 4: Stereo → Flow transfer. After ﬁne-
+tuning with KITTI stereo data  our small model
+consistently out-performs PWC-Net on KITTI
+ﬂow  though with similar error on the stereo train-
+ing set  indicating our model is more generalizable.
+
+4 Experiments
+
+Network speciﬁcation
+Similar to PWC-Net and LiteFlowNet [18  39]  we follow the coarse-to-
+ﬁne feature warping scheme as shown in Fig. 3. We ﬁnd correspondences with 9 × 9 search windows
+on a feature pyramid with stride {64  32  16  8  4}. We keep K = {16  16  16  16  12} hypotheses at
+each scale. Besides the full model  we also train a smaller model that only takes features from coarse
+levels with stride {64  32  16  8}  indicated by “Ours-small".
+Training procedure We build the model and re-implement the training pipeline of PWC-Net+ [39]
+using Pytorch. The model is trained on a machine with 4 Titan X Pascal GPUs. The same training
+and ﬁne-tuning procedure is followed. To be noted  we are able to stably train the network with a
+larger learning rate (10−3 vs 10−4) and fewer iterations (140K vs 1200K on FlyingChairs and 80K
+vs 500K on FlyingThings) compared to prior optical ﬂow networks. Furthermore  people ﬁnd that
+PWC-Net is sensitive to initialization [39] and several attempts of training with random initialization
+have to be made to avoid the poor local minimum  which is never observed for our case.
+
+4.1 Benchmark results
+
+As shown in Tab. 1  our models can be trained with signiﬁcantly fewer iterations without sequential
+training of submodules. In terms of computation efﬁciency  our small model only uses less than
+half of the FLOPS used by PWC-Net and a quarter of the FLOPS for LiteFlowNet. Our full model
+uses similar computation as PWC-Net and 40% fewer computations than LiteFlowNet. It is also a
+compact model among the ones with the least number of parameters. One more thing to notice is that
+our model is the only optical ﬂow network in the table that processes a “true" 4D cost volume instead
+of convolving a “pseudo" multi-channel 2D cost volume.
+Though our model is compact  computationally efﬁcient and trained with fewer iterations  it demon-
+strates SOTA accuracy on multiple benchmarks. As shown in Tab. 2  after the pretraining stage 
+ours-small achieves smaller end-point-error (EPE) than all methods on KITTI [9  30]  except for
+LiteFlowNet2  which is heavier than LiteFlowNet  and much heavier than ours-small. Our full
+model further out-performs our small model and reduces the F1-all error by one-third compared to
+PWC-Net. On Sintel  our small model beats all previous networks except for FlowNet2  which uses
+8X more computations  30X more parameters  and 30X more training iterations. Our full model
+further improves the accuracy over our small model. The pretraining-stage results demonstrate that
+our network can generalize better than the existing optical ﬂow architectures.
+After ﬁne-tuning on KITTI  our model clearly out-performs existing SOTA methods by a large margin.
+The only method comparable to ours is HD∧3F  which uses 6X more parameters and 1.76X more
+computation compared to ours. On Sintel  our method ranks 1st for both the “clean" pass and the
+“ﬁnal" pass over all two-frame optical ﬂow methods. Noticebly  our small model achieves similar ﬂow
+error on KITTI as LiteFlowNet2 and PWC-Net+ using 1/4 and 2/5 computations of theirs respectively.
+
+6
+
+Table 2: Results on K(ITTI)-15 and S(intel) optical ﬂow benchmark. “C+T" indicates models pre-trained on
+Chairs and Things [7  29].“+K/S" indicates models ﬁne-tuned on KITTI or Sintel. †:D1-all is the default metric
+for KITTI stereo matching  and is evaluated on KITTI-15 stereo training data. The subscript number shows the
+absolute ranking among all two-frame optical ﬂow methods in the benchmark. Best results over each group are
+bolded  and best results overall are underlined. Parentheses mean that the training and testing are performed on
+the same dataset. Some results are shown as mean ± standard deviation in ﬁve trials.
+
+Method
+
+K-15-train
+
+K-15-test
+
+Fl-all D1-all† Clean
+1.86
+
+-
+
+S-train (epe)
+Final
+3.06
+
+-
+
+C+T
+
++K/S
+
+FlowFields [2]
+DCFlow [42]
+FlowNet2 [19]
+PWC-Net [38]
+LiteFlowNet [17]
+LiteFlowNet2 [18]
+HD∧3F [44]
+Ours-small
+Ours
+FlowNet2 [19]
+PWC-Net-ft+ [39]
+LiteFlowNet2-ft [18]
+IRR-PWC-ft [21]
+HD∧3F-ft [44]
+Ours-small-ft
+Ours-ft
+
+9.43 ± 0.18
+
+Fl-epe
+8.33
+
+-
+
+10.08
+10.35
+10.39
+8.97
+13.17
+
+8.36
+(2.30)
+(1.50)
+(1.47)
+(1.63)
+(1.31)
+(1.41)
+(1.16)
+
+Fl-all
+24.4
+15.1
+30.0
+33.7
+28.5
+25.9
+24.0
+33.4
+25.1
+(8.6)
+(5.3)
+(4.8)
+(5.3)
+(4.1)
+(5.5)
+(4.1)
+
+14.83
+
+-
+-
+-
+-
+-
+-
+-
+
+11.48
+7.72
+7.74
+7.653
+6.552
+7.74
+6.301
+
+-
+-
+-
+
+-
+-
+-
+
+-
+
+-
+-
+-
+
+23.30
+
+13.12
+8.73
+
+9.17
+
+6.10
+4.67
+
+S-test (epe)
+Final
+Clean
+5.81
+3.75
+3.54
+5.12
+6.02
+3.96
+
+-
+-
+-
+-
+-
+-
+
+-
+-
+-
+-
+-
+-
+
+4.16
+3.45
+3.45
+3.84
+4.79
+3.26
+2.811
+
+5.74
+4.60
+4.90
+4.58
+4.67
+4.73
+4.401
+
+-
+
+-
+
+2.02
+2.55
+2.48
+2.24
+3.84
+2.45
+2.21
+(1.45)
+(1.71)
+(1.30)
+(1.92)
+(1.87)
+(1.84)
+(1.66)
+
+3.54
+3.93
+4.04
+3.78
+8.77
+3.63
+3.62
+(2.01)
+(2.34)
+(1.62)
+(2.51)
+(1.17)
+(2.44)
+(2.24)
+
+On Sintel clean pass  our small model is better than all convolutional optical ﬂow methods except for
+our full model.
+Interestingly  on KITTI stereo matching training set  our method out-performs PWC-Net with an
+even larger margin  i.e.  8.73% error versus 23.30% without ﬁne-tuning  and 4.67% versus 9.17%
+after ﬁne-tuning on KITTI ﬂow data. This indicates the superior generalization ability of our model
+across correspondence tasks.
+
+4.2 Generalization ability
+Cross task generalization: Stereo → Flow To compare the generalization ability of our method
+with existing deep ﬂow networks [7  38]  we transfer the Chairs/Things-pretrained model to the real
+domain  i.e.  KITTI  where it is difﬁcult to acquire ﬂow annotations than stereo (depth) annotations.
+To do so  we ﬁne-tune our pretrained small model using KITTI stereo training set together with
+FlyingChairs and FlyingThings for 75K iterations. As comparison  a pretrained ofﬁcial PWC-Net
+model is also ﬁne-tuned with the same procedure  except that learning rate is set as 0.0001 since a
+larger learning rate makes training PWC-Net unstable.
+As shown in Fig. 4  our pre-trained model initially perform on par with PWC-Net on KITTI optical
+ﬂow training set. After ﬁne-tuning on KITTI-15 stereo images for 75k iterations  although both
+methods perform similarly on the training data  ours-small gets much lower error on out-of-domain
+optical ﬂow image pairs. This indicates our model is less overﬁtted to the training distribution.
+Qualitative results can be found in the supplementary material.
+Cross-range generalization: small motion → large motion In-the-wild image pairs have unknown
+maximum displacement  i.e.  they may be captured from very different view points and objects
+can move to anywhere. Therefore  the ability to ﬁnd correspondences out of training search range
+is important for real-world applications. To deal with large displacements  one could simply ﬁnd
+correspondences on downsampled images. However  this loses high-frequency information. Instead 
+our proposed separable 4D-convolutional matching module is able to vary search range at test time
+on demand. To demonstrate this  we train the correspondence model on pixels with small motion
+(0-32px) on FlyingThings  and test on two displacement ranges (0-32px and 0-64px) on KITTI-
+15 training set. Ours-32 is our proposed matching module operating on stride 8 features. As a
+
+7
+
+comparison  we train a PWC-Net baseline using the same annotated data  referred to as PWC-32. We
+also train a PWC-Net baseline with 0-64px motion to serve as the upper-bound of our method.
+As shown in Tab. 3  our method achieves 39.2% lower error than PWC-32 for in-distribution pixels
+(pixels with 0-32px motion)  while achieving 65.4% lower error for out-of-distribution pixels (pixels
+with 0-64px motion). Moving from in-distribution to out-of-distribution data  the error rate of PWC-
+32 increases by 231%  while our model increases by 89%  which is on par with a model trained with
+both in-distribution and out-of distribution data  i.e.  PWC-64  demonstrating strong generalization
+ability to out-of-training-range data.
+
+Table 4: Results of single-stage ablation study.
+
+Table 3: On-demand correspondence matching
+with extended search range.
+
+Method
+
+EPE (px)
+
+ratio
+
+PWC-32 [38]
+PWC-64† [38]
+Ours-32
+
+0-32px
+2.85
+2.72
+1.73
+
+0-64px
+9.44
+5.50
+3.27
+
+3.31
+2.02
+1.89
+
+Method
+DenseNet [38]
+Full-4D
+Sep-4D
+Ours-UNet
+UNet→Plain×4
+- Multi-channel
+T-soft.→Soft.
+T-soft.→Reg.
+- OOR
+
+4.3 Diagnostics
+
+EPE (px) GFlops
+25.5
+52.5
+23.4
+28.5
++20.9
+-0.7
+-0.5
+-0.4
+
+2.64
+2.30
+2.31
+1.73
+-0.02
++0.32
++0.10
++0.58
++0.07
+
+-
+
+# Params.
+
+8.2
+1.83
+1.78
+2.94
+
+-
+
+-0.001
+
++0.001
+
+-
+
+-
+
+Single-stage ablation study To reveal the contribution of each component  we perform a detailed
+ablation study. For clarity we use a single stage architecture  i.e.  without coarse-to-ﬁne warping 
+on stride-8 features. The models are trained on 0-32px (in both x and y directions) motions on
+FlyingChairs and evaluated on KITTI-15 training set on pixels with the same motion range. As the
+baseline model  we implement a DenseNet matching module followed by a reﬁnement module as used
+in PWC-Net [16]  referred to as “DenseNet". For “Full-4D"  we replace the DenseNet and reﬁnement
+module with two residual 4D convolutions blocks (four convolutions in total). As shown in Tab. 4 
+it reduces error by 12.9% and number of parameters by 77.7%  though with an increased amount
+of computation. “Sep-4D" separates 4D kernels into WTA kernels and spatial kernels  reducing
+GFlops by half without signiﬁcant loss in accuracy. “Ours-UNet" is our ﬁnal model  which uses
+multi-channel cost volumes  volumetric U-Net architecture  truncated soft-argmin inference  and
+out-of-range (OOR) detection. It further reduces the error rate by 23.4%.
+We then remove or replace each component from our ﬁnal model. Replacing the U-Net architecture
+(ten convolutions) with a plain architecture (eight convolutions) slightly reduces the error but adds
+a large compute and memory overhead. Replacing the multi-channel cost volume with a standard
+single-channel cost volume increases the error by 18.5%. Replacing the truncated soft-argmin with
+a standard soft-argmin increases the error by 6.8%  and direct regression of ﬂow vectors from cost
+volumes increases the error by almost one-third  demonstrating the beneﬁts of using truncated soft-
+argmin inference. Interestingly  removing the out-of-range detection module in training also increases
+error. We posit that it uses knowledge from the cost volume structure to regularize the network and
+helps the model to generalize better.
+Analysis on cost volume ﬁltering We also compare different architectural designs of cost volume
+ﬁltering in terms of FLOPS and numbers of parameters that are used. To ﬁlter a multi-channel cost
+volume of size (K  U  V  H  W )  "2D convolution" reshapes the ﬁrst three dimensions (k  u  v) into a
+feature vector and ﬁlters along the height and width dimension (x  y). Our "4D convolution" and
+"separable 4D convolution" treat the hypotheses dimension k as feature dimension and ﬁlter along
+the (u  v  x  y) dimension. As shown in Tab. 5  separable 4D convolution uses 3.5X fewer parameters
+and computations compared to the full 4D convolution. Compared to 2D convolution  separable
+4D convolution only uses
+U V computations. Speciﬁcally when U = V = 9
+as in PWC-Net [39]  replacing the 2D convolutions with separable 4D convolutions reduces the
+computation by 40x and number of parameters by 3000x.
+
+U 2V 2 parameters and 2
+
+2
+
+8
+
+Table 5: Comparison between ﬁltering approaches on a (K U V H W) multi-channel 4D cost volume.
+ratio
+
+# Mult-Adds
+
+# Param.
+
+Method
+
+Kernel
+
+2D conv.
+4D conv.
+
+Sep. 4D conv.
+
+(KU V  KU V  3  3)
+
+9K 2U 2V 2
+
+(K  K  3  3  3  3)
+(2  K  K  3  3)
+
+81K 2
+18K2
+
+4.4 Stereo matching with vertical disparity
+
+ratio
+U 2V 2
+
+2
+4.5
+1
+
+9HW × K 2U 2V 2
+81HW × K 2U V
+18HW × K2UV
+
+U V
+2
+4.5
+1
+
+We further show an application of our correspondence network in stereo matching with imperfect
+rectiﬁcation. Although most stereo systems assume that cameras are perfectly calibrated and cor-
+respondences lie on the same horizontal scan-line. However in reality  it is difﬁcult to perfectly
+calibrate stereo pairs during large temperature changes and vibrations [12]. Such errors result in
+ground-truth disparity matches that have a vertical component (e.g.  match to a different horizontal
+scanline). Instead of searching for stereo correspondences along the horizontal scanline  we ﬁnd
+matchings in a 2D rectangular area  and project the displacement vector in the horizontal direction.
+We ﬁne-tune our model and PWC-Net using stereo data from KITTI  Middlebury  and SceneFlow [9 
+29  30  35] training set for 70K iterations. For our model  we set U = 6  V = 1 for each level. We
+then evaluate on half-sized Middlebury-14 additional images  where there are thirteen images with
+perfect rectiﬁcation and thirteen with imperfect rectiﬁcation. ELAS [8] is taken from the Robust
+Vision Challenge ofﬁcial package  and we implemented two-pass SGBM2 [11] using OpenCV (with
+SAD window size = 3  truncation value for pre-ﬁlter = 63  p1 = 216  p2 = 864  uniqueness ratio = 10 
+speckle window size = 100  speckle range = 32). The results from SGBM2 is also post-processed
+using weighted least square ﬁlter with default parameters.
+As shown in Tab.6  going from perfectly rectiﬁed stereo images to the imperfectly rectiﬁed ones  the
+error rate of our methods does not increase. While methods without explicit vertical displacement
+handling  for example  ELAS [8]  suffer heavily from such situations. Compared to PWC-Net  our
+model gets a lower error  possibly due to the effectiveness of volumetric ﬁltering  and is more ﬂexible
+because of the on-demand selection of search space. A qualitative comparison is shown in Fig. 5.
+Though ELAS handles stereo images with perfect calibration well  it fails on imperfectly rectiﬁed
+pairs  yielding gross errors on repeated patterns and textureless surfaces as indicated by the circles.
+Our method is not affected by vertical displacement caused by imperfect rectiﬁcation  given its
+pre-deﬁned 2D search space.
+
+Table 6: Results on Middlebury stereo images.
+
+Method
+
+avgerr (px)
+
+inc.(%)
+
+SGBM2 [11]
+ELAS [8]
+PWC-Net [38]
+Ours
+
+perfect
+14.51
+9.89
+9.41
+9.03
+
+imperfect
+15.89
+11.79
+9.92
+8.79
+
+9.5
+19.2
+5.4
+-2.7
+
+5 Discussion
+
+Figure 5: Result on Middlebury-14 image  "Stick2".
+
+We introduce efﬁcient volumetric networks for dense 2D correspondence matching. Compared to
+prior SOTA  our approach is more accurate  easier to train  generalizes better  and produces multiple
+candidate matches. To do so  we make use of volumetric encoder-decoder layers  multi-channel
+cost volumes  and separable volumetric ﬁlters. Our formulation is general enough to adapt search
+windows on-the-ﬂy  allowing us to repurpose optical ﬂow networks for stereo (and vice versa) and
+implement on-demand expansion of search windows. Due to limited CUDA kernel and hardware
+support for convolutions and poolings with non-standard shapes  the FLOPS numbers for our current
+implementation are not directly transferable to running time  which will be explored in the future.
+Acknowledgements: This work was supported by the CMU Argo AI Center for Autonomous Vehicle
+Research.
+
+9
+
+LeftRightELAS-H (perfect)ELAS-H (imperfect)Ours-ft (perfect)Ours-ft (imperfect)References
+[1] V. Badrinarayanan  A. Kendall  and R. Cipolla. Segnet: A deep convolutional encoder-decoder
+
+architecture for image segmentation. PAMI  39(12):2481–2495  2017.
+
+[2] C. Bailer  B. Taetz  and D. Stricker. Flow ﬁelds: Dense correspondence ﬁelds for highly accurate
+
+large displacement optical ﬂow estimation. In ICCV  pages 4015–4023  2015.
+
+[3] D. J. Butler  J. Wulff  G. B. Stanley  and M. J. Black. A naturalistic open source movie for
+
+optical ﬂow evaluation. In ECCV  pages 611–625. Springer  2012.
+
+[4] N. D. Campbell  G. Vogiatzis  C. Hernández  and R. Cipolla. Using multiple hypotheses to
+improve depth-maps for multi-view stereo. In European Conference on Computer Vision  pages
+766–779. Springer  2008.
+
+[5] J.-R. Chang and Y.-S. Chen. Pyramid stereo matching network. In CVPR  pages 5410–5418 
+
+2018.
+
+[6] F. Chollet. Xception: Deep learning with depthwise separable convolutions. In CVPR  pages
+
+1251–1258  2017.
+
+[7] A. Dosovitskiy  P. Fischer  E. Ilg  P. Hausser  C. Hazirbas  V. Golkov  P. Van Der Smagt 
+D. Cremers  and T. Brox. Flownet: Learning optical ﬂow with convolutional networks. In ICCV 
+pages 2758–2766  2015.
+
+[8] A. Geiger  M. Roser  and R. Urtasun. Efﬁcient large-scale stereo matching. In ACCV  2010.
+
+[9] A. Geiger  P. Lenz  and R. Urtasun. Are we ready for autonomous driving? the kitti vision
+
+benchmark suite. In CVPR  2012.
+
+[10] X. Guo  K. Yang  W. Yang  X. Wang  and H. Li. Group-wise correlation stereo network. In
+
+CVPR  2019.
+
+[11] H. Hirschmuller. Stereo processing by semiglobal matching and mutual information. PAMI  30
+
+(2):328–341  2008.
+
+[12] H. Hirschmuller and S. Gehrig. Stereo matching in the presence of sub-pixel calibration errors.
+
+In CVPR  pages 437–444. IEEE  2009.
+
+[13] B. K. Horn and B. G. Schunck. Determining optical ﬂow. Artiﬁcial intelligence  17(1-3):
+
+185–203  1981.
+
+[14] A. G. Howard  M. Zhu  B. Chen  D. Kalenichenko  W. Wang  T. Weyand  M. Andreetto  and
+H. Adam. Mobilenets: Efﬁcient convolutional neural networks for mobile vision applications.
+arXiv preprint arXiv:1704.04861  2017.
+
+[15] X. Hu and P. Mordohai. A quantitative evaluation of conﬁdence measures for stereo vision.
+
+PAMI  34(11):2121–2133  2012.
+
+[16] G. Huang  Z. Liu  L. Van Der Maaten  and K. Q. Weinberger. Densely connected convolutional
+
+networks. In CVPR  pages 4700–4708  2017.
+
+[17] T.-W. Hui  X. Tang  and C. C. Loy. Liteﬂownet: A lightweight convolutional neural network for
+
+optical ﬂow estimation. In CVPR  pages 8981–8989  June 2018.
+
+[18] T.-W. Hui  X. Tang  and C. C. Loy. A lightweight optical ﬂow cnn–revisiting data ﬁdelity and
+
+regularization. arXiv preprint arXiv:1903.07414  2019.
+
+[19] E. Ilg  N. Mayer  T. Saikia  M. Keuper  A. Dosovitskiy  and T. Brox. Flownet 2.0: Evolution of
+
+optical ﬂow estimation with deep networks. In CVPR  pages 2462–2470  2017.
+
+[20] M. Jaderberg  A. Vedaldi  and A. Zisserman. Speeding up convolutional neural networks with
+low rank expansions. In Proceedings of the British Machine Vision Conference. BMVA Press 
+2014.
+
+10
+
+[21] H. Junhwa and S. Roth.
+
+Iterative residual reﬁnement for joint optical ﬂow and occlusion
+
+estimation. In CVPR  2019.
+
+[22] A. Kendall  H. Martirosyan  S. Dasgupta  P. Henry  R. Kennedy  A. Bachrach  and A. Bry.
+End-to-end learning of geometry and context for deep stereo regression. In ICCV  pages 66–75 
+2017.
+
+[23] V. Kolmogorov and R. Zabih. Computing visual correspondence with occlusions via graph cuts.
+
+Technical report  Cornell University  2001.
+
+[24] S. Kong and C. Fowlkes. Multigrid predictive ﬁlter ﬂow for unsupervised learning on videos.
+
+arXiv preprint arXiv:1904.01693  2019.
+
+[25] V. Lebedev  Y. Ganin  M. Rakhuba  I. Oseledets  and V. Lempitsky. Speeding-up convolutional
+
+neural networks using ﬁne-tuned cp-decomposition. arXiv preprint arXiv:1412.6553  2014.
+
+[26] Y. LeCun  Y. Bengio  et al. Convolutional networks for images  speech  and time series. The
+
+handbook of brain theory and neural networks  3361(10):1995  1995.
+
+[27] Y. Liu  H. Li  and X. Wang. Learning deep features via congenerous cosine loss for person
+
+recognition. arXiv preprint arXiv:1702.06890  2017.
+
+[28] W. Luo  A. G. Schwing  and R. Urtasun. Efﬁcient deep learning for stereo matching. In CVPR 
+
+2016.
+
+[29] N. Mayer  E. Ilg  P. Häusser  P. Fischer  D. Cremers  A. Dosovitskiy  and T. Brox. A large
+dataset to train convolutional networks for disparity  optical ﬂow  and scene ﬂow estimation. In
+CVPR  2016. URL http://lmb.informatik.uni-freiburg.de/Publications/2016/
+MIFDB16. arXiv:1512.02134.
+
+[30] M. Menze and A. Geiger. Object scene ﬂow for autonomous vehicles. In CVPR  2015.
+
+[31] I. Rocco  M. Cimpoi  R. Arandjelovi´c  A. Torii  T. Pajdla  and J. Sivic. Neighbourhood
+
+consensus networks. In NeurIPS  pages 1651–1662  2018.
+
+[32] O. Ronneberger  P. Fischer  and T. Brox. U-net: Convolutional networks for biomedical image
+segmentation. In International Conference on Medical image computing and computer-assisted
+intervention  pages 234–241. Springer  2015.
+
+[33] M. Sandler  A. Howard  M. Zhu  A. Zhmoginov  and L.-C. Chen. Mobilenetv2: Inverted
+
+residuals and linear bottlenecks. In CVPR  pages 4510–4520  2018.
+
+[34] D. Scharstein and R. Szeliski. A taxonomy and evaluation of dense two-frame stereo correspon-
+
+dence algorithms. IJCV  47(1-3):7–42  2002.
+
+[35] D. Scharstein  H. Hirschmüller  Y. Kitajima  G. Krathwohl  N. Neši´c  X. Wang  and P. Westling.
+High-resolution stereo datasets with subpixel-accurate ground truth. In German Conference on
+Pattern Recognition  2014.
+
+[36] L. Sifre and S. Mallat. Rigid-motion scattering for texture classiﬁcation. arXiv preprint
+
+arXiv:1403.1687  2014.
+
+[37] D. Sun  S. Roth  and M. J. Black. A quantitative analysis of current practices in optical ﬂow
+
+estimation and the principles behind them. IJCV  106(2):115–137  2014.
+
+[38] D. Sun  X. Yang  M.-Y. Liu  and J. Kautz. PWC-Net: CNNs for optical ﬂow using pyramid 
+
+warping  and cost volume. In CVPR  2018.
+
+[39] D. Sun  X. Yang  M. Liu  and J. Kautz. Models matter  so does training: An empirical study of
+
+cnns for optical ﬂow estimation. PAMI  2019.
+
+[40] S. Tulyakov  A. Ivanov  and F. Fleuret. Practical deep stereo (pds): Toward applications-friendly
+
+deep stereo matching. In NeurIPS  pages 5871–5881  2018.
+
+11
+
+[41] F. Wang  X. Xiang  J. Cheng  and A. L. Yuille. Normface: l 2 hypersphere embedding for face
+veriﬁcation. In Proceedings of the 25th ACM international conference on Multimedia  pages
+1041–1049. ACM  2017.
+
+[42] J. Xu  R. Ranftl  and V. Koltun. Accurate optical ﬂow via direct cost volume processing. In
+
+CVPR  pages 1289–1297  2017.
+
+[43] L. Xu  J. Jia  and Y. Matsushita. Motion detail preserving optical ﬂow estimation. PAMI  34(9):
+
+1744–1757  2011.
+
+[44] Z. Yin  T. Darrell  and F. Yu. Hierarchical discrete distribution decomposition for match density
+
+estimation. In CVPR  2019.
+
+[45] J. Zbontar and Y. LeCun. Stereo matching by training a convolutional neural network to compare
+
+image patches. Journal of Machine Learning Research  17(1-32):2  2016.
+
+[46] X. Zhang  X. Zhou  M. Lin  and J. Sun. Shufﬂenet: An extremely efﬁcient convolutional neural
+
+network for mobile devices. In CVPR  pages 6848–6856  2018.
+
+12
+
+,Damien Scieur
+Alexandre d'Aspremont
+Francis Bach
+Gengshan Yang
+Deva Ramanan

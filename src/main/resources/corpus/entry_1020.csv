@@ -1,0 +1,763 @@
+2014,Communication-Efficient Distributed Dual Coordinate Ascent,Communication remains the most significant bottleneck in the performance of distributed optimization algorithms for large-scale machine learning. In this paper  we propose a communication-efficient framework  COCOA  that uses local computation in a primal-dual setting to dramatically reduce the amount of necessary communication. We provide a strong convergence rate analysis for this class of algorithms  as well as experiments on real-world distributed datasets with implementations in Spark. In our experiments  we find that as compared to state-of-the-art mini-batch versions of SGD and SDCA algorithms  COCOA converges to the same .001-accurate solution quality on average 25× as quickly.,Communication-Efﬁcient
+
+Distributed Dual Coordinate Ascent
+
+Martin Jaggi ∗
+ETH Zurich
+
+Virginia Smith ∗
+UC Berkeley
+
+Martin Tak´aˇc
+
+Lehigh University
+
+Jonathan Terhorst
+
+UC Berkeley
+
+Sanjay Krishnan
+
+UC Berkeley
+
+Thomas Hofmann
+
+ETH Zurich
+
+Michael I. Jordan
+
+UC Berkeley
+
+Abstract
+
+Communication remains the most signiﬁcant bottleneck in the performance of
+distributed optimization algorithms for large-scale machine learning. In this pa-
+per  we propose a communication-efﬁcient framework  COCOA  that uses local
+computation in a primal-dual setting to dramatically reduce the amount of nec-
+essary communication. We provide a strong convergence rate analysis for this
+class of algorithms  as well as experiments on real-world distributed datasets with
+implementations in Spark. In our experiments  we ﬁnd that as compared to state-
+of-the-art mini-batch versions of SGD and SDCA algorithms  COCOA converges
+to the same .001-accurate solution quality on average 25× as quickly.
+
+1
+
+Introduction
+
+With the immense growth of available data  developing distributed algorithms for machine learning
+is increasingly important  and yet remains a challenging topic both theoretically and in practice. On
+typical real-world systems  communicating data between machines is vastly more expensive than
+reading data from main memory  e.g. by a factor of several orders of magnitude when leveraging
+commodity hardware.1 Yet  despite this reality  most existing distributed optimization methods for
+machine learning require signiﬁcant communication between workers  often equalling the amount of
+local computation (or reading of local data). This includes for example popular mini-batch versions
+of online methods  such as stochastic subgradient (SGD) and coordinate descent (SDCA).
+In this work  we target this bottleneck. We propose a distributed optimization framework that allows
+one to freely steer the trade-off between communication and local computation. In doing so  the
+framework can be easily adapted to the diverse spectrum of available large-scale computing systems 
+from high-latency commodity clusters to low-latency supercomputers or the multi-core setting.
+Our new framework  COCOA (Communication-efﬁcient distributed dual Coordinate Ascent)  sup-
+ports objectives for linear reguarlized loss minimization  encompassing a broad class of machine
+learning models. By leveraging the primal-dual structure of these optimization problems  COCOA
+effectively combines partial results from local computation while avoiding conﬂict with updates si-
+multaneously computed on other machines. In each round  COCOA employs steps of an arbitrary
+dual optimization method on the local data on each machine  in parallel. A single update vector is
+then communicated to the master node. For example  when choosing to perform H iterations (usu-
+ally order of the data size n) of an online optimization method locally per round  our scheme saves
+a factor of H in terms of communication compared to the corresponding naive distributed update
+
+∗Both authors contributed equally.
+1On typical computers  the latency for accessing data in main memory is in the order of 100 nanoseconds.
+
+In contrast  the latency for sending data over a standard network connection is around 250 000 nanoseconds.
+
+1
+
+scheme (i.e.  updating a single point before communication). When processing the same number of
+datapoints  this is clearly a dramatic savings.
+Our theoretical analysis (Section 4) shows that this signiﬁcant reduction in communication cost
+comes with only a very moderate increase in the amount of total computation  in order to reach
+the same optimization accuracy. We show that  in general  the distributed COCOA framework will
+inherit the convergence rate of the internally-used local optimization method. When using SDCA
+(randomized dual coordinate ascent) as the local optimizer and assuming smooth losses  this con-
+vergence rate is geometric.
+In practice  our experiments with the method implemented on the fault-tolerant Spark platform [1]
+conﬁrm both the clock time performance and huge communication savings of the proposed method
+on a variety distributed datasets. Our experiments consistently show order of magnitude gains over
+traditional mini-batch methods of both SGD and SDCA  and signiﬁcant gains over the faster but
+theoretically less justiﬁed local SGD methods.
+
+Related Work. As we discuss below (Section 5)  our approach is distinguished from recent work
+on parallel and distributed optimization [2  3  4  5  6  7  8  9] in that we provide a general framework
+for improving the communication efﬁciency of any dual optimization method. To the best of our
+knowledge  our work is the ﬁrst to analyze the convergence rate for an algorithm with this level
+of communication efﬁciency  without making data-dependent assumptions. The presented analysis
+covers the case of smooth losses  but should also be extendable to the non-smooth case. Existing
+methods using mini-batches [4  2  10] are closely related  though our algorithm makes signiﬁcant
+improvements by immediately applying all updates locally while they are processed  a scheme that
+is not considered in the classic mini-batch setting. This intuitive modiﬁcation results in dramatically
+improved empirical results and also strengthens our theoretical convergence rate. More precisely 
+the convergence rate shown here only degrades with the number of workers K  instead of with the
+signiﬁcantly larger mini-batch-size (typically order n) in the case of mini-batch methods.
+Our method builds on a closely related recent line of work of [2  3  11  12]. We generalize the algo-
+rithm of [2  3] by allowing the use of arbitrary (dual) optimization methods as the local subroutine
+within our framework. In the special case of using coordinate ascent as the local optimizer  the
+resulting algorithm is very similar  though with a different computation of the coordinate updates.
+Moreover  we provide the ﬁrst theoretical convergence rate analysis for such methods  without mak-
+ing strong assumptions on the data.
+The proposed COCOA framework in its basic variant is entirely free of tuning parameters or learning
+rates  in contrast to SGD-based methods. The only choice to make is the selection of the internal lo-
+cal optimization procedure  steering the desired trade-off between communication and computation.
+When choosing a primal-dual optimizer as the internal procedure  the duality gap readily provides a
+fair stopping criterion and efﬁcient accuracy certiﬁcates during optimization.
+
+Paper Outline. The rest of the paper is organized as follows. In Section 2 we describe the prob-
+lem setting of interest. Section 3 outlines the proposed framework  COCOA  and the convergence
+analysis of this method is presented in Section 4. We discuss related work in Section 5  and compare
+against several other state-of-the-art methods empirically in Section 6.
+
+2 Setup
+
+A large class of methods in machine learning and signal processing can be posed as the minimization
+of a convex loss function of linear predictors with a convex regularization term:
+
+min
+w∈Rd
+
+P (w) :=
+
+(cid:107)w(cid:107)2 +
+
+λ
+2
+
+1
+n
+
+(cid:96)i(wT xi)
+
+ 
+
+(1)
+
+(cid:104)
+
+(cid:105)
+
+n(cid:88)
+
+i=1
+
+Here the data training examples are real-valued vectors xi ∈ Rd; the loss functions (cid:96)i  i = 1  . . .   n
+are convex and depend possibly on labels yi ∈ R; and λ > 0 is the regularization parameter. Using
+the setup of [13]  we assume the regularizer is the (cid:96)2-norm for convenience. Examples of this class
+of problems include support vector machines  as well as regularized linear and logistic regression 
+ordinal regression  and others.
+
+2
+
+(cid:104)
+
+(cid:105)
+
+n(cid:88)
+
+i=1
+
+The most popular method to solve problems of the form (1) is the stochastic subgradient method
+(SGD) [14  15  16]. In this setting  SGD becomes an online method where every iteration only
+requires access to a single data example (xi  yi)  and the convergence rate is well-understood.
+The associated conjugate dual problem of (1) takes the following form  and is deﬁned over one dual
+variable per each example in the training set.
+
+max
+α∈Rn
+
+D(α) := − λ
+2
+
+(cid:107)Aα(cid:107)2 − 1
+n
+
+i (−αi)
+(cid:96)∗
+
+ 
+
+(2)
+
+i is the conjugate (Fenchel dual) of the loss function (cid:96)i  and the data matrix A ∈ Rd×n
+where (cid:96)∗
+collects the (normalized) data examples Ai := 1
+λn xi in its columns. The duality comes with the
+convenient mapping from dual to primal variables w(α) := Aα as given by the optimality con-
+ditions [13]. For any conﬁguration of the dual variables α  we have the duality gap deﬁned as
+P (w(α))−D(α). This gap is a computable certiﬁcate of the approximation quality to the unknown
+true optimum P (w∗) = D(α∗)  and therefore serves as a useful stopping criteria for algorithms.
+For problems of the form (2)  coordinate descent methods have proven to be very efﬁcient  and come
+with several beneﬁts over primal methods. In randomized dual coordinate ascent (SDCA)  updates
+are made to the dual objective (2) by solving for one coordinate completely while keeping all others
+ﬁxed. This algorithm has been implemented in a number of software packages (e.g. LibLinear [17]) 
+and has proven very suitable for use in large-scale problems  while giving stronger convergence
+results than the primal-only methods (such as SGD)  at the same iteration cost [13]. In addition
+to superior performance  this method also beneﬁts from requiring no stepsize  and having a well-
+deﬁned stopping criterion given by the duality gap.
+
+3 Method Description
+The COCOA framework  as presented in Algorithm 1  assumes that the data {(xi  yi)}n
+i=1 for a
+regularized loss minimization problem of the form (1) is distributed over K worker machines. We
+associate with the datapoints their corresponding dual variables {αi}n
+i=1  being partitioned between
+the workers in the same way. The core idea is to use the dual variables to efﬁciently merge the
+parallel updates from the different workers without much conﬂict  by exploiting the fact that they all
+work on disjoint sets of dual variables.
+
+Algorithm 1: COCOA: Communication-Efﬁcient Distributed Dual Coordinate Ascent
+Input: T ≥ 1  scaling parameter 1 ≤ βK ≤ K (default: βK := 1).
+Data: {(xi  yi)}n
+Initialize: α(0)
+for t = 1  2  . . .   T
+
+[k] ← 0 for all machines k  and w(0) ← 0
+
+i=1 distributed over K machines
+
+for all machines k = 1  2  . . .   K in parallel
+
+(∆α[k]  ∆wk) ← LOCALDUALMETHOD(α(t−1)
+[k] ← α(t−1)
+α(t)
+
+[k] + βK
+
+K ∆α[k]
+
+[k]
+
+end
+reduce w(t) ← w(t−1) + βK
+
+K
+
+k=1 ∆wk
+
+(cid:80)K
+
+  w(t−1))
+
+end
+
+In each round  the K workers in parallel perform some steps of an arbitrary optimization method 
+applied to their local data. This internal procedure tries to maximize the dual formulation (2)  only
+with respect to their own local dual variables. We call this local procedure LOCALDUALMETHOD 
+as speciﬁed in the template Procedure A. Our core observation is that the necessary information
+each worker requires about the state of the other dual variables can be very compactly represented
+by a single primal vector w ∈ Rd  without ever sending around data or dual variables between the
+machines.
+Allowing the subroutine to process more than one local data example per round dramatically reduces
+the amount of communication between the workers. By deﬁnition  COCOA in each outer iteration
+
+3
+
+Procedure A: LOCALDUALMETHOD: Dual algorithm for prob. (2) on a single coordinate block k
+Input: Local α[k] ∈ Rnk  and w ∈ Rd consistent with other coordinate blocks of α s.t. w = Aα
+Data: Local {(xi  yi)}nk
+Output: ∆α[k] and ∆w := A[k]∆α[k]
+
+i=1
+
+Procedure B: LOCALSDCA: SDCA iterations for problem (2) on a single coordinate block k
+Input: H ≥ 1  α[k] ∈ Rnk  and w ∈ Rd consistent with other coordinate blocks of α s.t. w = Aα
+Data: Local {(xi  yi)}nk
+Initialize: w(0) ← w  ∆α[k] ← 0 ∈ Rnk
+for h = 1  2  . . .   H
+
+i=1
+
+choose i ∈ {1  2  . . .   nk} uniformly at random
+ﬁnd ∆α maximizing − λn
+i ← α(h−1)
+α(h)
++ ∆α
+(∆α[k])i ← (∆α[k])i + ∆α
+w(h) ← w(h−1) + 1
+λn ∆α xi
+
+2 (cid:107)w(h−1) + 1
+
+i
+
+λn ∆α xi(cid:107)2 − (cid:96)∗
+
+i
+
+end
+Output: ∆α[k] and ∆w := A[k]∆α[k]
+
+(cid:0) − (α(h−1)
+
+i
+
++ ∆α)(cid:1)
+
+only requires communication of a single vector for each worker  that is ∆wk ∈ Rd. Further  as we
+will show in Section 4  COCOA inherits the convergence guarantee of any algorithm run locally on
+each node in the inner loop of Algorithm 1. We suggest to use randomized dual coordinate ascent
+(SDCA) [13] as the internal optimizer in practice  as implemented in Procedure B  and also used in
+our experiments.
+
+such that(cid:80)
+
+Notation.
+In the same way the data is partitioned across the K worker machines  we write the dual
+variable vector as α = (α[1]  . . .   α[K]) ∈ Rn with the corresponding coordinate blocks α[k] ∈ Rnk
+k nk = n. The submatrix A[k] collects the columns of A (i.e. rescaled data examples)
+which are available locally on the k-th worker. The parameter T determines the number of outer
+iterations of the algorithm  while when using an online internal method such as LOCALSDCA  then
+the number of inner iterations H determines the computation-communication trade-off factor.
+
+4 Convergence Analysis
+
+Considering the dual problem (2)  we deﬁne the local suboptimality on each coordinate block as:
+
+D((α[1]  . . .   ˆα[k]  . . .   α[K])) − D((α[1]  . . .   α[k]  . . .   α[K])) 
+
+(3)
+
+εD k(α) := max
+
+ˆα[k]∈Rnk
+
+that is how far we are from the optimum on block k with all other blocks ﬁxed. Note that this differs
+from the global suboptimality max ˆα D( ˆα) − D((α[1]  . . .   α[K])).
+Assumption 1 (Local Geometric Improvement of LOCALDUALMETHOD). We assume that there
+exists Θ ∈ [0  1) such that for any given α  LOCALDUALMETHOD when run on block k alone
+returns a (possibly random) update ∆α[k] such that
+
+E[D k((α[1]  . . .   α[k−1]  α[k] + ∆α[k]  α[k+1]  . . .   α[K]))] ≤ Θ · D k(α).
+
+(4)
+
+Note that this assumption is satisﬁed for several available implementations of the inner procedure
+LOCALDUALMETHOD  in particular for LOCALSDCA  as shown in the following Proposition.
+From here on  we assume that the input data is scaled such that (cid:107)xi(cid:107) ≤ 1 for all datapoints. Proofs
+of all statements are provided in the supplementary material.
+Proposition 1. Assume the loss functions (cid:96)i are (1/γ)-smooth. Then for using LOCALSDCA 
+Assumption 1 holds with
+
+(cid:19)H
+
+(cid:18)
+
+Θ =
+
+1 − λnγ
+1 + λnγ
+
+1
+˜n
+
+.
+
+(5)
+
+where ˜n := maxk nk is the size of the largest block of coordinates.
+
+4
+
+Theorem 2. Assume that Algorithm 1 is run for T outer iterations on K worker machines  with
+the procedure LOCALDUALMETHOD having local geometric improvement Θ  and let βK := 1.
+Further  assume the loss functions (cid:96)i are (1/γ)-smooth. Then the following geometric convergence
+rate holds for the global (dual) objective:
+
+E[D(α∗) − D(α(T ))] ≤
+
+1 − (1 − Θ)
+
+λnγ
+
+D(α∗) − D(α(0))
+
+.
+
+(6)
+
+(cid:17)
+
+(cid:18)
+
+(cid:19)T(cid:16)
+
+1
+K
+
+σ + λnγ
+
+(cid:80)K
+k=1(cid:107)A[k]α[k](cid:107)2 − (cid:107)Aα(cid:107)2
+
+(cid:107)α(cid:107)2
+
+0 ≤ σmin ≤ ˜n.
+
+Here σ is any real number satisfying
+σ ≥ σmin := max
+α∈Rn
+
+λ2n2
+
+≥ 0.
+
+(7)
+
+Lemma 3. If K = 1 then σmin = 0. For any K ≥ 1  when assuming (cid:107)xi(cid:107) ≤ 1 ∀i  we have
+
+Moreover  if datapoints between different workers are orthogonal  i.e. (AT A)i j = 0 ∀i  j such that
+i and j do not belong to the same part  then σmin = 0.
+
+If we choose K = 1 then  Theorem 2 together with Lemma 3 implies that
+D(α∗) − D(α(0))
+
+E[D(α∗) − D(α(T ))] ≤ ΘT(cid:16)
+
+(cid:17)
+
+ 
+
+as expected  showing that the analysis is tight in the special case K = 1. More interestingly  we
+observe that for any K  in the extreme case when the subproblems are solved to optimality (i.e.
+letting H → ∞ in LOCALSDCA)  then the algorithm as well as the convergence rate match that of
+serial/parallel block-coordinate descent [18  19].
+
+Note:
+D(α∗) − D(α(0)) ≤ 1 (see e.g. Lemma 20 in [13]).
+
+If choosing the starting point as α(0) := 0 as in the main algorithm  then it is known that
+
+5 Related Work
+
+Distributed Primal-Dual Methods. Our approach is most closely related to recent work by [2  3] 
+which generalizes the distributed optimization method for linear SVMs as in [11] to the primal-dual
+setting considered here (which was introduced by [13]). The difference between our approach and
+the ‘practical’ method of [2] is that our internal steps directly correspond to coordinate descent iter-
+ations on the global dual objective (2)  for coordinates in the current block  while in [3  Equation 8]
+and [2]  the inner iterations apply to a slightly different notion of the sub-dual problem deﬁned on
+the local data. In terms of convergence results  the analysis of [2] only addresses the mini-batch
+case without local updates  while the more recent paper [3] shows a convergence rate for a variant of
+COCOA with inner coordinate steps  but under the unrealistic assumption that the data is orthogonal
+between the different workers. In this case  the optimization problems become independent  so that
+an even simpler single-round communication scheme summing the individual resulting models w
+would give an exact solution. Instead  we show a linear convergence rate for the full problem class
+of smooth losses  without any assumptions on the data  in the same generality as the non-distributed
+setting of [13].
+While the experimental results in all papers [11  2  3] are encouraging for this type of method  they
+do not yet provide a quantitative comparison of the gains in communication efﬁciency  or compare
+to the analogous SGD schemes that use the same distribution and communication patterns  which is
+the main goal or our experiments in Section 6. For the special case of linear SVMs  the ﬁrst paper
+to propose the same algorithmic idea was [11]  which used LibLinear in the inner iterations. How-
+ever  the proposed algorithm [11] processes the blocks sequentially (not in the parallel or distributed
+setting). Also  it is assumed that the subproblems are solved to near optimality on each block be-
+fore selecting the next  making the method essentially standard block-coordinate descent. While
+no convergence rate was given  the empirical results in the journal paper [12] suggest that running
+LibLinear for just one pass through the local data performs well in practice. Here  we prove this 
+quantify the communication efﬁciency  and show that fewer local steps can improve the overall per-
+formance. For the LASSO case  [7] has proposed a parallel coordinate descent method converging
+to the true optimum  which could potentially also be interpreted in our framework here.
+
+5
+
+Mini-Batches. Another closely related avenue of research includes methods that use mini-batches
+to distribute updates. In these methods  a mini-batch  or sample  of the data examples is selected
+for processing at each iteration. All updates within the mini-batch are computed based on the same
+ﬁxed parameter vector w  and then these updates are either added or averaged in a reduce step
+and communicated back to the worker machines. This concept has been studied for both SGD and
+SDCA  see e.g. [4  10] for the SVM case. The so-called naive variant of [2] is essentially identical
+to mini-batch dual coordinate descent  with a slight difference in deﬁning the sub-problems.
+As is shown in [2] and below in Section 6  the performance of these algorithms suffers when pro-
+cessing large batch sizes  as they do not take local updates immediately into account. Furthermore 
+they are very sensitive to the choice of the parameter βb  which controls the magnitude of combining
+all updates between βb := 1 for (conservatively) averaging  and βb := b for (aggressively) adding
+the updates (here we denote b as the size of the selected mini-batch  which can be of size up to n).
+This instability is illustrated by the fact that even the change of βb := 2 instead of βb := 1 can
+lead to divergence of coordinate descent (SDCA) in the simple case of just two coordinates [4] .
+In practice it can be very difﬁcult to choose the correct data-dependent parameter βb especially for
+large mini-batch sizes b ≈ n  as the parameter range spans many orders of magnitude  and directly
+controls the step size of the resulting algorithm  and therefore the convergence rate [20  21]. For
+sparse data  the work of [20  21] gives some data dependent choices of βb which are safe.
+Known convergence rates for the mini-batch methods degrade linearly with the growing batch size
+b ≈ Θ(n). More precisely  the improvement in objective function per example processed degrades
+with a factor of βb in [4  20  21]. In contrast  our convergence rate as shown in Theorem 2 only
+degrades with the much smaller number of worker machines K  which in practical applications is
+often several orders of magnitudes smaller than the mini-batch size b.
+
+Single Round of Communication. One extreme is to consider methods with only a single round
+of communication (e.g. one map-reduce operation)  as in [22  6  23]. The output of these methods is
+the average of K individual models  trained only on the local data on each machine. In [22]  the au-
+thors give conditions on the data and computing environment under which these one-communication
+algorithms may be sufﬁcient. In general  however  the true optimum of the original problem (1) is
+not the average of these K models  no matter how accurately the subproblems are solved [24].
+
+Naive Distributed Online Methods  Delayed Gradients  and Multi-Core. On the other extreme 
+a natural way to distribute updates is to let every machine send updates to the master node (some-
+times called the “parameter server”) as soon as they are performed. This is what we call the naive
+distributed SGD / CD in our experiments. The amount of communication for such naive distributed
+online methods is the same as the number of data examples processed. In contrast to this  the num-
+ber of communicated vectors in our method is divided by H  that is the number of inner local steps
+performed per outer iteration  which can be Θ(n).
+The early work of [25] introduced the nice framework of gradient updates where the gradients come
+with some delays  i.e. are based on outdated iterates  and shows some robust convergence rates.
+In the machine learning setting  [26] and the later work of [27] have provided additional insights
+into these types of methods. However  these papers study the case of smooth objective functions
+of a sum structure  and so do not directly apply to general case we consider here.
+In the same
+spirit  [5] implements SGD with communication-intense updates after each example processed  al-
+lowing asynchronous updates again with some delay. For coordinate descent  the analogous ap-
+proach was studied in [28]. Both methods [5  28] are H times less efﬁcient in terms of communica-
+tion when compared to COCOA  and are designed for multi-core shared memory machines (where
+communication is as fast as memory access). They require the same amount of communication as
+naive distributed SGD / CD  which we include in our experiments in Section 6  and a slightly larger
+number of iterations due to the asynchronicity. The 1/t convergence rate shown in [5] only holds
+under strong sparsity assumptions on the data. A more recent paper [29] deepens the understand-
+ing of such methods  but still only applies to very sparse data. For general data  [30] theoretically
+shows that 1/ε2 communications rounds of single vectors are enough to obtain ε-quality for linear
+classiﬁers  with the rate growing with K 2 in the number of workers. Our new analysis here makes
+the dependence on 1/ε logarithmic.
+
+6
+
+6 Experiments
+
+In this section  we compare COCOA to traditional mini-batch versions of stochastic dual coordinate
+ascent and stochastic gradient descent  as well as the locally-updating version of stochastic gradient
+descent. We implement mini-batch SDCA (denoted mini-batch-CD) as described in [4  2]. The
+SGD-based methods are mini-batch and locally-updating versions of Pegasos [16]  differing only in
+whether the primal vector is updated locally on each inner iteration or not  and whether the resulting
+combination/communication of the updates is by an average over the total size KH of the mini-
+batch (mini-batch-SGD) or just over the number of machines K (local-SGD). For each algorithm 
+we additionally study the effect of scaling the average by a parameter βK  as ﬁrst described in [4] 
+while noting that it is a beneﬁt to avoid having to tune this data-dependent parameter.
+We apply these algorithms to standard hinge loss (cid:96)2-regularized support vector machines  using
+implementations written in Spark on m1.large Amazon EC2 instances [1]. Though this non-smooth
+case is not yet covered in our theoretical analysis  we still see remarkable empirical performance.
+Our results indicate that COCOA is able to converge to .001-accurate solutions nearly 25× as fast
+compared the other algorithms  when all use βK = 1. The datasets used in these analyses are
+summarized in Table 1  and were distributed among K = 4  8  and 32 nodes  respectively. We use
+the same regularization parameters as speciﬁed in [16  17].
+
+Table 1: Datasets for Empirical Study
+
+Dataset
+cov
+rcv1
+imagenet
+
+Training (n)
+522 911
+677 399
+32 751
+
+Features (d)
+54
+47 236
+160 000
+
+Sparsity
+22.22% 1e-6
+0.16% 1e-6
+100% 1e-5
+
+λ Workers (K)
+4
+8
+32
+
+In comparing each algorithm and dataset  we analyze progress in primal objective value as a function
+of both time (Figure 1) and communication (Figure 2). For all competing methods  we present the
+result for the batch size (H) that yields the best performance in terms of reduction in objective
+value over time. For the locally-updating methods (COCOA and local-SGD)  these tend to be larger
+batch sizes corresponding to processing almost all of the local data at each outer step. For the
+non-locally updating mini-batch methods  (mini-batch SDCA [4] and mini-batch SGD [16])  these
+typically correspond to smaller values of H  as averaging the solutions to guarantee safe convergence
+becomes less of an impediment for smaller batch sizes.
+
+Figure 1: Primal Suboptimality vs. Time for Best Mini-Batch Sizes (H): For βK = 1  COCOA converges
+more quickly than all other algorithms  even when accounting for different batch sizes.
+
+Figure 2: Primal Suboptimality vs. # of Communicated Vectors for Best Mini-Batch Sizes (H): A clear
+correlation is evident between the number of communicated vectors and wall-time to convergence (Figure 1).
+
+7
+
+02040608010010−610−410−2100102CovTime (s)Log Primal Suboptimality 02040608010010−610−410−2100102CovCOCOA (H=1e5)minibatch−CD (H=100)local−SGD (H=1e5)batch−SGD (H=1)010020030040010−610−410−2100102RCV1Time (s)Log Primal Suboptimality 010020030040010−610−410−2100102COCOA (H=1e5)minibatch−CD (H=100)local−SGD (H=1e4)batch−SGD (H=100)020040060080010−610−410−2100102ImagenetTime (s)Log Primal Suboptimality 020040060080010−610−410−2100102ImagenetCOCOA (H=1e3)mini−batch−CD (H=1)local−SGD (H=1e3)mini−batch−SGD (H=10)05010015020025030010−610−410−2100102Cov# of Communicated VectorsLog Primal Suboptimality 05010015020025030010−610−410−2100102CovCOCOA (H=1e5)minibatch−CD (H=100)local−SGD (H=1e5)batch−SGD (H=1)010020030040050060070010−610−410−2100102RCV1# of Communicated VectorsLog Primal Suboptimality 010020030040050060070010−610−410−2100102RCV1COCOA (H=1e5)minibatch−CD (H=100)local−SGD (H=1e4)batch−SGD (H=100)05001000150020002500300010−610−410−2100102Imagenet# of Communicated VectorsLog Primal Suboptimality 05001000150020002500300010−610−410−2100102ImagenetCOCOA (H=1e3)mini−batch−CD (H=1)local−SGD (H=1e3)mini−batch−SGD (H=10)First  we note that there is a clear correlation between the wall-time spent processing each dataset
+and the number of vectors communicated  indicating that communication has a signiﬁcant effect on
+convergence speed. We see clearly that COCOA is able to converge to a more accurate solution in all
+datasets much faster than the other methods. On average  COCOA reaches a .001-accurate solution
+for these datasets 25x faster than the best competitor. This is a testament to the algorithm’s ability
+to avoid communication while still making signiﬁcant global progress by efﬁciently combining the
+local updates of each iteration. The improvements are robust for both regimes n (cid:29) d and n (cid:28) d.
+
+Figure 3: Effect of H on COCOA.
+
+Figure 4: Best βK Scaling Values for H = 1e5 and H = 100.
+
+In Figure 3 we explore the effect of H  the computation-communication trade-off factor  on the con-
+vergence of COCOA for the Cov dataset on a cluster of 4 nodes. As described above  increasing H
+decreases communication but also affects the convergence properties of the algorithm. In Figure 4 
+we attempt to scale the averaging step of each algorithm by using various βK values  for two differ-
+ent batch sizes on the Cov dataset (H = 1e5 and H = 100). We see that though βK has a larger
+impact on the smaller batch size  it is still not enough to improve the mini-batch algorithms beyond
+what is achieved by COCOA and local-SGD.
+
+7 Conclusion
+
+We have presented a communication-efﬁcient framework for distributed dual coordinate ascent algo-
+rithms that can be used to solve large-scale regularized loss minimization problems. This is crucial
+in settings where datasets must be distributed across multiple machines  and where communication
+amongst nodes is costly. We have shown that the proposed algorithm performs competitively on
+real-world  large-scale distributed datasets  and have presented the ﬁrst theoretical analysis of this
+algorithm that achieves competitive convergence rates without making additional assumptions on
+the data itself.
+It remains open to obtain improved convergence rates for more aggressive updates corresponding
+to βK > 1  which might be suitable for using the ‘safe’ updates techniques of [4] and the related
+expected separable over-approximations of [18  19]  here applied to K instead of n blocks. Further-
+more  it remains open to show convergence rates for local SGD in the same communication efﬁcient
+setting as described here.
+
+Acknowledgments. We thank Shivaram Venkataraman  Ameet Talwalkar  and Peter Richt´arik for
+fruitful discussions. MJ acknowledges support by the Simons Institute for the Theory of Computing.
+
+References
+[1] Matei Zaharia  Mosharaf Chowdhury  Tathagata Das  Ankur Dave  Murphy McCauley  Michael J
+Franklin  Scott Shenker  and Ion Stoica. Resilient Distributed Datasets: A Fault-Tolerant Abstraction
+for In-Memory Cluster Computing. NSDI  2012.
+
+[2] Tianbao Yang. Trading Computation for Communication: Distributed Stochastic Dual Coordinate Ascent.
+
+NIPS  2013.
+
+[3] Tianbao Yang  Shenghuo Zhu  Rong Jin  and Yuanqing Lin. On Theoretical Analysis of Distributed
+
+Stochastic Dual Coordinate Ascent. arXiv:1312.1031  December 2013.
+
+[4] Martin Tak´aˇc  Avleen Bijral  Peter Richt´arik  and Nathan Srebro. Mini-Batch Primal and Dual Methods
+
+for SVMs. ICML  2013.
+
+8
+
+02040608010010−610−410−2100102Time (s)Log Primal Suboptimality 02040608010010−610−410−21001021e51e41e3100102040608010010−610−410−2100102Time (s)Log Primal Suboptimality 02040608010010−610−410−2100102COCOA (βk=1)mini−batch−CD (βk=10)local−SGD (βk=1)mini−batch−sgd (βk=10)02040608010010−610−410−2100102Time (s)Log Primal Suboptimality 02040608010010−610−410−2100102COCOA (βk=1)mini−batch−CD (βk=100)local−SGD (βk=1)mini−batch−sgd (βk=1)[5] Feng Niu  Benjamin Recht  Christopher R´e  and Stephen J Wright. Hogwild!: A Lock-Free Approach to
+
+Parallelizing Stochastic Gradient Descent. NIPS  2011.
+
+[6] Martin A Zinkevich  Markus Weimer  Alex J Smola  and Lihong Li. Parallelized Stochastic Gradient
+
+Descent. NIPS 23  2010.
+
+[7] Joseph K Bradley  Aapo Kyrola  Danny Bickson  and Carlos Guestrin. Parallel Coordinate Descent for
+
+L1-Regularized Loss Minimization. ICML  2011.
+
+[8] Jakub Mareˇcek  Peter Richt´arik  and Martin Tak´aˇc. Distributed Block Coordinate Descent for Minimizing
+
+Partially Separable Functions. arXiv:1408.2467  June 2014.
+
+[9] Ion Necoara and Dragos Clipici. Efﬁcient parallel coordinate descent algorithm for convex optimiza-
+tion problems with separable constraints: Application to distributed MPC. Journal of Process Control 
+23(3):243–253  2013.
+
+[10] Martin Tak´aˇc  Peter Richt´arik  and Nathan Srebro. Primal-Dual Parallel Coordinate Descent for Machine
+
+Learning Optimization. Manuscript  2014.
+
+[11] Hsiang-Fu Yu  Cho-Jui Hsieh  Kai-Wei Chang  and Chih-Jen Lin. Large linear classiﬁcation when data
+
+cannot ﬁt in memory. the 16th ACM SIGKDD international conference  page 833  2010.
+
+[12] Hsiang-Fu Yu  Cho-Jui Hsieh  Kai-Wei Chang  and Chih-Jen Lin. Large Linear Classiﬁcation When Data
+
+Cannot Fit in Memory. ACM Transactions on Knowledge Discovery from Data  5(4):1–23  2012.
+
+[13] Shai Shalev-Shwartz and Tong Zhang. Stochastic Dual Coordinate Ascent Methods for Regularized Loss
+
+Minimization. JMLR  14:567–599  2013.
+
+[14] Herbert Robbins and Sutton Monro. A Stochastic Approximation Method. The Annals of Mathematical
+
+Statistics  22(3):400–407  1951.
+
+[15] L´eon Bottou. Large-Scale Machine Learning with Stochastic Gradient Descent. COMPSTAT’2010 -
+
+Proceedings of the 19th International Conference on Computational Statistics  pages 177–187  2010.
+
+[16] Shai Shalev-Shwartz  Yoram Singer  Nathan Srebro  and Andrew Cotter. Pegasos: Primal Estimated
+
+Sub-Gradient Solver for SVM. Mathematical Programming  127(1):3–30  2010.
+
+[17] Cho-Jui Hsieh  Kai-Wei Chang  Chih-Jen Lin  S Sathiya Keerthi  and S Sundararajan. A Dual Coordinate
+
+Descent Method for Large-scale Linear SVM. ICML  2008.
+
+[18] Peter Richt´arik and Martin Tak´aˇc. Iteration complexity of randomized block-coordinate descent methods
+
+for minimizing a composite function. Mathematical Programming  144(1-2):1–38  April 2014.
+
+[19] Peter Richt´arik and Martin Tak´aˇc. Parallel Coordinate Descent Methods for Big Data Optimization.
+
+arXiv:1212.0873  2012.
+
+[20] Peter Richt´arik and Martin Tak´aˇc. Distributed Coordinate Descent Method for Learning with Big Data.
+
+arXiv:1310.2059  2013.
+
+[21] Olivier Fercoq  Zheng Qu  Peter Richt´arik  and Martin Tak´aˇc. Fast Distributed Coordinate Descent for
+Non-Strongly Convex Losses. IEEE Workshop on Machine Learning for Signal Processing  May 2014.
+[22] Yuchen Zhang  John C Duchi  and Martin J Wainwright. Communication-Efﬁcient Algorithms for Statis-
+
+tical Optimization. JMLR  14:3321–3363  November 2013.
+
+[23] Gideon Mann  Ryan McDonald  Mehryar Mohri  Nathan Silberman  and Daniel D Walker. Efﬁcient
+
+Large-Scale Distributed Training of Conditional Maximum Entropy Models. NIPS  1231–1239  2009.
+
+[24] Ohad Shamir  Nathan Srebro  and Tong Zhang. Communication-Efﬁcient Distributed Optimization using
+
+an Approximate Newton-type Method. ICML  32(1):1000–1008  2014.
+
+[25] John N Tsitsiklis  Dimitri P Bertsekas  and Michael Athans. Distributed asynchronous deterministic and
+
+stochastic gradient optimization algorithms. IEEE Trans. on Automatic Control  31(9):803–812  1986.
+
+[26] Ofer Dekel  Ran Gilad-Bachrach  Ohad Shamir  and Lin Xiao. Optimal Distributed Online Prediction
+
+Using Mini-Batches. JMLR  13:165–202  2012.
+
+[27] Alekh Agarwal and John C Duchi. Distributed Delayed Stochastic Optimization. NIPS  873–881  2011.
+[28] Ji Liu  Stephen J Wright  Christopher R´e  Victor Bittorf  and Srikrishna Sridhar. An Asynchronous
+
+Parallel Stochastic Coordinate Descent Algorithm. ICML  2014.
+
+[29] John C Duchi  Michael I Jordan  and H Brendan McMahan. Estimation  Optimization  and Parallelism
+
+when Data is Sparse. NIPS  2013.
+
+[30] Maria-Florina Balcan  Avrim Blum  Shai Fine  and Yishay Mansour. Distributed Learning  Communica-
+
+tion Complexity and Privacy. COLT  23:26.1–26.22  2012.
+
+9
+
+,Martin Jaggi
+Virginia Smith
+Martin Takac
+Jonathan Terhorst
+Sanjay Krishnan
+Thomas Hofmann
+Michael Jordan
+Stefan Webb
+Adam Golinski
+Rob Zinkov
+Siddharth N
+Tom Rainforth
+Yee Whye Teh
+Frank Wood

@@ -1,0 +1,814 @@
+2014,Stochastic variational inference for hidden Markov models,Variational inference algorithms have proven successful for Bayesian analysis in large data settings  with recent advances using stochastic variational inference (SVI). However  such methods have largely been studied in independent or exchangeable data settings. We develop an SVI algorithm to learn the parameters of hidden Markov models (HMMs) in a time-dependent data setting. The challenge in applying stochastic optimization in this setting arises from dependencies in the chain  which must be broken to consider minibatches of observations. We propose an algorithm that harnesses the memory decay of the chain to adaptively bound errors arising from edge effects. We demonstrate the effectiveness of our algorithm on synthetic experiments and a large genomics dataset where a batch algorithm is computationally infeasible.,Stochastic Variational Inference for Hidden Markov
+
+Models
+
+Nicholas J. Foti†  Jason Xu†  Dillon Laird  and Emily B. Fox
+
+{nfoti@stat jasonxu@stat dillonl2@cs ebfox@stat}.washington.edu
+
+University of Washington
+
+Abstract
+
+Variational inference algorithms have proven successful for Bayesian analysis
+in large data settings  with recent advances using stochastic variational infer-
+ence (SVI). However  such methods have largely been studied in independent or
+exchangeable data settings. We develop an SVI algorithm to learn the parameters
+of hidden Markov models (HMMs) in a time-dependent data setting. The chal-
+lenge in applying stochastic optimization in this setting arises from dependencies
+in the chain  which must be broken to consider minibatches of observations. We
+propose an algorithm that harnesses the memory decay of the chain to adaptively
+bound errors arising from edge effects. We demonstrate the effectiveness of our
+algorithm on synthetic experiments and a large genomics dataset where a batch
+algorithm is computationally infeasible.
+
+1
+
+Introduction
+
+Modern data analysis has seen an explosion in the size of the datasets available to analyze. Signiﬁ-
+cant progress has been made scaling machine learning algorithms to these massive datasets based on
+optimization procedures [1  2  3]. For example  stochastic gradient descent employs noisy estimates
+of the gradient based on minibatches of data  avoiding a costly gradient computation using the full
+dataset [4]. There is considerable interest in leveraging these methods for Bayesian inference since
+traditional algorithms such as Markov chain Monte Carlo (MCMC) scale poorly to large datasets 
+though subset-based MCMC methods have been recently proposed as well [5  6  7  8].
+Variational Bayes (VB) casts posterior inference as a tractable optimization problem by minimizing
+the Kullback-Leibler divergence between the target posterior and a family of simpler variational
+distributions. Thus  VB provides a natural framework to incorporate ideas from stochastic opti-
+mization to perform scalable Bayesian inference. Indeed  a scalable modiﬁcation to VB harnessing
+stochastic gradients—stochastic variational inference (SVI)—has recently been applied to a variety
+of Bayesian latent variable models [9  10]. Minibatch-based VB methods have also proven effective
+in a streaming setting where data arrives sequentially [11].
+However  these algorithms have been developed assuming independent or exchangeable data. One
+exception is the SVI algorithm for the mixed-membership stochastic block model [12]  but indepen-
+dence at the level of the generative model must be exploited. SVI for Bayesian time series including
+HMMs was recently considered in settings where each minibatch is a set of independent series [13] 
+though in this setting again dependencies do not need to be broken.
+In contrast  we are interested in applying SVI to very long time series. As a motivating example 
+consider the application in Sec. 4 of a genomics dataset consisting of T = 250 million observa-
+tions in 12 dimensions modeled via an HMM to learn human chromatin structure. An analysis of
+the entire sequence is computationally prohibitive using standard Bayesian inference techniques for
+
+† Co-ﬁrst authors contributed equally to this work.
+
+1
+
+HMMs due to a per-iteration complexity linear in T . Unfortunately  despite the simple chain-based
+dependence structure  applying a minibatch-based method is not obvious. In particular  there are two
+potential issues immediately arising in sampling subchains as minibatches: (1) the subsequences are
+not mutually independent  and (2) updating the latent variables in the subchain ignores the data
+outside of the subchain introducing error. We show that for (1)  appropriately scaling the noisy sub-
+chain gradients preserves unbiased gradient estimates. To address (2)  we propose an approximate
+message-passing scheme that adaptively bounds error by accounting for memory decay of the chain.
+We prove that our proposed SVIHMM algorithm converges to a local mode of the batch objective 
+and empirically demonstrate similar performance to batch VB in signiﬁcantly less time on syn-
+thetic datasets. We then consider our genomics application and show that SVIHMM allows efﬁcient
+Bayesian inference on this massive dataset where batch inference is computationally infeasible.
+
+2 Background
+
+2.1 Hidden Markov models
+
+Hidden Markov models (HMMs) [14] are a class of discrete-time doubly stochastic processes con-
+sisting of observations yt and latent states xt ∈ {1  . . .   K} generated by a discrete-valued Markov
+chain. Speciﬁcally  for y = (y1  . . .   yT ) and x = (x1  . . .   xT )  the joint distribution factorizes as
+
+p(x  y) = π0(x1)p(y1|x1)
+
+p(xt|xt−1  A)p(yt|xt  φ)
+
+(1)
+
+T(cid:89)
+
+t=2
+
+K(cid:89)
+
+i j=1 is the transition matrix with Aij = Pr(xt = j|xt−1 = i)  φ = {φk}K
+where A = [Aij]K
+k=1
+the emission parameters  and π0 the initial distribution. We denote the set of HMM parameters
+as θ = (π0  A  φ). We assume that the underlying chain is irreducible and aperiodic so that a
+stationary distribution π exists and is unique. Furthermore  we assume that we observe the sequence
+at stationarity so that π0 = π  where π is given by the leading left-eigenvector of A. As such  we do
+not seek to learn π0 in the setting of observing a single realization of a long chain.
+We specify conjugate Dirichlet priors on the rows of the transition matrix as
+
+p(A) =
+
+Dir(Ai: | αA
+j ).
+
+(2)
+
+j=1
+
+Here  Dir(π | α) denotes a K-dimensional Dirichlet distribution with concentration parameters α.
+Although our methods are more broadly applicable  we focus on HMMs with multivariate Gaussian
+emissions where φk = {µk  Σk}  with conjugate normal-inverse-Wishart (NIW) prior
+φk = (µk  Σk) ∼ NIW(µ0  κ0  Σ0  ν0).
+
+(3)
+For simplicity  we suppress dependence on θ and write π(x0)  p(xt|xt−1)  and p(yt|xt) throughout.
+
+yt | xt ∼ N (yt | µxt  Σxt) 
+
+2.2 Structured mean-ﬁeld VB for HMMs
+
+We are interested in the posterior distribution of the state sequence and parameters given an obser-
+vation sequence  denoted p(x  θ|y). While evaluating marginal likelihoods  p(y|θ)  and most prob-
+able state sequences  arg maxx p(x|y  θ)  are tractable via the forward-backward (FB) algorithm
+when parameter values θ are ﬁxed [14]  exact computation of the posterior is intractable for HMMs.
+Markov chain Monte Carlo (MCMC) provides a widely used sampling-based approach to posterior
+inference in HMMs [15  16]. We instead focus on variational Bayes (VB)  an optimization-based
+approach that approximates p(x  θ|y) by a variational distribution q(θ  x) within a simpler family.
+Typically  for HMMs a structured mean ﬁeld approximation is considered:
+
+Note that making a full mean ﬁeld assumption in which q(x) =(cid:81)T
+
+(4)
+breaking dependencies only between the parameters θ = {A  φ} and latent state sequence x [17].
+i=1 q(xi) loses crucial information
+
+q(θ  x) = q(A)q(φ)q(x) 
+
+about the latent chain needed for accurate inference.
+
+2
+
+Each factor in Eq. (4) is endowed with its own variational parameter and is set to be in the same
+exponential family distribution as its respective complete conditional. The variational parameters
+are optimized to maximize the evidence lower bound (ELBO) L:
+
+ln p(y) ≥ Eq [ln p(θ)] − Eq [ln q(θ)] + Eq [ln p(y  x|θ)] − Eq [ln q(x)] := L(q(θ)  q(x)).
+Maximizing L is equivalent to minimizing the KL divergence KL(q(x  θ)||p(x  θ|y)) [18].
+In
+practice  we alternate updating the global parameters θ—those coupled to the entire set of
+observations—and the local variables {xt}—a variable corresponding to each observation  yt. De-
+tails on computing the terms in the equations and algorithms that follow are in the Supplement.
+The global update is derived by differentiating L with respect to the global variational parameters
+[17]. Assuming a conjugate exponential family leads to a simple coordinate ascent update [9]:
+
+(5)
+
+w = u + Eq(x) [t(x  y)] .
+
+(6)
+Here  t(x  y) denotes the vector of sufﬁcient statistics  and w = (wA  wφ) and u = (uA  uφ) the
+variational parameters and model hyperparameters  respectively  in natural parameter form.
+The local update is derived analogously  yielding the optimal variational distribution over the latent
+sequence:
+
+t=2
+
+Eq(A)
+
+T(cid:88)
+
+(cid:3) +
+
+(cid:2)ln Axt−1 xt
+
+T(cid:88)
+(cid:101)p(yt|xt = k) := exp(cid:2)Eq(φ) ln p(yt|xt = k)(cid:3) .
+
+Eq(φ) [ln p(yt|xt)]
+
+t=1
+
+(cid:101)Aj k := exp(cid:2)Eq(A) ln(Aj k)(cid:3)
+
+Compare with Eq. (1). Here  we have replaced probabilities by exponentiated expected log proba-
+bilities under the current variational distribution. To determine the optimal q∗(x) in Eq. (7)  deﬁne:
+
+We estimate π with ˆπ being the leading eigenvector of Eq(A)[A]. We then use ˆπ  ˜A = ((cid:101)Aj k)  and
+˜p = {(cid:101)p(yt|xt = k)  k = 1  . . .   K  t = 1  . . .   T} to run a forward-backward algorithm  produc-
+
+ing forward messages α and backward messages β which allow us to compute q∗(xt = k) and
+q∗(xt−1 = j  xt = k). [19  17]. See the Supplement.
+
+(8)
+
+q∗(x) ∝ exp
+
+Eq(A) [ln π(x1)] +
+
+(cid:32)
+
+(cid:33)
+
+.
+
+(7)
+
+2.3 Stochastic variational inference for non-sequential models
+
+Even in non-sequential models  the batch VB algorithm requires an entire pass through the dataset
+for each update of the global parameters. This can be costly in large datasets  and wasteful when
+local-variable passes are based on uninformed initializations of the global parameters or when many
+data points contain redundant information.
+To cope with this computational challenge  stochastic variational inference (SVI) [9] leverages a
+Robbins-Monro algorithm [1] to optimize the ELBO via stochastic gradient ascent. When the data
+are independent  the ELBO in Eq. (5) can be expressed as
+
+i=1
+
+L = Eq(θ) [ln p(θ)] − Eq(θ) [ln q(θ)] +
+
+Eq(xi) [ln p(yi  xi|θ)] − Eq(x) [ln q(x)] .
+
+(9)
+If a single observation index s is sampled uniformly s ∼ Unif(1  . . .   T )  the ELBO corresponding
+to (xs  ys) as if it were replicated T times is given by
+
+Ls = Eq(θ) [ln p(θ)] − Eq(θ) [ln q(θ)] + T ·(cid:0)Eq(xs) [ln p(ys  xs|θ)] − Eq(xs) [ln q(xs)](cid:1)  
+
+(10)
+and it is clear that Es[Ls] = L. At each iteration n of the SVI algorithm  a data point ys is sampled
+and its local q∗(xs) is computed given the current estimate of global variational parameters wn.
+Next  the global update is performed via a noisy  unbiased gradient step (Es[ ˆ∇wLs] = ∇wL).
+When all pairs of distributions in the model are conditionally conjugate  it is cheaper to compute the
+
+stochastic natural gradient (cid:101)∇wLs  which additionally accounts for the information geometry of the
+We show the form of (cid:101)∇wLs in Sec. 3.2  speciﬁcally in Eq. (13) with details in the Supplement.
+
+wn+1 = wn + ρn(cid:101)∇wLs(wn).
+
+distribution [9]. The resulting stochastic natural gradient step with step-size ρn is:
+
+(11)
+
+T(cid:88)
+
+3
+
+3 Stochastic variational inference for HMMs
+
+The batch VB algorithm of Sec. 2.2 becomes prohibitively expensive as the length of the chain T
+becomes large. In particular  the forward-backward algorithm in the local step takes O(K 2T ) time.
+Instead  we turn to a subsampling approach  but naively applying SVI from Sec. 2.3 fails in the
+HMM setting: decomposing the sum over local variables into a sum of independent terms as in
+Eq. (9) ignores crucial transition counts  equivalent to making a full mean-ﬁeld approximation.
+Extending SVI to HMMs requires additional considerations due to the dependencies between the ob-
+servations. It is clear that subchains of consecutive observations rather than individual observations
+are necessary to capture the transition structure (see Sec. 3.1). We show that if the local variables
+of each subchain can be exactly optimized  then stochastic gradients computed on subchains can be
+scaled to preserve unbiased estimates of the full gradient (see Sec. 3.2).
+Unfortunately  as we show in Sec. 3.3  the local step becomes approximate due to edge effects:
+local variables are incognizant of nodes outside of the subchain during the forward-backward pass.
+Although an exact scheme requires message passing along the entire chain  we harness the memory
+decay of the latent Markov chain to guarantee that local state beliefs in each subchain form an -
+approximation q(x) to the full-data beliefs q∗(x). We achieve these approximations by adaptively
+buffering the subchains with extra observations based on current global parameter estimates. We
+then prove that for  sufﬁciently small  the noisy gradient computed using q(x) corresponds to an
+ascent direction in L  guaranteeing convergence of our algorithm to a local optimum. We refer to
+our algorithm  which is outlined in Alg. 1  as SVIHMM.
+
+Algorithm 1 Stochastic Variational Inference for HMMs (SVIHMM)
+0   wφ
+1: Initialize variational parameters (wA
+2: while (convergence criterion is not met) do
+3:
+4:
+5: Global update: wn+1 = wn(1 − ρn) + ρn(u + cT Eq(xS )[t(xS  yS)])
+6: end while
+
+Local step: Compute ˆπ  (cid:101)A (cid:101)pS and run q(xS) = ForwardBackward(yS  ˆπ  (cid:101)A (cid:101)pS).
+
+Sample a subchain yS ⊂ {y1  . . .   yT} with S ∼ p(S)
+
+0 ) and choose stepsize schedule ρn  n = 1  2  . . .
+
+3.1 ELBO for subsets of data
+
+Unlike the independent data case (Eq. (9))  the local term in the HMM setting decomposes as
+
+T(cid:88)
+
+T(cid:88)
+
+ln p(y  x|θ) = ln π(x1) +
+
+ln Axt−1 xt +
+
+ln p(yt|xt).
+
+(12)
+
+Because of the paired terms in the ﬁrst sum  it is necessary to consider consecutive observations
+to learn transition structure. For the SVIHMM algorithm  we deﬁne our basic sampling unit as
+subchains yS = (yS
+L)  where S refers to the associated indices. We denote the ELBO
+
+restricted to yS as LS  and associated natural gradient as (cid:101)∇wLS.
+
+1   . . .   yS
+
+t=2
+
+i=1
+
+3.2 Global update
+We detail the global update assuming we have optimized q∗(x) exactly (i.e.  as in the batch set-
+ting)  although this assumption will be relaxed as discussed in Sec 3.3. Paralleling Sec. 2.3  the
+global SVIHMM step involves updating the global variational parameters w via stochastic (natural)
+gradient ascent based on q∗(xS)  the beliefs corresponding to our current subchain S.
+
+Recall from Eq. (10) that the original SVI algorithm maintains Es[(cid:101)∇wLs] = (cid:101)∇wL by scaling the
+
+gradient based on an individual observation s by the total number of observations T . In the HMM
+case  we analogously derive a batch factor vector c = (cA  cφ) such that
+
+ES[(cid:101)∇wLS] = (cid:101)∇wL with
+
+(cid:101)∇wLS = u + cT Eq∗(xS )
+
+(13)
+The speciﬁc form of Eq. (13) for Gaussian emissions is in the Supplement. Now  the Robbins-Monro
+average in Eq. (11) can be written as
+
+(cid:2)t(xS  yS)(cid:3) − w.
+
+wn+1 = wn(1 − ρn) + ρn(u + cT Eq∗(xS )[t(xS  yS)]).
+
+(14)
+
+4
+
+When the noisy natural gradients (cid:101)∇wLS are independent and unbiased estimates of the true natural
+as long as step-sizes ρn satisfy(cid:80)
+gradient  the iterates in Eq. (14) converge to a local maximum of L under mild regularity conditions
+n ρn = ∞ [2  9]. In our case  the noisy gradients
+are necessarily correlated even for independently sampled subchains due to dependence between
+observations (y1  . . .   yT ). However  as detailed in [20]  unbiasedness sufﬁces for convergence of
+Eq. (14) to a local mode.
+
+n < ∞  and(cid:80)
+
+n ρ2
+
+Batch factor Recalling our assumption of being at stationarity  Eq(π) ln π(x1) = Eq(π) ln π(xi)
+for all i. If we sample subchains from the uniform distribution over subchains of length L  denoted
+p(S)  then we can write
+
+(cid:20)
+
+(cid:21)
+
+(cid:34)T−L+1(cid:88)
+
+t=1
+
+T(cid:88)
+
+t=2
+
+(cid:35)
+
+T(cid:88)
+
+t=1
+
+Eq ln p(yS  xS|θ)
+
+≈ p(S)Eq
+
+ES
+
+ln π(xt) + (L − 1)
+
+ln Axt−1 xt + L
+
+p(yt|xt)
+
+ 
+
+(15)
+where the expectation is with respect to (π  A  φ); this is detailed in the Supplement. The approx-
+imate equality in Eq. (15) arises because while most transitions appear in L − 1 subchains  those
+near the endpoints of the full chain do not  e.g.  x1 and xT appear in only one subchain. This error
+becomes negligible as the length of the HMM increases. Since p(S) is uniform over all length L sub-
+chains  by linearity of expectation the batch factor c = (cA  cφ) is given by cA = (T−L+1)/(L−1) 
+cφ = (T − L + 1)/L. Other choices of p(S) can be used by considering the appropriate version of
+Eq. (15) analogously to [12]  generally with a batch factor cS varying with each subset yS.
+
+3.3 Local update
+
+The optimal SVIHMM local variational distribution arises just as in the batch case of Eq. (7)  but
+with time indices restricted to the length L subchain yS:
+
+(cid:32)
+
+(cid:2)ln π(xS
+1 )(cid:3) +
+
+L(cid:88)
+
+(cid:96)=2
+
+(cid:104)
+
+q∗(xS) ∝ exp
+
+Eq(A)
+
+(cid:105)
+
+L(cid:88)
+
+(cid:96)=1
+
+(cid:2)ln p(yS
+
+(cid:96) |xS
+
+(cid:96) )(cid:3)(cid:33)
+
+. (16)
+
+Eq(A)
+
+ln AxS
+
+(cid:96)−1 xS
+(cid:96)
+
++
+
+Eq(φ)
+
+(cid:96) |xS
+
+previous subchains—to form ˆπ  (cid:101)A (cid:101)pS = {(cid:101)p(yS
+
+To compute these local beliefs  we use our current q(A)  q(φ)—which have been informed by all
+(cid:96) = k) ∀k  (cid:96) = 1  . . .   L}  with these parameters
+deﬁned as in the batch case. We then use these parameters in a forward-backward algorithm detailed
+in the Supplement. However  this message passing produces only an approximate optimization due
+to loss of information incurred at the ends of the subchain. Speciﬁcally  for yS = (yt  . . .   yt+L) 
+the forward messages coming from y1  . . .   yt−1 are not available to yt  and similarly the backwards
+messages from yt+L+1  . . .   yT are not available to yt+L.
+Recall our assumption in the global update step that q∗(xS) corresponds to a subchain of the full-
+data optimal beliefs q∗(x). Here  we see that this assumption is assuredly false; instead  we analyze
+the implications of using approximate local subchain beliefs and aim to ameliorate the edge effects.
+
+Buffering subchains To cope with the subchain edge effects  we augment the subchain S with
+enough extra observations on each end so that the local state beliefs  q(xi)  i ∈ S  are within an
+-ball of q∗(xi) — those had we considered the entire chain. The practicality of this approach arises
+from the approximate ﬁnite memory of the process. In particular  consider performing a forward-
+L+τ ) leading to approximate beliefs ˜qτ (xi). Given  > 0  deﬁne τ
+backward pass on (xS
+as the smallest buffer length τ such that
+
+1−τ   . . .   xS
+
+||˜qτ (xi) − q∗(xi)||1 ≤ .
+
+max
+i∈S
+
+(17)
+
+The τ that satisﬁes Eq. (17) determines the number of observations used to buffer the subchain. After
+improving subchain beliefs  we discard ˜qτ (xi)  i ∈ buffer  prior to the global update. As will be
+seen in Sec. 4  in practice the necessary τ is typically very small relative to the lengthy observation
+sequences of interest.
+Buffering subchains is related to splash belief propagation (BP) for parallel inference in undirected
+graphical models  where the belief at any given node is monitored based on locally-aware message
+passing in order to maintain a good approximation to the true belief [21]. Unlike splash BP  we
+
+5
+
+embed the buffering scheme inside an iterative procedure for updating both the local latent structure
+and the global parameters  which affects the -approximation in future iterations. Likewise  we wish
+to maintain the approximation on an entire subchain  not just at a single node.
+Even in settings where parameters θ are known  as in splash BP  analytically choosing τ is generally
+infeasible. As such  we follow the approach of splash BP to select an approximate τ. We then go
+further by showing that SVIHMM still converges using approximate messages within an uncertain
+parameter setting where θ is learned simultaneously with the state sequence x.
+Speciﬁcally  we approximate τ by monitoring the change in belief residuals with a sub-routine
+GrowBuf  outlined in Alg. 2  that iteratively expands a buffer qold → qnew around a given subchain
+yS. Growbuf terminates when all belief residuals satisfy
+
+||q(xi)new − q(xi)old||1 ≤ .
+
+max
+i∈S
+
+(18)
+
+The GrowBuf sub-routine can be computed efﬁciently due to (1) monotonicity of the forward and
+backward messages so that only residuals at endpoints  q(xS
+L)  need be considered  and
+(2) the reuse of computations. Speciﬁcally  the forward-backward pass can be rooted at the midpoint
+of yS so that messages to the endpoints can be efﬁciently propagated  and vice versa [22].
+Furthermore  choosing sufﬁciently small  guarantees that the noisy natural gradient lies in the same
+half-plane as the true natural gradient  a sufﬁcient condition for maintaining convergence when using
+approximate gradients [23]; the proof is presented in the Supplement.
+
+1 ) and q(xS
+
+Algorithm 2 GrowBuf procedure.
+1: Input: subchain S  min buffer length u ∈ Z+  error tolerance  > 0.
+
+2: Initialize qold(xS) = ForwardBackward(yS  ˆπ  (cid:101)A (cid:101)pS) and set Sold = S.
+
+Grow buffer Snew by extending Sold by u observations in each direction.
+qnew(xSnew
+
+) = ForwardBackward(ySnew
+
+  ˆπ  (cid:101)A (cid:101)pSnew )  reusing messages from Sold.
+
+3: while true do
+4:
+5:
+6:
+7:
+8:
+9:
+10: end while
+
+if(cid:12)(cid:12)(cid:12)(cid:12)qnew(xS) − qold(xS)(cid:12)(cid:12)(cid:12)(cid:12) <  then
+
+return q∗(xS) = qnew(xS)
+
+end if
+Set Sold = Snew and qold = qnew.
+
+3.4 Minibatches for variance mitigation and their effect on computational complexity
+
+Stochastic gradient algorithms often beneﬁt from sampling multiple observations in order to reduce
+the variance of the gradient estimates at each iteration. We use a similar idea in SVIHMM by
+sampling a minibatch B = (yS1  . . .   ySM ) consisting of M subchains. If the latent Markov chain
+tends to dwell in one component for extended periods  sampling one subchain may only contain
+information about a select number of states observed in that component.
+Increasing the length
+of this subchain may only lead to redundant information from this component. In contrast  using a
+minibatch of many smaller subchains may discover disparate components of the chain at comparable
+computational cost  accelerating learning and leading to a better local optimum. However  subchains
+must be sufﬁciently long to be informative of transition dynamics. In this setting  the local step on
+each subchain is identical; summing over subchains in the minibatch yields the gradient update:
+
+(cid:2)t(xS  yS)(cid:3)   wn+1 = wn(1 − ρn) + ρn
+
+(cid:18)
+
+u +
+
+ˆwB
+|B|
+
+(cid:19)
+
+.
+
+(cid:88)
+
+S∈B
+
+ˆwB =
+
+cT Eq(xS )
+
+We see that the computational complexity of SVIHMM is O(K 2(L + 2τ)M )  leading to signiﬁcant
+efﬁciency gains compared to O(K 2T ) in batch inference when (L + 2τ)M << T .
+
+4 Experiments
+
+We evaluate the performance of SVIHMM compared to batch VB on synthetic experiments designed
+to illustrate the trade off between the choice of subchain length L and the number of subchains per
+
+6
+
+Table 1: Runtime and predictive log-probability (without GrowBuf) on RC data.
+
+(cid:98)L/2(cid:99)
+100
+500
+1000
+batch
+
+Runtime (sec.)
+2.74 ± 0.001
+11.79 ± 0.004
+23.17 ± 0.006
+1240.73 ± 0.370
+
+Avg. iter. time (sec.)
+
+0.03 ± 0.000
+0.12 ± 0.000
+0.23 ± 0.000
+248.15 ± 0.074
+
+log-predictive
+−5.915 ± 0.004
+−5.850 ± 0.000
+−5.850 ± 0.000
+−5.840 ± 0.000
+
+minibatch M. We also demonstrate the utility of GrowBuf. We then apply our algorithm to gene
+segmentation in a large human chromatin data set.
+
+Synthetic data We create two synthetic datasets with T = 10  000 observations and K = 8
+latent states. The ﬁrst  called diagonally dominant (DD)  illustrates the potential beneﬁt of large
+M  the number of sampled subchains per minibatch. The Markov chain heavily self-transitions so
+that most subchains contain redundant information with observations generated from the same latent
+state. Although transitions are rarely observed  the emission means are set to be distinct so that this
+example is likelihood-dominated and highly identiﬁable. Thus  ﬁxing a computational budget  we
+expect large M to be preferable to large L  covering more of the observation sequence and avoiding
+poor local modes arising from redundant information.
+The second dataset we consider contains two reversed cycles (RC): the Markov chain strongly tran-
+sitions from states 1 → 2 → 3 → 1 and 5 → 7 → 6 → 5 with a small probability of transitioning
+between cycles via bridge states 4 and 8. The emission means for the two cycles are very similar
+but occur in reverse order with respect to the transitions. Transition information in observing long
+enough dynamics is thus crucial to identify between states 1  2  3 and 5  6  7  and a large enough L
+is imperative. The Supplement contains details for generating both synthetic datasets.
+We compare SVIHMM to batch VB on these two synthetic examples. For each per parameter setting 
+we ran 20 random restarts of SVIHMM for 100 iterations and batch VB until convergence of the
+ELBO. A forgetting rate κ parametrizes step sizes ρn = (1 + n)−κ. We ﬁx the total number of
+observations L × M used per iteration of SVIHMM such that increasing M implies decreasing L
+(and vice versa).
+In Fig. 1(a) we compare || ˆA−A||F   where A is the true transition matrix and ˆA its learned variational
+mean. We see trends one would expect: the small L  large M settings achieve better performance
+for the DD example  but the opposite holds for RC  with (cid:98)L/2(cid:99) = 1 signiﬁcantly underperforming.
+(Of course  allowing large L and M is always preferable  except computationally.) Under appro-
+priate settings in both cases  we achieve comparable performance to batch VB. In Fig. 1(b)  we see
+similar trends in terms of predictive log-probability holding out 10% of the observations as a test
+set and using 5-fold cross validation. Here  we actually notice that SVIHMM often achieves higher
+predictive log-probability than batch VB  which is attributed to the fact that stochastic algorithms
+can ﬁnd better local modes than their non-random counterparts.
+A timing comparison of SVIHMM to batch VB with T = 3 million is presented in Table 4. All
+settings of SVIHMM run faster than even a single iteration of batch  with only a negligible change
+in predictive log-likelihood. Further discussion on these timing results is in the Supplement.
+Motivated by the demonstrated importance of choice of L  we now turn to examine the impact of
+the GrowBuf routine via predictive log-probability. In Fig. 1(b)  we see a noticeable improvement
+for small L settings when GrowBuf is incorporated (the dashed lines in Fig. 1(b)). In particular 
+the RC example is now learning dynamics of the chain even with (cid:98)L/2(cid:99) = 1  which was not
+possible without buffering. GrowBuf thus provides robustness by guarding against poor choice of
+L. We note that the buffer routine does not overextend subchains  on average growing by only ≈ 8
+observations with  = 1×10−6. Since the number of observations added is usually small  GrowBuf
+does not signiﬁcantly add to per-iteration computational cost (see the Supplement).
+Human chromatin segmentation We apply the SVIHMM algorithm to a massive human chro-
+matin dataset provided by the ENCODE project [24]. This data was studied in [25] with the goal
+of unsupervised pattern discovery via segmentation of the genome. Regions sharing the same labels
+have certain common properties in the observed data  and because the labeling at each position is
+unknown but inﬂuenced by the label at the previous position  an HMM is a natural model [26].
+
+7
+
+(a)
+
+(b)
+
+Figure 1: (a) Transition matrix error varying L with L × M ﬁxed.
+GrowBuf. Batch results denoted by horizontal red line in both ﬁgures.
+
+(b) Effect of incorporating
+
+We were provided with 250 million observations consisting of twelve assays carried out in the
+chronic myeloid leukemia cell line K562. We analyzed the data using SVIHMM on an HMM with
+25 states and 12 dimensional Gaussian emissions. We compare our performance to the correspond-
+ing segmentation learned by an expectation maximization (EM) algorithm applied to a more ﬂexible
+dynamic Bayesian network model (DBN) [27]. Due to the size of the dataset  the analysis of [27]
+requires breaking the chain into several blocks  severing long range dependencies.
+We assess performance by comparing the false discovery rate (FDR) of predicting active promoter
+elements in the sequence. The lowest (best) FDR achieved with SVIHMM over 20 random restarts
+trials was .999026 using (cid:98)L/2(cid:99) = 2000  M = 50  κ = .51  comparable and slightly lower than
+the .999038 FDR obtained using DBN-EM on the severed data [27]. We emphasize that even when
+restricted to a simpler HMM model  learning on the full data via SVIHMM attains similar results to
+that of [27] with signiﬁcant gains in efﬁciency. In particular  our SVIHMM runs require only under
+an hour for a ﬁxed 100 iterations  the maximum iteration limit speciﬁed in the DBN-EM approach.
+In contrast  even with a parallelized implementation over the broken chain  the DBN-EM algorithm
+can take days. In conclusion  SVIHMM enables scaling to the entire dataset  allowing for a more
+principled approach by utilizing the data jointly.
+
+5 Discussion
+
+We have presented stochastic variational inference for HMMs  extending such algorithms from in-
+dependent data settings to handle time dependence. We elucidated the complications that arise when
+sub-sampling dependent observations and proposed a scheme to mitigate the error introduced from
+breaking dependencies. Our approach provides an adaptive technique with provable guarantees for
+convergence to a local mode. Further extensions of the algorithm in the HMM setting include adap-
+tively selecting the length of meta-observations and parallelizing the local step when the number of
+meta-observations is large. Importantly  these ideas generalize to other settings and can be applied to
+Bayesian nonparametric time series models  general state space models  and other graph structures
+with spatial dependencies.
+
+Acknowledgements
+
+This work was supported in part by the TerraSwarm Research Center sponsored by MARCO and DARPA 
+DARPA Grant FA9550-12-1-0406 negotiated by AFOSR  and NSF CAREER Award IIS-1350133. JX was
+supported by an NDSEG fellowship. We also appreciate the data  discussions  and guidance on the ENCODE
+project provided by Max Libbrecht and William Noble.
+
+1Other parameter settings were explored.
+
+8
+
+llllllllll0.00.51.01.50.000.250.500.751.00Diag. Dom.Rev. Cycles110100L/2 (log−scale)||A||FL/2 = 1L/2 = 3L/2 = 10−4.5−4.0−3.5−3.0−6.6−6.4−6.2−6.0Diag. Dom.Rev. Cycles020406002040600204060IterationHeld out log−probabilityGrowBufferOffOnk0.10.30.50.7References
+[1] H. Robbins and S. Monro. A Stochastic Approximation Method. The Annals of Mathematical Statistics 
+
+22(3):400–407  1951.
+
+[2] L. Bottou. Online algorithms and stochastic approximations. In Online Learning and Neural Networks.
+
+Cambridge University Press  1998.
+
+[3] L. Bottou. Large-Scale Machine Learning with Stochastic Gradient Descent. In International Conference
+
+on Computational Statistics  pages 177–187  August 2010.
+
+[4] A. Nemirovski  A. Juditsky  G. Lan  and A. Shapiro. Robust stochastic approximation approach to
+
+stochastic programming. SIAM J. on Optimization  19(4):1574–1609  January 2009.
+
+[5] M. Welling and Y. W. Teh. Bayesian learning via stochastic gradient Langevin dynamics. In International
+
+Conference on Machine Learning  pages 681–688  2011.
+
+[6] D. Maclaurin and R. P. Adams. Fireﬂy Monte Carlo: Exact MCMC with subsets of data. CoRR 
+
+abs/1403.5693  2014.
+
+[7] X. Wang and D. B. Dunson. Parallelizing MCMC via Weierstrass sampler. CoRR  abs/1312.4605  2014.
+[8] W. Neiswanger  C. Wang  and E. Xing. Asymptotically exact  embarrassingly parllel MCMC. CoRR 
+
+abs/1311.4780  2014.
+
+[9] M. D. Hoffman  D. M. Blei  C. Wang  and J. Paisley. Stochastic variational inference. Journal of Machine
+
+Learning Research  14(1):1303–1347  May 2013.
+
+[10] M. Bryant and E. B. Sudderth. Truly nonparametric online variational inference for hierarchical Dirichlet
+
+processes. In Advances in Neural Information Processing Systems  pages 2708–2716  2012.
+
+[11] T. Broderick  N. Boyd  A. Wibisono  A. C. Wilson  and M. I. Jordan. Streaming variational Bayes. In
+
+Advances in Neural Information Processing Systems  pages 1727–1735  2013.
+
+[12] P. Gopalan  D. M. Mimno  S. Gerrish  M. J. Freedman  and D. M. Blei. Scalable inference of overlapping
+
+communities. In Advances in Neural Information Processing Systems  pages 2258–2266  2012.
+
+[13] M. J. Johnson and A. S. Willsky. Stochastic variational inference for Bayesian time series models. In
+
+International Conference on Machine Learning  2014.
+
+[14] L. R. Rabiner. A tutorial on hidden Markov models and selected applications in speech recognition.
+
+Proceedings of the IEEE  77(2):257–286  1989.
+
+[15] S. Fr¨uhwirth-Schnatter. Finite mixture and Markov switching models. Springer Verlag  2006.
+[16] S. L. Scott. Bayesian methods for hidden Markov models: Recursive computing in the 21st century.
+
+Journal of the American Statistical Association  97(457):337–351  March 2002.
+
+[17] M. J. Beale. Variational Algorithms for Approximate Bayesian Inference. Ph.D. thesis  University College
+
+London  2003.
+
+[18] M. I. Jordan  Z. Ghahramani  T. S. Jaakkola  and L. K. Saul. An introduction to variational methods for
+
+graphical models. Machine Learning  37(2):183–233  November 1999.
+
+[19] C. M. Bishop. Pattern Recognition and Machine Learning. Springer Verlag  2006.
+[20] B. T. Polyak and Y. Tsypkin. Pseudo-gradient adaptation and learning algorithms. Automatics and Tele-
+
+mechanics  3:45–68  1973.
+
+[21] J. Gonzalez  Y. Low  and C. Guestrin. Residual splash for optimally parallelizing belief propagation. In
+
+International Conference on Artiﬁcial Intelligence and Statistics  2009.
+
+[22] S. J. Russell and P. Norvig. Artiﬁcial Intelligence: A Modern Approach. Pearson Education  2003.
+[23] J. Nocedal and S. Wright. Numerical Optimization. Springer Series in Operations Research and Financial
+
+Engineering. Springer  2006.
+
+[24] ENCODE Project Consortium. An integrated encyclopedia of DNA elements in the human genome.
+
+Nature  489(7414):57–74  September 2012.
+
+[25] M. M. Hoffman  O. J. Buske  J. Wang  Z. Weng  J. A. Bilmes  and W. S. Noble. Unsupervised pattern
+discovery in human chromatin structure through genomic segmentation. Nature Methods  9:473–476 
+2012.
+
+[26] N. Day  A. Hemmaplardh  R. E. Thurman  J. A. Stamatoyannopoulos  and W. S. Noble. Unsupervised
+
+segmentation of continuous genomic data. Bioinformatics  23(11):1424–1426  2007.
+
+[27] M. M. Hoffman  J. Ernst  S. P. Wilder  A. Kundaje  R. S. Harris  M. Libbrecht  B. Giardine  P. M. El-
+lenbogen  J. A. Bilmes  E. Birney  R. C. Hardison  M. Dunham  I. Kellis  and W. S. Noble. Integrative
+annotation of chromatin elements from encode data. Nucleic Acids Research  41(2):827–841  2013.
+
+9
+
+,Nick Foti
+Jason Xu
+Dillon Laird
+Emily Fox

@@ -1,0 +1,727 @@
+2019,DETOX: A Redundancy-based Framework for Faster and More Robust Gradient Aggregation,To improve the resilience of distributed  training to worst-case  or Byzantine node failures  several recent methods have replaced gradient averaging with robust aggregation methods. Such techniques can have high computational costs  often quadratic in the number of compute nodes  and only have limited robustness guarantees. Other methods have instead used redundancy to guarantee robustness  but can only tolerate limited numbers of Byzantine failures. In this work  we present DETOX  a Byzantine-resilient distributed training framework that combines algorithmic redundancy with robust aggregation. DETOX operates in two steps  a filtering step that uses limited redundancy to significantly reduce the effect of Byzantine nodes  and a hierarchical aggregation step that can be used in tandem with any state-of-the-art robust aggregation method. We show theoretically that this leads to a substantial increase in robustness  and has a per iteration runtime that can be nearly linear in the number of compute nodes. We provide extensive experiments over real distributed setups across a variety of large-scale machine learning tasks  showing that DETOX leads to orders of magnitude accuracy and speedup improvements over many state-of-the-art Byzantine-resilient approaches.,DETOX: A Redundancy-based Framework for Faster
+
+and More Robust Gradient Aggregation
+
+Shashank Rajput⇤
+
+University of Wisconsin-Madison
+
+rajput3@wisc.edu
+
+Hongyi Wang⇤
+
+University of Wisconsin-Madison
+
+hongyiwang@cs.wisc.edu
+
+Zachary Charles
+
+University of Wisconsin-Madison
+
+zcharles@math.wisc.edu
+
+Dimitris Papailiopoulos
+
+University of Wisconsin-Madison
+
+dimitris@papail.io
+
+Abstract
+
+To improve the resilience of distributed training to worst-case  or Byzantine node
+failures  several recent approaches have replaced gradient averaging with robust
+aggregation methods. Such techniques can have high computational costs  often
+quadratic in the number of compute nodes  and only have limited robustness
+guarantees. Other methods have instead used redundancy to guarantee robustness 
+but can only tolerate limited number of Byzantine failures.
+In this work  we
+present DETOX  a Byzantine-resilient distributed training framework that combines
+algorithmic redundancy with robust aggregation. DETOX operates in two steps 
+a ﬁltering step that uses limited redundancy to signiﬁcantly reduce the effect of
+Byzantine nodes  and a hierarchical aggregation step that can be used in tandem
+with any state-of-the-art robust aggregation method. We show theoretically that
+this leads to a substantial increase in robustness  and has a per iteration runtime
+that can be nearly linear in the number of compute nodes. We provide extensive
+experiments over real distributed setups across a variety of large-scale machine
+learning tasks  showing that DETOX leads to orders of magnitude accuracy and
+speedup improvements over many state-of-the-art Byzantine-resilient approaches.
+
+1
+
+Introduction
+
+To scale the training of machine learning models  gradient computations can often be distributed
+across multiple compute nodes. After computing these local gradients  a parameter server (PS) then
+averages them  and updates a global model. As the scale of data and available compute power grows 
+so does the probability that some compute nodes output unreliable gradients. This can be due to
+power outages  faulty hardware  or communication failures  or due to security issues  such as the
+presence of an adversary governing the output of a compute node.
+Due to the difﬁculty in quantifying these different types of errors separately  we often model them
+as Byzantine failures. Such failures are assumed to be able to result in any output  adversarial or
+otherwise. Unfortunately  the presence of a single Byzantine compute node can result in arbitrarily
+bad global models when aggregating gradients via their average [1].
+In distributed training  there have generally been two distinct approaches to improve Byzantine
+robustness. The ﬁrst replaces the gradient averaging step at the PS with a robust aggregation step 
+such as the geometric median and variants thereof [1  2  3  4  5  6]. The second approach instead
+
+⇤Authors contributed equally to this paper and are listed alphabetically.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+assigns each node redundant gradients  and uses this redundancy to eliminate the effect of Byzantine
+failures [7  8  9].
+Both of the above approaches have their own limitations. For the ﬁrst  robust aggregators are typically
+expensive to compute and scale super-linearly (in many cases quadratically [10  4]) with the number
+of compute nodes. Moreover  such methods often come with limited theoretical guarantees of
+Byzantine robustness (e.g.  only establishing convergence in the limit  or only guaranteeing that the
+output of the aggregator has positive inner product with the true gradient [1  10]) and often require
+strong assumptions  such as bounds on the dimension of the model being trained. On the other hand 
+redundancy or coding-theoretic based approaches offer strong or even perfect recocvery guarantees.
+Unfortunately  such approaches may  in the worst case  require each node to compute ⌦(q) times
+more gradients  where q is the number of Byzantine machines [7]. This overhead is prohibitive in
+settings with large numbers of Byzantine machines.
+
+model update
+
+robust aggregation
+
+aggregation
+
+aggregation
+
+aggregation
+
+majority
+
+majority
+
+majority
+
+majority
+
+majority
+
+majority
+
+. . .
+
+<latexit sha1_base64="Zp7qtT1Hq02ILacNOB8mhVKJLg0=">AAAB7XicbZC7SgNBFIZn4y2ut6ilzWAQrMJuLLQRgzaWEcwFkiXMzs4mY2ZnlpmzQgh5BxsLRWwsfBR7G/FtnFwKTfxh4OP/z2HOOWEquAHP+3ZyS8srq2v5dXdjc2t7p7C7Vzcq05TVqBJKN0NimOCS1YCDYM1UM5KEgjXC/tU4b9wzbbiStzBIWZCQruQxpwSsVW+LSIHpFIpeyZsIL4I/g+LFh3uevn251U7hsx0pmiVMAhXEmJbvpRAMiQZOBRu57cywlNA+6bKWRUkSZoLhZNoRPrJOhGOl7ZOAJ+7vjiFJjBkkoa1MCPTMfDY2/8taGcRnwZDLNAMm6fSjOBMYFB6vjiOuGQUxsECo5nZWTHtEEwr2QK49gj+/8iLUyyX/pFS+8YqVSzRVHh2gQ3SMfHSKKugaVVENUXSHHtATenaU8+i8OK/T0pwz69lHf+S8/wAdA5J5</latexit>
+
+r-group
+
+r-group
+
+r-group
+
+r-group
+
+r-group
+
+r-group
+
+p compute nodes
+
+Figure 1: DETOX is a hierarchical scheme for Byzantine gradient
+aggregation. In its ﬁrst step  the PS partitions the compute nodes in
+groups and assigns each node to a group with the same batch of data.
+After the nodes compute gradients with respect to this batch  the PS
+takes a majority vote of their outputs. This ﬁlters out a large fraction
+of the Byzantine gradients. In the second step  the PS partitions the
+ﬁltered gradients in large groups  and applies a given aggregation
+method to each group. In the last step  the PS applies a robust ag-
+gregation method (e.g.  geometric median) to the previous outputs.
+The ﬁnal output is used to perform a gradient update step.
+
+Figure 2: Top: Convergence com-
+parisons among various vanilla ro-
+bust aggregation methods and their
+DETOX paired versions under “a little
+is enough" Byzantine attack [11]. Bot-
+tom: Per iteration runtime analysis of
+various methods. All results are for
+ResNet-18 trained on CIFAR-10. The
+preﬁx “D-” stands for a robust aggrega-
+tion method paired with DETOX.
+
+Our contributions. In this work  we present DETOX  a Byzantine-resilient distributed training
+framework that ﬁrst uses computational redundancy to ﬁlter out almost all Byzantine gradients  and
+then performs a hierarchical robust aggregation method. DETOX is scalable  ﬂexible  and is designed
+to be used on top of any robust aggregation method to obtain improved robustness and efﬁciency. A
+high-level description of the hierarchical nature of DETOX is given in Fig. 1.
+DETOX proceeds in three steps. First the PS partitions the compute nodes in groups of r to compute
+the same gradients. While this step requires redundant computation at the node level  it will eventually
+allow for much faster computation at the PS level  as well as improved robustness. After all compute
+nodes send their gradients to the PS  the PS takes the majority vote of each group of gradients. We
+show that by setting r to be logarithmic in the number of compute nodes  after the majority vote step
+only a constant number of Byzantine gradients are still present  even if the number of Byzantine nodes
+is a constant fraction of the total number of compute nodes. DETOX then performs hierarchical robust
+aggregation in two steps: First  it partitions the ﬁltered gradients in a small number of groups  and
+aggregates them using simple techniques such as averaging. Second  it applies any robust aggregator
+(e.g.  geometric median [2  6]  BULYAN [10]  MULTI-KRUM [4]  etc.) to the averaged gradients to
+further minimize the effect of any remaining traces of the original Byzantine gradients.
+
+2
+
+20040060080010001um oI IterDtions3040506070807est AccurDcy (%)D-%ulyDnD-0ulti-.rumD-0o0%ulyDn0ulti-.rum0ed.CoPputDionCoPPunicDtionAggregDtion02468TiPe Per Iter (sec)BulyDn0ulti-.ruP0ed.D-BulyDnD-0ulti-.ruPD-0o0We prove that DETOX can obtain orders of magnitude improved robustness guarantees compared to
+its competitors  and can achieve this at a nearly linear complexity in the number of compute nodes p 
+unlike methods like BULYAN [10] that require complexity that is quadratic in p. We extensively test
+our method in real distributed setups and large-scale settings  showing that by combining DETOX with
+previously proposed Byzantine robust methods  such as MULTI-KRUM  BULYAN  and coordinate-
+wise median  we increase the robustness and reduce the overall runtime of the algorithm. Moreover 
+we show that under strong Byzantine attacks  DETOX can lead to almost a 40% increase in accuracy
+over vanilla implementations of Byzantine-robust aggregation. A brief performance comparison with
+some of the current state-of-the-art aggregators in shown in Fig. 2.
+Related work. The topic of Byzantine fault tolerance has been extensively studied since the early
+80s by Lamport et al. [12]  and deals with worst-case  and/or adversarial failures  e.g.  system crashes 
+power outages  software bugs  and adversarial agents that exploit security ﬂaws. In the context of
+distributed optimization  these failures are manifested through a subset of compute nodes returning to
+the master ﬂawed or adversarial updates. It is now well understood that ﬁrst-order methods  such
+as gradient descent or mini-batch SGD  are not robust to Byzantine errors; even a single erroneous
+update can introduce arbitrary errors to the optimization variables.
+Byzantine-tolerant ML has been extensively studied in recent years [13  14  15  16  17  2]  establishing
+that while average-based gradient methods are susceptible to adversarial nodes  median-based update
+methods can in some cases achieve better convergence  while being robust to some attacks. Although
+theoretical guarantees are provided in many works  the proposed algorithms in many cases only ensure
+a weak form of resilience against Byzantine failures  and often fail against strong Byzantine attacks
+[10]. A stronger form of Byzantine resilience is desirable for most of distributed machine learning
+applications. To the best of our knowledge  DRACO [7] and BULYAN [10] are the only proposed
+methods that guarantee strong Byzantine resilience. However  as mentioned above  DRACO requires
+heavy redundant computation from the compute nodes  while BULYAN requires heavy computation
+overhead on the PS end.
+We note that [18] presents an alternative approach that does not ﬁt easily under either category  but
+requires convexity of the underlying loss function. Finally  [19] examines the robustness of SIGNSGD
+with a majority vote aggregation  but study a restricted Byzantine failure setup that only allows for a
+blind multiplicative adversary.
+
+2 Problem Setup
+
+Our goal is to solve solve the following empirical risk minimization problem: minw F (w) :=
+nPn
+i=1 fi(w) where w 2 Rd denotes the parameters of a model  and fi is the loss function on the
+1
+i-th training sample. To approximately solve this problem  we often use mini-batch SGD. First  we
+initialize at some w0. At iteration t  we sample St uniformly at random from {1  . . .   n}  and then
+update via
+
+wt+1 = wt 
+
+rfi(wt) 
+
+(1)
+
+⌘t
+
+|St| Xi2St
+
+where St is a randomly selected subset of the n data points. To perform mini-batch SGD in a
+distributed manner  the global model wt is stored at the PS and updated according to (1)  i.e.  by
+using the mean of gradients that are evaluated at the compute nodes.
+Let p denote the total number of compute nodes. At each iteration t  during distributed mini-batch
+SGD  the PS broadcasts wt to each compute node. Each compute node is assigned Si t ✓ St  and
+|Si t|Pj2Si t rfj(wt). The PS then updates the global
+then evaluates the mean of gradients gi = 1
+p Pp
+model via wt+1 = wt  ⌘t
+i=1 gi. We note that in our setup we assume that the PS is the owner of
+the data  and has access to the entire data set of size n.
+Distributed training with Byzantine nodes We assume that a ﬁxed subset Q of size q of the p
+compute nodes are Byzantine. Let ˆgi be the output of node i. If i is not Byzantine (i /2 Q)  we say it
+is “honest”  in which case its output ˆgi = gi where gi is the true mean of gradients assigned to node i.
+If i is Byzantine (i 2 Q)  its output ˆgi can be any d-dimensional vector. The PS receives {ˆgi}p
+i=1 
+and can then process these vectors to produce some approximation to the true gradient update in (1).
+
+3
+
+We make no assumptions on the Byzantine outputs. In particular  we allow adversaries with full
+information about F and wt  and that the Byzantine compute nodes can collude. Let ✏ = q/p be the
+fraction of Byzantine nodes. We will assume ✏< 1/2 throughout.
+
+3 DETOX: A Redundancy Framework to Filter most Byzantine Gradients
+
+We now describe DETOX  a framework for Byzantine-resilient mini-batch SGD with p nodes  q of
+which are Byzantine. Let b  p be the desired batch-size  and let r be an odd integer. We refer to r as
+the redundancy ratio. For simplicity  we will assume r divides p and that p divides b. DETOX can be
+directly extended to the setting where this does not hold.
+DETOX ﬁrst computes a random partition of [p] in p/r node groups A1  . . .   Ap/r each of size r.
+This will be ﬁxed throughout. We then initialize at some w0. For t  0  we wish to compute some
+approximation to the gradient update in (1). To do so  we need a Byzantine-robust estimate of the true
+gradient. Fix t  and let us suppress the notation t when possible. As in mini-batch SGD  let S be a
+subset of [n] of size b  with each element sampled uniformly at random from [n]. We then partition of
+S in groups S1  . . .   Sp/r of size br/p. For each i 2 Aj  the PS assigns node i the task of computing
+(2)
+
+gj :=
+
+rfk(w) =
+
+rfk(w).
+
+1
+
+|Sj| Xk2Sj
+
+p
+
+rb Xk2Sj
+
+If i is an honest node  then its output is ˆgi = gj  while if i is Byzantine  it outputs some d-dimensional
+ˆgi  which is then sent to the PS. The PS then computes zj := maj({ˆgi|i 2 Aj})  where maj denotes
+the majority vote. If there is no majority  we set zj = 0. We will refer to zj as the “vote” of group j.
+Since some of these votes are still Byzantine  we must do some robust aggregation of the vote.
+We employ a hierarchical robust aggregation process HIER-AGGR  which uses two user-speciﬁed
+aggregation methods A0 and A1. First  the votes are partitioned in to k groups. Let ˆz1  . . .   ˆzk denote
+the output of A0 on each group. The PS then computes ˆG = A1(ˆz1  . . .   ˆzk) and updates the model
+via w = w  ⌘ ˆG. This hierarchical aggregation resembles a median of means approach on the votes
+[20]  and has the beneﬁt of improved robustness and efﬁciency. We discuss this in further detail in
+Section 4. A description of DETOX is given in Algorithm 1.
+
+Algorithm 1 DETOX: Algorithm to be performed at the parameter server
+input Batch size b  redundancy ratio r  compute nodes 1  . . .   p  step sizes {⌘t}t0.
+1: Randomly partition [p] in “node groups” {Aj|1  j  p/r} of size r.
+2: for t = 0 to T do
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+10: end for
+
+Draw St of size b randomly from [n].
+Partition St in to groups {St j|1  j  p/r} of size rb/p.
+For each j 2 [p/r]  i 2 Aj  push wt and St j to compute node i.
+Receive the (potentially Byzantine) p gradients ˆgt i from each node.
+Let zt j := maj({ˆgt i|i 2 Aj})  and 0 if no majority exists.
+Set ˆGt = HIER-AGGR({zt 1  . . .   zt p/r}).
+Set wt+1 = wt  ⌘ ˆGt.
+
+%Filtering step
+%Hierarchical aggregation
+%Gradient update
+
+Algorithm 2 HIER-AGGR: Hierarchical aggregation
+input Aggregators A0 A1  votes {z1  . . .   zp/r}  vote group size k.
+1: Let ˆp := p/r.
+2: Randomly partition {z1  . . .   zˆp} in to k “vote groups” {Zj|1  j  k} of size ˆp/k.
+3: For each vote group Zj  calculate ˆzj = A0(Zj).
+4: Return A1({ˆz1  . . .   ˆzk}).
+
+3.1 Filtering out Almost Every Byzantine Node
+We now show that DETOX ﬁlters out the vast majority of Byzantine gradients. Fix the iteration t.
+Recall that all honest nodes in a node group Aj send ˆgj = gj as in (2) to the PS. If Aj has more
+
+4
+
+honest nodes than Byzantine nodes then zj = gj and we say zj is honest. If not  then zj may not
+equal gj in which case zj is a Byzantine vote. Let Xj be the indicator variable for whether block Aj
+
+has more Byzantine nodes than honest nodes  and let ˆq =Pj Xj. This is the number of Byzantine
+
+votes. By ﬁltering  DETOX goes from a Byzantine compute node ratio of ✏ = q/p to a Byzantine vote
+ratio of ˆ✏ = ˆq/ˆp where ˆp = p/r.
+We ﬁrst show that E[ˆq] decreases exponentially with r  while ˆp only decreases linearly with r. That
+is  by incurring a constant factor loss in compute resources  we gain an exponential improvement in
+the reduction of Byzantine nodes. Thus  even small r can drastically reduce the Byzantine ratio of
+votes. This observation will allow us to instead use robust aggregation methods on the zj  i.e.  the
+votes  greatly improving our Byzantine robustness. We have the following theorem about E[ˆq]. All
+proofs can be found in the appendix. Note that throughout  we did not focus on optimizing constants.
+Theorem 1. There is a universal constant c such that if the fraction of Byzantine nodes is ✏< c   then
+
+the effective number of Byzantine votes after ﬁltering satisﬁes E[ˆq] = O✏(r1)/2q/r.
+We now wish to use this to derive high probability bounds on ˆq. While the variables Xi are not
+independent  they are negatively correlated. By using a version of Hoeffding’s inequality for weakly
+dependent variables  we can show that if the redundancy is logarithmic  i.e.  r ⇡ log(q)  then with
+high probability the number of effective Byzantine votes drops to a constant  i.e.  ˆq = O(1).
+Corollary 2. There is a constant c such that if and ✏  c and r  3 + 2 log2(q) then for any
+ 2 (0  1
+In the next section  we exploit this dramatic reduction of Byzantine votes to derive strong robustness
+guarantees for DETOX.
+
+2 )  with probability at least 1    we have that ˆq  1 + 2 log(1/).
+
+4 DETOX Improves the Speed and Robustness of Robust Estimators
+
+Using the results of the previous section  if we set the redundancy ratio to r ⇡ log(q)  the ﬁltering
+stage of DETOX reduces the number of Byzantine votes ˆq to roughly a constant. While we could
+apply some robust aggregator A directly to the output votes of the ﬁltering stage  such methods often
+scale poorly with the number of votes ˆp. By instead applying HIER-AGGR  we greatly improve
+efﬁciency and robustness. Recall that in HIER-AGGR  we partition the votes into k “vote groups” 
+apply some A0 to each group  and apply some A1 to the k outputs of A0. We analyze the case where
+k is roughly constant  A0 computes the mean of its inputs  and A1 is a robust aggregator. In this case 
+HIER-AGGR is analogous to the Median of Means (MoM) method from robust statistics [20].
+Improved speed. Suppose that without redundancy  the time required for the compute nodes to
+ﬁnish is T . Applying KRUM [1]  MULTI-KRUM [4]  and BULYAN [10] to their p outputs requires
+O(p2d) operations  so their overall runtime is O(T + p2d). In DETOX  the compute nodes require
+r times more computation to evaluate redundant gradients. If r ⇡ log(q)  this can be done in
+O(ln(q)T ). With HIER-AGGR as above  DETOX performs three major operations: (1) majority
+voting  (2) mean computation of the k vote groups and (3) robust aggregation of the these k means
+using A1. (1) and (2) require O(pd) time. For practical A1 aggregators  including MULTI-KRUM
+and BULYAN  (3) requires O(k2d) time. Since k ⌧ p  DETOX has runtime O(ln(q)T + pd). If
+T = O(d) (which generally holds for gradient computations)  KRUM  MULTI-KRUM  and BULYAN
+require O(p2d) time  but DETOX only requires O(pd) time. Thus  DETOX can lead to signiﬁcant
+speedups  especially when the number of workers is large.
+Improved robustness. To analyze robustness  we ﬁrst need some distributional assumptions. At a
+given iteration  let G denote the full gradient of F (w). Throughout this section  we assume that the
+gradient of each sample is drawn from a distribution D on Rd with mean G and covariance ⌃. Let
+2 = Tr(⌃)  we’ll refer to this as variance. In DETOX  the “honest” votes zi will also have mean G 
+but their variance will be 2p/rb. This is because each honest compute node gets rb/p samples  so its
+variance is reduced by rb/p. Note that this variance reduction is integral in proving that we achieve
+optimal rates (see Theorem 3 and the discussion after it). To see this intuitively  consider a scenario
+without Byzantine machines  then the variance of empirical mean is 2/b. A simple calculation
+shows that variance of the mean of each “vote group” is 2p/rb
+ˆp/k = k2/b where k is the number of
+vote groups. Thus  if k is small  we are still able to optimally reduce the variance.
+
+5
+
+Suppose ˆG is some approximation to the true gradient G. We say that ˆG is a -inexact gradient
+oracle for G if k ˆG  Gk  . [5] shows that access to a -inexact gradient oracle is sufﬁcient to
+upper bound the error of a model ˆw produced by performing gradient updates with ˆG. Thus  to bound
+the robustness of an aggegator  it sufﬁces to bound . Under the distributional assumptions above 
+we will derive bounds on  for the hierarchical aggregator A with different base aggregators A1.
+We will analyze DETOX when A0 computes the mean of the vote groups  and A1 is geometric
+median  coordinate-wise median  or ↵-trimmed mean [6]. We will denote the approximation ˆG to
+G computed by DETOX in these three instances by ˆG1  ˆG2 and ˆG3  respectively. Using the proof
+techniques similar to [20]  we get the following.
+Theorem 3. Assume r  3 + 2 log2(q) and ✏  c where c is the constant from Corollary 2. There
+are constants c1  c2  c3 such that for all  2 (0  1/2)  with probability at least 1  2:
+1. If k = 128 ln(1/)  then ˆG1 is a c1pln(1/)/b-inexact gradient oracle.
+2. If k = 128 ln(d/)  then ˆG2 is a c2pln(d/)/b-inexact gradient oracle.
+
+3. If k = 128 ln(d/) and ↵ = 1
+
+4  then ˆG3 is a c3pln(d/)/b-inexact gradient oracle.
+
+The above theorem has three important implications. First  we can derive robustness guarantees
+for DETOX that are virtually independent of the Byzantine ratio ✏. Second  even when there are no
+Byzantine machines  it is known that no aggregator can achieve = o(/pb) [21]  and because we
+achieve = ˜O(/pb)  we cannot expect to get an order of better robustness by any other aggregator.
+Third  other than a logarithmic dependence on q  there is no dependence on the number of nodes p.
+Even as p and q increase  we still maintain roughly the same robustness guarantees.
+By comparison  the robustness guarantees of KRUM and Geometric Median applied directly to the
+compute nodes worsens as as p increases [17  3]. Similarly  [6] show if we apply coordinate-wise
+median to p nodes  each of which are assigned b/p samples  we get a -inexact gradient oracle where
+
+= O(p✏p/b + pd/b). If ✏ is constant and p is comparable to b  then this is roughly   whereas
+DETOX can produce a -inexact gradient oracle for = ˜O(/pb). Thus  the robustness of DETOX
+
+can scale much better with the number of nodes than naive robust aggregation of gradients.
+
+5 Experiments
+
+In this section we present an experimental study on pairing DETOX with a set of previously proposed
+robust aggregation methods  including MULTI-KRUM [17]  BULYAN [10]  coordinate-wise median
+[5]. We also incorporate DETOX with a recently proposed Byzantine resilient distributed training
+method i.e.SIGNSGD with majority vote [19]. We conduct extensive experiments on the scalability
+and robustness of these Byzantine-resilient methods  and the improvements gained when pairing them
+with DETOX. All our experiments are deployed on real distributed clusters under various Byzantine
+attack models. Our implementation is publicly available for reproducibility 2.
+5.1 Experimental Setup
+The main ﬁndings are as follows: 1) Applying DETOX leads to signiﬁcant speedups  e.g.  up to an
+order of magnitude end-to-end training speedup is observed; 2) in defending against state-of-the-art
+Byzantine attacks  DETOX leads to signiﬁcant Byzantine-resilience improvement  e.g.  applying
+BULYAN on top of DETOX improves the test-set prediction accuracy from 11% to 60% when training
+VGG13-BN on CIFAR-100 under the “a little is enough" (ALIE) [11] Byzantine attack. Moreover 
+incorporating SIGNSGD with DETOX improves the test set prediction accuracy from 34.92% to
+78.75% when defending against a constant Byzantine attack for ResNet-18 trained on CIFAR-10.
+We implemented vanilla versions of the aforementioned Byzantine resilient methods  as well as
+versions of these methods pairing with DETOX  in PyTorch [22] with MPI4py [23]. Our experiments
+are deployed on a cluster of 46 m5.2xlarge instances on Amazon EC2  where 1 node serves as the
+PS and the remaining p = 45 nodes are compute nodes. In all the following experiments  we set the
+number of Byzantine nodes to be q = 5. We also study the performance of all considered methods
+with smaller number (and without) Byzantine nodes  the result can be found in the Appendix B.6.
+
+2https://github.com/hwang595/DETOX
+
+6
+
+5.2
+
+Implementation of DETOX
+
+In DETOX  the 45 compute nodes are randomly partitioned into node groups of size r = 3  which
+gives p/r = 15 node groups. Batch size b is set to 1  440. In each iteration of the vanilla Byzantine
+resilient methods  each compute node evaluates b/p = 32 gradients sampled from its partition of data
+while in DETOX each node evaluates r⇥ more gradients i.e. rb/p = 96  which makes DETOX r⇥
+more computationally expensive than the vanilla Byzantine resilient methods. Compute nodes in the
+same node group evaluate the same gradients to create algorithmic redundancy for the majority voting
+stage in DETOX. The mean of these locally computed gradients is sent back to the PS. Note that
+although DETOX requires each compute node evaluate r⇥ more gradients  the communication cost
+of DETOX is the same as the vanilla Byzantine resilient methods since only the gradient means are
+communicated instead of individual gradients. After receiving all gradient means from the compute
+nodes  the PS uses either vanilla Byzantine-resilient methods or their DETOX paired variants.
+
+Figure 3: Results of VGG13-BN on CIFAR-100. Left: Convergence performance of various robust aggregation
+methods against ALIE attack. Right: Per iteration runtime analysis of various robust aggregation methods.
+
+We emphasize that DETOX is not simply a new robust aggregation technique. It is instead a general
+Byzantine-resilient distributed training framework  and any robust aggregation method can be im-
+mediately implemented on top of it to increase its Byzantine-resilience and scalability. Note that
+after the majority voting stage on the PS one has a wide range of choices for A0 and A1. In our
+implementations  we had the following setups: 1) A0 = Mean  A1 = Coordinate-size Median  2)
+A0 = MULTI-KRUM  A1 = Mean  3) A0 = BULYAN  A1 = Mean  and 4) A0 =coordinate-wise
+majority vote  A1 =coordinate-wise majority vote (designed speciﬁcally for pairing DETOX with
+SIGNSGD). We tried A0 = Mean and A1 = MULTI-KRUM/BULYAN but we found that setups 2)
+and 3) had better resilience than these choices. More details on the implementation and system-level
+optimizations that we performed can be found in the Appendix B.1.
+
+Byzantine attack models We consider two Byzantine attack models for pairing MULTI-KRUM 
+BULYAN  and coordinate-wise median with DETOX. First  we consider the “reversed gradient" attack 
+where Byzantine nodes that were supposed to send g 2 Rd to the PS instead send cg  for some
+c > 0. Secondly  we study the recently proposed ALIE [11] attack  where the Byzantine compute
+nodes collude and use their locally calculated gradients to estimate the coordinate-wise mean and
+standard deviation of the entire set of gradients of all other compute nodes. The Byzantine nodes
+then use the estimated mean and variance to manipulate the gradient they send back to the PS. To
+be more speciﬁc  Byzantine nodes will send ˆµi + z · ˆi 8i 2 [d] where ˆµ and ˆ are the estimated
+coordinate-wise mean and standard deviation each gradient dimension and z is a hyper-parameter
+which was tuned empirically in [11]. Finally  to compare the resilience of the vanilla SIGNSGD
+and the one paired with DETOX  we consider the “constant Byzantine attack” where Byzantine
+compute nodes send a constant gradient matrix with dimension same as that of the true gradient but
+all elements set to 1.
+Datasets and models Our experiments are over ResNet-18 [24] on CIFAR-10 and VGG13-BN
+[25] on CIFAR-100. For each dataset  we use data augmentation (random crops  and ﬂips) and image
+normalization. Also  we tune the learning rate schedules and use the constant momentum at 0.9 in all
+experiments. The details of parameter tuning and dataset normalization are in the Appendix B.2.
+
+7
+
+250500750100012501500175020001um oI IterDtions1020304050607est AccurDcy (%)D-%ulyDnD-0ulti-.rumD-0o0%ulyDn0ulti-.rum0ed.CoPputDionCoPPunicDtionAggregDtion0246TiPe Per Iter (sec)BulyDn0ulti-.ruP0ed.D-BulyDnD-0ulti-.ruPD-0o0(a) ResNet-18  MULTI-KRUM
+
+(b) ResNet-18  BULYAN
+
+(c) ResNet-18  Coord-Median
+
+(d) VGG13-BN  MULTI-KRUM
+
+(e) VGG13-BN  BULYAN
+
+(f) VGG13-BN  Coord-Median
+
+Figure 4: End-to-end comparisons between DETOX paired with different baseline methods under reverse gradi-
+ent attack. (a)-(c): Vanilla vs. DETOX paired version of MULTI-KRUM  BULYAN  and coordinate-wise median
+on ResNet-18 trained on CIFAR-10. (d)-(f): Same comparisons for VGG13-BN trained on CIFAR-100.
+
+(a) ResNet-18  CIFAR-10
+
+(b) VGG13-BN  CIFAR-100
+
+Figure 5: Speedups in converging to given accuracies for vanilla robust aggregation methods and their DETOX-
+paired variants under reverse gradient attack: (a) ResNet-18 on CIFAR-10  (b) VGG13-BN on CIFAR-100
+
+5.3 Results
+Scalability We report a per-iteration runtime of all considered robust aggregations and their DETOX
+paired variants on both CIFAR-10 over ResNet-18 and CIFAR-100 over VGG-13. The results on
+ResNet-18 and VGG13-BN are shown in Figure 2 and 3. We observe that although DETOX requires
+slightly more compute time per iteration  due to its algorithmic redundancy as explained in Section
+5.2  it largely reduces the PS computation cost during the aggregation stage  which matches our
+theoretical analysis. Surprisingly  we observe that by applying DETOX  the communication costs
+decrease. This is because the variance of computation time among compute nodes increases with
+heavier computational redundancy. Therefore  after applying DETOX  compute nodes tend not to send
+their gradients to the PS at the same time  which mitigates a potential network bandwidth congestion.
+In a nutshell  applying DETOX can lead to up to 3⇥ per-iteration speedup.
+Byzatine-resilience under various attacks We ﬁrst study the Byzantine-resilience of all consid-
+ered methods under the ALIE attack  which to the best of our knowledge  is the strongest Byzantine
+attack proposed in the literature. The results on ResNet-18 and VGG13-BN are shown in Figure
+2 and 3 respectively. Applying DETOX leads to signiﬁcant improvement in Byzantine-resilience
+
+8
+
+0100200300400500WDll-clock 7ime (0ins.)7678808284868890927esW AccurDcy (%)D-0ulWi-.rum0ulWi-krum0100200300400500600700WDll-clock 7ime (0ins.)7678808284868890927esW AccurDcy (%)D-%ulyDn%ulyDn0100200300400500600700800WDll-clock 7ime (0ins.)7678808284868890927esW AccurDcy (%)D-0o00ed.050100150200250300350400WDll-clock 7ime (0ins.)404550556065707esW AccurDcy (%)D-0ulWi-.rum0ulWi-krum0100200300400500WDll-clock 7ime (0ins.)404550556065707esW AccurDcy (%)D-%ulyDn%ulyDn0100200300400500600WDll-clock 7ime (0ins.)253035404550556065707esW AccurDcy (%)D-0o00edD-0.-..over0.-..D-%ulyDnover%ulyDnD-0o0over0ed.0etKod86%88%90%92%7est AccurDcy2.1x1.94x5.24x1.75x2.51x5.01x2.22x2.48x5.15x1.81x2.1x4.54xD-0.-..over0.-..D-%ulyDnover%ulyDn0etKod59%61%63%65%7est AccurDcy2.13x2.04x2.1x1.84x2.43x1.88x2.45x1.94xD-0o0over0.-0ed.0etKod45%48%50%55%11.57x10.4x10.4x11.15xTable 1: Defense results summary for ALIE attacks [11]; the reported numbers are test set prediction accuracy.
+
+D-MULTI-KRUM D-BULYAN D-Med. MULTI-KRUM BULYAN Med.
+
+ResNet-18
+VGG13-BN
+
+80.3%
+42.98%
+
+76.8%
+46.82%
+
+86.21%
+59.51%
+
+45.24%
+17.18%
+
+42.56% 43.7%
+11.06% 8.64%
+
+(a) ResNet-18 on CIFAR-10
+
+(b) VGG13-BN on CIFAR-100
+
+Figure 6: Convergence comparisons between DETOX paired with SIGNSGD and vanilla SIGNSGD under con-
+stant Byzantine attack on: (a) ResNet-18 trained on CIFAR-10; (b) VGG13-BN trained on CIFAR-100
+
+compared to vanilla MULTI-KRUM  BULYAN  and coordinate-wise median on both datasets as shown
+in Table 1. We then consider the reverse gradient attack  the results are shown in Figure 4. Since
+reverse gradient is a much weaker attack  all vanilla robust aggregation methods and their DETOX
+paired variants defend well. Moreover  applying DETOX leads to signiﬁcant end-to-end speedups.
+In particular  combining the coordinate-wise median with DETOX led to a 5⇥ speedup gain in the
+amount of time to achieve to 90% test set prediction accuracy for ResNet-18 trained on CIFAR-10.
+The speedup results are shown in Figure 5. For VGG13-BN trained on CIFAR-100  an order of
+magnitude end-to-end speedup can be observed in coordinate-wise median applied on top of DETOX.
+
+Comparison between DETOX and SIGNSGD We compare DETOX paired SIGNSGD with vanilla
+SIGNSGD where only the sign of each gradient coordinate is sent to the PS. The PS  on receiving
+these gradient signs  takes coordiante-wise majority votes to get the model update. We consider a
+stronger constant Byzantine attack introduced in Section 5.2. The details of our implementation and
+hyper-parameters used are in Appendix B.4. The results on both the considered datasets are shown
+in Figure 6 where we see that DETOX paired with SIGNSGD improves the Byzantine resilience of
+SIGNSGD signiﬁcantly. For ResNet-18 trained on CIFAR-10  DETOX improves testset prediction
+accuracy of vanilla SIGNSGD from 34.92% to 78.75%; while for VGG13-BN trained on CIFAR-100 
+DETOX improves testset prediction accuracy (TOP-1) of vanilla SIGNSGD from 2.12% to 40.37%.
+For completeness  we compare DETOX with DRACO [7]. This is not the focus of this work  as we are
+primarily interested in showing that DETOX improves the robustness of traditional robust aggregators.
+However the comparisons with DRACO are in Appendix B.7. Another experimental study of mean
+estimation task over synthetic data that directly matches our theory can be found in Appendix B.5.
+
+6 Conclusion
+
+In this paper  we present DETOX  a new framework for Byzantine-resilient distributed training.
+Notably  any robust aggregator can be immediatley used with DETOX to increase its robustness and
+efﬁciency. We demonstrate these improvements theoretically and empirically. In the future  we
+would like to devise a privacy-preserving version of DETOX  as currently it requires the PS to be
+the owner of the data  and also to partition data among compute nodes  which hurts the data privacy.
+Overcoming this limitation would allow us to develop variants of DETOX for federated learning.
+
+9
+
+050010001500200025003000350040001um oI IterDtions203040506070807est AccurDcy (%)D-sign6GDsign6GD0100020003000400050001um oI IterDtions0510152025303540Test AccurDcy (%)D-signSGDsignSGDAcknowledgments
+This research is supported by an NSF CAREER Award #1844951  a Sony Faculty Innovation Award 
+an AFOSR & AFRL Center of Excellence Award FA9550-18-1-0166  and an NSF TRIPODS Award
+#1740707. The authors also thank Ankit Pensia for useful discussions about the Median of Means
+approach.
+
+References
+[1] Peva Blanchard  El Mahdi El Mhamdi  Rachid Guerraoui  and Julien Stainer. Machine learning
+with adversaries: Byzantine tolerant gradient descent. In Advances in Neural Information
+Processing Systems 30: Annual Conference on Neural Information Processing Systems 2017 
+4-9 December 2017  Long Beach  CA  USA  pages 118–128  2017.
+
+[2] Yudong Chen  Lili Su  and Jiaming Xu. Distributed statistical machine learning in adversarial
+settings: Byzantine gradient descent. Proceedings of the ACM on Measurement and Analysis of
+Computing Systems  1(2):44  2017.
+
+[3] Cong Xie  Oluwasanmi Koyejo  and Indranil Gupta. Generalized byzantine-tolerant sgd. arXiv
+
+preprint arXiv:1802.10116  2018.
+
+[4] Georgios Damaskinos  El Mahdi El Mhamdi  Rachid Guerraoui  and Sebastien Guirguis 
+Arsany Rouault. Aggregathor: Byzantine machine learning via robust gradient aggregation.
+Conference on Systems and Machine Learning  2019.
+
+[5] Dong Yin  Yudong Chen  Kannan Ramchandran  and Peter Bartlett. Defending against saddle
+
+point attack in byzantine-robust distributed learning. CoRR  abs/1806.05358  2018.
+
+[6] Dong Yin  Yudong Chen  Kannan Ramchandran  and Peter Bartlett. Byzantine-robust distributed
+learning: Towards optimal statistical rates. In International Conference on Machine Learning 
+pages 5636–5645  2018.
+
+[7] Lingjiao Chen  Hongyi Wang  Zachary Charles  and Dimitris Papailiopoulos. Draco: Byzantine-
+resilient distributed training via redundant gradients. In International Conference on Machine
+Learning  pages 902–911  2018.
+
+[8] Deepesh Data  Linqi Song  and Suhas Diggavi. Data encoding for byzantine-resilient distributed
+gradient descent. In 2018 56th Annual Allerton Conference on Communication  Control  and
+Computing (Allerton)  pages 863–870. IEEE  2018.
+
+[9] Qian Yu  Netanel Raviv  Jinhyun So  and A Salman Avestimehr. Lagrange coded computing:
+
+Optimal design for resiliency  security and privacy. arXiv preprint arXiv:1806.00939  2018.
+
+[10] El Mahdi El Mhamdi  Rachid Guerraoui  and Sébastien Rouault. The hidden vulnerability of
+
+distributed learning in byzantium. arXiv preprint arXiv:1802.07927  2018.
+
+[11] Moran Baruch  Gilad Baruch  and Yoav Goldberg. A little is enough: Circumventing defenses
+
+for distributed learning. arXiv preprint arXiv:1902.06156  2019.
+
+[12] Leslie Lamport  Robert Shostak  and Marshall Pease. The byzantine generals problem. ACM
+
+Transactions on Programming Languages and Systems (TOPLAS)  4(3):382–401  1982.
+
+[13] El-Mahdi El-Mhamdi  Rachid Guerraoui  Arsany Guirguis  and Sebastien Rouault. Sgd:
+
+Decentralized byzantine resilience. arXiv preprint arXiv:1905.03853  2019.
+
+[14] Cong Xie  Oluwasanmi Koyejo  and Indranil Gupta. Zeno: Byzantine-suspicious stochastic
+
+gradient descent. arXiv preprint arXiv:1805.10032  2018.
+
+[15] Cong Xie  Sanmi Koyejo  and Indranil Gupta. Fall of empires: Breaking byzantine-tolerant sgd
+
+by inner product manipulation. arXiv preprint arXiv:1903.03936  2019.
+
+10
+
+[16] El-Mahdi El-Mhamdi and Rachid Guerraoui. Fast and secure distributed learning in high
+
+dimension. arXiv preprint arXiv:1905.04374  2019.
+
+[17] Peva Blanchard  Rachid Guerraoui  Julien Stainer  et al. Machine learning with adversaries:
+Byzantine tolerant gradient descent. In Advances in Neural Information Processing Systems 
+pages 119–129  2017.
+
+[18] Dan Alistarh  Zeyuan Allen-Zhu  and Jerry Li. Byzantine stochastic gradient descent. In
+S. Bengio  H. Wallach  H. Larochelle  K. Grauman  N. Cesa-Bianchi  and R. Garnett  editors 
+Advances in Neural Information Processing Systems 31  pages 4618–4628. Curran Associates 
+Inc.  2018.
+
+[19] Jeremy Bernstein  Jiawei Zhao  Kamyar Azizzadenesheli  and Anima Anandkumar. signsgd
+
+with majority vote is communication efﬁcient and fault tolerant. arXiv  2018.
+
+[20] Stanislav Minsker et al. Geometric median and robust estimation in banach spaces. Bernoulli 
+
+21(4):2308–2335  2015.
+
+[21] Gábor Lugosi  Shahar Mendelson  et al. Sub-gaussian estimators of the mean of a random
+
+vector. The Annals of Statistics  47(2):783–794  2019.
+
+[22] Adam Paszke  Sam Gross  Soumith Chintala  Gregory Chanan  Edward Yang  Zachary DeVito 
+Zeming Lin  Alban Desmaison  Luca Antiga  and Adam Lerer. Automatic differentiation in
+pytorch. 2017.
+
+[23] Lisandro D Dalcin  Rodrigo R Paz  Pablo A Kler  and Alejandro Cosimo. Parallel distributed
+
+computing using python. Advances in Water Resources  34(9):1124–1139  2011.
+
+[24] Kaiming He  Xiangyu Zhang  Shaoqing Ren  and Jian Sun. Deep residual learning for image
+recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition 
+pages 770–778  2016.
+
+[25] Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale
+
+image recognition. arXiv preprint arXiv:1409.1556  2014.
+
+[26] Nathan Linial and Zur Luria. Chernoff’s inequality-a very elementary proof. arXiv preprint
+
+arXiv:1403.7739  2014.
+
+[27] J. Ramon C. Pelekis. Hoeffding’s inequality for sums of weakly dependent random variables.
+
+Mediterranean Journal of Mathematics  2017.
+
+[28] Georgios Damaskinos  El Mahdi El Mhamdi  Rachid Guerraoui  Arsany Guirguis  and Sèbastien
+Rouault. Aggregathor: Byzantine machine learning via robust gradient aggregation. In SysML 
+2019.
+
+11
+
+,Daniel Moyer
+Shuyang Gao
+Rob Brekelmans
+Aram Galstyan
+Greg Ver Steeg
+Shashank Rajput
+Hongyi Wang
+Zachary Charles
+Dimitris Papailiopoulos

@@ -1,0 +1,1460 @@
+2018,LAG: Lazily Aggregated Gradient for Communication-Efficient Distributed Learning,This paper presents a new class of gradient methods for distributed 
+machine learning that adaptively skip the gradient calculations to 
+learn with reduced communication and computation. Simple rules 
+are designed to detect slowly-varying gradients and  therefore  
+trigger the reuse of outdated gradients. The resultant gradient-based 
+algorithms are termed Lazily Aggregated Gradient --- justifying our 
+acronym LAG used henceforth. Theoretically  the merits of 
+this contribution are: i) the convergence rate is the same as batch 
+gradient descent in strongly-convex  convex  and nonconvex cases; 
+and  ii) if the distributed datasets are heterogeneous (quantified by 
+certain measurable constants)  the communication rounds needed 
+to achieve a targeted accuracy are reduced thanks to the adaptive 
+reuse of lagged gradients. Numerical experiments on both 
+synthetic and real data corroborate a significant communication 
+reduction compared to alternatives.,LAG: Lazily Aggregated Gradient for
+
+Communication-Efﬁcient Distributed Learning
+
+Tianyi Chen⋆
+
+Georgios B. Giannakis⋆
+
+Tao Suny;(cid:3)
+
+Wotao Yin(cid:3)
+
+yNational University of Defense Technology  Changsha  Hunan 410073  China
+
+⋆University of Minnesota - Twin Cities  Minneapolis  MN 55455  USA
+(cid:3)University of California - Los Angeles  Los Angeles  CA 90095  USA
+
+{chen3827 georgios@umn.edu} nudtsuntao@163.com wotaoyin@math.ucla.edu
+
+Abstract
+
+This paper presents a new class of gradient methods for distributed machine learn-
+ing that adaptively skip the gradient calculations to learn with reduced commu-
+nication and computation. Simple rules are designed to detect slowly-varying
+gradients and  therefore  trigger the reuse of outdated gradients. The resultant
+gradient-based algorithms are termed Lazily Aggregated Gradient — justifying
+our acronym LAG used henceforth. Theoretically  the merits of this contribution
+are:
+i) the convergence rate is the same as batch gradient descent in strongly-
+convex  convex  and nonconvex cases; and  ii) if the distributed datasets are hetero-
+geneous (quantiﬁed by certain measurable constants)  the communication rounds
+needed to achieve a targeted accuracy are reduced thanks to the adaptive reuse of
+lagged gradients. Numerical experiments on both synthetic and real data corrobo-
+rate a signiﬁcant communication reduction compared to alternatives.
+
+1
+
+Introduction
+
+L((cid:18)) with L((cid:18)) :=
+
+Lm((cid:18))
+
+∑
+
+m2M
+
+In this paper  we develop communication-efﬁcient algorithms to solve the following problem
+
+n2Nm
+
+min
+(cid:18)2Rd
+
+∑
+
+(1)
+where (cid:18) 2 Rd is the unknown vector  L and fLm; m2Mg are smooth (but not necessarily convex)
+functions with M := f1; : : : ; Mg. Problem (1) naturally arises in a number of areas  such as
+multi-agent optimization [1]  distributed signal processing [2]  and distributed machine learning [3].
+Considering the distributed machine learning paradigm  each Lm is also a sum of functions  e.g. 
+Lm((cid:18)) :=
+ℓn((cid:18))  where ℓn is the loss function (e.g.  square or the logistic loss) with respect
+to the vector (cid:18) (describing the model) evaluated at the training sample xn; that is  ℓn((cid:18)) := ℓ((cid:18); xn).
+While machine learning tasks are traditionally carried out at a single server  for datasets with massive
+samples fxng  running gradient-based iterative algorithms at a single server can be prohibitively
+slow; e.g.  the server needs to sequentially compute gradient components given limited processors.
+A simple yet popular solution in recent years is to parallelize the training across multiple computing
+units (a.k.a. workers) [3]. Speciﬁcally  assuming batch samples distributedly stored in a total of
+M workers with the worker m 2 M associated with samples fxn; n 2 Nmg  a globally shared
+model (cid:18) will be updated at the central server by aggregating gradients computed by workers. Due
+to bandwidth and privacy concerns  each worker m will not upload its data fxn; n 2 Nmg to the
+server  thus the learning task needs to be performed by iteratively communicating with the server.
+We are particularly interested in the scenarios where communication between the central server and
+the local workers is costly  as is the case with the Federated Learning setting [4  5]  the cloud-edge
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+AI systems [6]  and more in the emerging Internet-of-Things paradigm [7]. In those cases  communi-
+cation latency is the bottleneck of overall performance. More precisely  the communication latency
+is a result of initiating communication links  queueing and propagating the message. For sending
+small messages  e.g.  the d-dimensional model (cid:18) or aggregated gradient  this latency dominates the
+message size-dependent transmission latency. Therefore  it is important to reduce the number of
+communication rounds  even more so than the bits per round. In short  our goal is to ﬁnd the model
+parameter (cid:18) that minimizes (1) using as low communication overhead as possible.
+
+1.1 Prior art
+
+To put our work in context  we review prior contributions that we group in two categories.
+Large-scale machine learning. Solving (1) at a single server has been extensively studied for large-
+scale learning tasks  where the “workhorse approach” is the simple yet efﬁcient stochastic gradient
+descent (SGD) [8  9]. Albeit its low per-iteration complexity  the inherited variance prevents SGD
+to achieve fast convergence. Recent advances include leveraging the so-termed variance reduction
+techniques to achieve both low complexity and fast convergence [10–12]. For learning beyond
+a single server  distributed parallel machine learning is an attractive solution to tackle large-scale
+learning tasks  where the parameter server architecture is the most commonly used one [3  13]. Dif-
+ferent from the single server case  parallel implementation of the batch gradient descent (GD) is a
+popular choice  since SGD that has low complexity per iteration requires a large number of iterations
+thus communication rounds [14]. For traditional parallel learning algorithms however  latency  band-
+width limits  and unexpected drain on resources  that delay the update of even a single worker will
+slow down the entire system operation. Recent research efforts in this line have been centered on
+understanding asynchronous-parallel algorithms to speed up machine learning by eliminating costly
+synchronization; e.g.  [15–20]. All these approaches either reduce the computational complexity  or 
+reduce the run time  but they do not save communication.
+Communication-efﬁcient learning. Going beyond single-server learning  the high communication
+overhead becomes the bottleneck of the overall system performance [14]. Communication-efﬁcient
+learning algorithms have gained popularity [21  22]. Distributed learning approaches have been de-
+veloped based on quantized (gradient) information  e.g.  [23–26]  but they only reduce the required
+bandwidth per communication  not the rounds. For machine learning tasks where the loss function
+is convex and its conjugate dual is expressible  the dual coordinate ascent-based approaches have
+been demonstrated to yield impressive empirical performance [5  27  28]. But these algorithms run
+in a double-loop manner  and the communication reduction has not been formally quantiﬁed. To
+reduce communication by accelerating convergence  approaches leveraging (inexact) second-order
+information have been studied in [29  30]. Roughly speaking  algorithms in [5  27–30] reduce com-
+munication by increasing local computation (relative to GD)  while our method does not increase lo-
+cal computation. In settings different from the one considered in this paper  communication-efﬁcient
+approaches have been recently studied with triggered communication protocols [31  32]. Except for
+convergence guarantees however  no theoretical justiﬁcation for communication reduction has been
+established in [31]. While a sublinear convergence rate can be achieved by algorithms in [32]  the
+proposed gradient selection rule is nonadaptive and requires double-loop iterations.
+
+1.2 Our contributions
+
+Before introducing our approach  we revisit the popular GD method for (1) in the setting of one
+parameter server and M workers: At iteration k  the server broadcasts the current model (cid:18)k to all
+the workers; every worker m 2 M computes ∇Lm
+and uploads it to the server; and once
+receiving gradients from all workers  the server updates the model parameters via
+
+(cid:18)k
+
+GD iteration
+
+(cid:18)k+1 = (cid:18)k (cid:0) (cid:11)∇k
+
+GD with ∇k
+
+GD :=
+
+∇Lm
+
+(cid:18)k
+
+(2)
+
+(
+
+)
+
+where (cid:11) is a stepsize  and ∇k
+implement (2)  the server has to communicate with all workers to obtain fresh f∇Lm
+In this context  the present paper puts forward a new batch gradient method (as simple as GD)
+that can skip communication at certain rounds  which justiﬁes the term Lazily Aggregated Gradient
+
+GD is an aggregated gradient that summarizes the model change. To
+
+(cid:18)k
+
+(
+
+)
+
+∑
+
+m2M
+
+(
+
+)g.
+
+2
+
+Metric
+Algorithm PS!WK m WK m !PS
+
+Communication
+PS
+∇Lm
+(cid:18)k
+m  if m2Mk (4)  (12b) ∇Lm  if m2Mk (cid:18)k;∇k;f^(cid:18)
+m  if m2Mk
+(cid:18)k;∇k
+
+Computation
+WK m
+∇Lm
+
+∇Lm; (12a)
+
+(cid:18)k  if m2Mk (cid:14)∇k
+(cid:14)∇k
+
+GD
+
+LAG-PS
+LAG-WK
+
+PS
+(2)
+
+(4)
+
+(cid:18)k
+
+(cid:18)k
+
+Memory
+
+WK m
+
+=
+
+k
+
+mg ∇Lm(^(cid:18)
+∇Lm(^(cid:18)
+
+k
+m)
+k
+m)
+
+Table 1: A comparison of communication  computation and memory requirements. PS denotes the
+parameter server  WK denotes the worker  PS!WK m is the communication link from the server
+to the worker m  and WK m ! PS is the communication link from the worker m to the server.
+(LAG). With its derivations deferred to Section 2  LAG resembles (2)  given by
+k
+LAG iteration
+^(cid:18)
+m
+
+(cid:18)k+1 = (cid:18)k (cid:0) (cid:11)∇k with ∇k :=
+
+∑
+
+∇Lm
+
+(
+
+)
+
+(3)
+
+m2M
+
+m
+
+m2Mk
+
+k
+
+m) is either ∇Lm((cid:18)k)  when ^(cid:18)
+
+where each ∇Lm(^(cid:18)
+k
+m = (cid:18)k  or an outdated gradient that has been
+̸= (cid:18)k. Instead of requesting fresh gradient from every worker in (2) 
+computed using an old copy ^(cid:18)
+the twist is to obtain ∇k by reﬁning the previous aggregated gradient ∇k(cid:0)1; that is  using only the
+new gradients from the selected workers in Mk  while reusing the outdated gradients from the rest
+k(cid:0)1
+m ; 8m =2Mk  LAG in (3) is equivalent to
+of workers. Therefore  with ^(cid:18)
+LAG iteration
+(4)
+
+m := (cid:18)k; 8m2Mk; ^(cid:18)
+(cid:18)k+1 = (cid:18)k (cid:0) (cid:11)∇k with ∇k =∇k(cid:0)1 +
+
+∑
+
+m := ^(cid:18)
+
+(cid:14)∇k
+
+k
+m
+
+k
+
+k
+
+k(cid:0)1
+m := ∇Lm((cid:18)k)(cid:0)∇Lm(^(cid:18)
+m ) is the difference between two evaluations of ∇Lm at the
+where (cid:14)∇k
+k(cid:0)1
+m . If ∇k(cid:0)1 is stored in the server  this simple modiﬁcation
+current iterate (cid:18)k and the old copy ^(cid:18)
+scales down the per-iteration communication rounds from GD’s M to LAG’s jMkj.
+We develop two different rules to select Mk. The ﬁrst rule is adopted by the parameter server (PS) 
+and the second one by every worker (WK). At iteration k 
+LAG-PS: the server determines Mk and sends (cid:18)k to the workers in Mk; each worker m 2 Mk
+computes ∇Lm((cid:18)k) and uploads (cid:14)∇k
+m; each workerm=2Mk does nothing; the server updates via (4);
+LAG-WK: the server broadcasts (cid:18)k to all workers; every worker computes ∇Lm((cid:18)k)  and checks
+if it belongs to Mk; only the workers in Mk upload (cid:14)∇k
+See a comparison of two LAG variants with GD in Table 1.
+Naively reusing outdated gradients  while saving
+communication per iteration  can increase the to-
+tal number of iterations. To keep this number in
+control  we judiciously design our simple trigger
+i) achieve the same order
+rules so that LAG can:
+of convergence rates (thus iteration complexities)
+as batch GD under strongly-convex  convex  and
+nonconvex smooth cases; and  ii) require reduced
+communication to achieve a targeted learning ac-
+Figure 1: LAG in a parameter server setup.
+curacy  when the distributed datasets are heteroge-
+neous (measured by certain quantity speciﬁed later). In certain learning settings  LAG requires only
+O(1=M ) communication of GD. Empirically  we found that LAG can reduce the communication
+required by GD and other distributed learning methods by an order of magnitude.
+Notation. Bold lowercase letters denote column vectors  which are transposed by ((cid:1))
+⊤. And ∥x∥
+denotes the ℓ2-norm of x. Inequalities for vectors x > 0 is deﬁned entrywise.
+
+m; the server updates via (4).
+
+2 LAG: Lazily Aggregated Gradient Approach
+
+In this section  we formally develop our LAG method  and present the intuition and basic principles
+behind its design. The original idea of LAG comes from a simple rewriting of the GD iteration (2)
+as
+
+∑
+
+∑
+
+(
+
+))
+
+(
+
+(cid:18)k+1 = (cid:18)k (cid:0) (cid:11)
+
+∇Lm((cid:18)k(cid:0)1) (cid:0) (cid:11)
+
+∇Lm
+
+(cid:18)k
+
+) (cid:0) ∇Lm
+
+(
+
+(cid:18)k(cid:0)1
+
+:
+
+(5)
+
+m2M
+
+m2M
+
+3
+
+Parameter Server (PS)Workersm2Mk
+
+c
+
+Let us view ∇Lm((cid:18)k)(cid:0)∇Lm((cid:18)k(cid:0)1) as a reﬁnement to ∇Lm((cid:18)k(cid:0)1)  and recall that obtaining this
+reﬁnement requires a round of communication between the server and the worker m. Therefore  to
+save communication  we can skip the server’s communication with the worker m if this reﬁnement is
+m2M ∇Lm((cid:18)k(cid:0)1)∥.
+k(cid:0)1
+m )g with
+(cid:21) 0  if communicating with some workers will bring only small
+(
+
+small compared to the old gradient; that is  ∥∇Lm((cid:18)k)(cid:0)∇Lm((cid:18)k(cid:0)1)∥ ≪ ∥∑
+Generalizing on this intuition  given the generic outdated gradient components f∇Lm(^(cid:18)
+k(cid:0)1
+m = (cid:18)k(cid:0)1(cid:0)(cid:28) k(cid:0)1
+))
+(
+) (cid:0) ∇Lm
+^(cid:18)
+gradient reﬁnements  we skip those communications (contained in set Mk
+))
+(
+
+for a certain (cid:28) k(cid:0)1
+∑
+
+) (cid:0) (cid:11)
+(
+∑
+
+(
+∇Lm
+
+c ) and end up with
+
+(cid:18)k+1 = (cid:18)k (cid:0) (cid:11)
+
+∑
+(
+
+∇Lm
+
+k(cid:0)1
+m
+
+k(cid:0)1
+m
+
+m2M
+
+(6a)
+
+^(cid:18)
+
+^(cid:18)
+
+m
+
+m
+
+m
+
+(
+) (cid:0) ∇Lm
+
+(cid:18)k
+
+(cid:18)k
+
+= (cid:18)k (cid:0) (cid:11)∇L((cid:18)k) (cid:0) (cid:11)
+
+m2Mk
+^(cid:18)
+
+∇Lm
+
+k(cid:0)1
+m
+
+(6b)
+
+where Mk and Mk
+c are the sets of workers that do and do not communicate with the server  respec-
+tively. It is easy to verify that (6) is identical to (3) and (4). Comparing (2) with (6b)  when Mk
+c
+includes more workers  more communication is saved  but (cid:18)k is updated by a coarser gradient.
+Key to addressing this communication versus accuracy tradeoff is a principled criterion to select
+a subset of workers Mk
+c that do not communicate with the server at each round. To achieve this
+“sweet spot ” we will rely on the fundamental descent lemma. For GD  it is given as follows [33].
+Lemma 1 (GD descent in objective) Suppose L((cid:18)) is L-smooth  and (cid:22)(cid:18)k+1 is generated by run-
+ning one-step GD iteration (2) given (cid:18)k and stepsize (cid:11). Then the objective values satisfy
+
+(
+
+)
+
+L((cid:22)(cid:18)k+1) (cid:0) L((cid:18)k) (cid:20) (cid:0)
+
+(cid:11) (cid:0) (cid:11)2L
+2
+
+∥∇L((cid:18)k)∥2 := ∆k
+
+GD((cid:18)k):
+
+(7)
+
+Likewise  for our wanted iteration (6)  the following holds; its proof is given in the Supplement.
+Lemma 2 (LAG descent in objective) Suppose L((cid:18)) is L-smooth  and (cid:18)k+1 is generated by run-
+ning one-step LAG iteration (4) given (cid:18)k. Then the objective values satisfy (cf. (cid:14)∇k
+L((cid:18)k+1)(cid:0)L((cid:18)k) (cid:20)(cid:0) (cid:11)
+2
+
+)(cid:13)(cid:13)(cid:13)(cid:18)k+1(cid:0)(cid:18)k
+
+(cid:13)(cid:13)(cid:13)∇L((cid:18)k)
+(cid:13)(cid:13)(cid:13)2
+
+(cid:13)(cid:13)(cid:13) ∑
+
+m in (4))
+
+(cid:0) 1
+2(cid:11)
+
+LAG((cid:18)k):
+
+(cid:13)(cid:13)(cid:13)2
+
+(cid:13)(cid:13)(cid:13)2
+
+(cid:14)∇k
+
+:= ∆k
+
+(
+
+L
+2
+
+(cid:11)
+2
+
+(8)
+
++
+
++
+
+m
+
+m2Mk
+
+c
+
+Lemmas 1 and 2 estimate the objective value descent by performing one-iteration of the GD and
+LAG methods  respectively  conditioned on a common iterate (cid:18)k. GD ﬁnds ∆k
+GD((cid:18)k) by performing
+LAG((cid:18)k) by performing only
+M rounds of communication with all the workers  while LAG yields ∆k
+jMkj rounds of communication with a selected subset of workers. Our pursuit is to select Mk to
+ensure that LAG enjoys larger per-communication descent than GD; that is
+
+(cid:11)2M 2
+
+(cid:24)d
+
+d=1
+
+4
+
+LAG((cid:18)k)=jMkj (cid:20) ∆k
+∆k
+
+GD((cid:18)k)=M:
+
+(
+
+(cid:13)(cid:13)(cid:13)∇Lm
+
+^(cid:18)
+
+Choosing the standard (cid:11) = 1=L  we can show that in order to guarantee (9)  it is sufﬁcient to have
+(see the supplemental material for the deduction)
+
+(10)
+However  directly checking (10) at each worker is expensive since obtaining ∥∇L((cid:18)k)∥2 requires
+information from all the workers. Instead  we approximate ∥∇L((cid:18)k)∥2 in (10) by
+
+=M 2; 8m 2 Mk
+c :
+
+(cid:18)k
+
+(
+
+k(cid:0)1
+m
+
+)(cid:13)(cid:13)(cid:13)2 (cid:20)
+)(cid:0)∇Lm
+(cid:13)(cid:13)(cid:13)2 (cid:25) 1
+(cid:13)(cid:13)(cid:13)∇L((cid:18)k)
+D∑
+
+(cid:13)(cid:13)(cid:13)2
+
+(cid:13)(cid:13)(cid:13)∇L((cid:18)k)
+(cid:13)(cid:13)(cid:13)(cid:18)k+1(cid:0)d (cid:0) (cid:18)k(cid:0)d
+
+(cid:24)d
+
+(cid:13)(cid:13)(cid:13)2
+
+(cid:11)2
+
+d=1
+
+where f(cid:24)dgD
+d=1 are constant weights  and the constant D determines the number of recent iterate
+changes that LAG incorporates to approximate the current gradient. The rationale here is that  as L
+is smooth  ∇L((cid:18)k) cannot be very different from the recent gradients or the recent iterate lags.
+D∑
+Building upon (10) and (11)  we will include worker m in Mk
+
+c of (6) if it satisﬁes
+
+(cid:13)(cid:13)(cid:13)(cid:18)k+1(cid:0)d(cid:0)(cid:18)k(cid:0)d
+
+(cid:13)(cid:13)(cid:13)2
+
+:
+
+(cid:13)(cid:13)(cid:13)∇Lm(^(cid:18)
+
+(cid:13)(cid:13)(cid:13)2(cid:20) 1
+
+LAG-WK condition
+
+k(cid:0)1
+m )(cid:0)∇Lm((cid:18)k)
+
+(12a)
+
+(9)
+
+(11)
+
+0
+
+m); 8mg.
+
+Server broadcasts (cid:18)k to all workers.
+for worker m = 1; : : : ; M do
+Worker m computes ∇Lm((cid:18)k).
+Worker m checks condition (12a).
+if worker m violates (12a) then
+
+Algorithm 1 LAG-WK
+1: Input: Stepsize (cid:11) > 0  and threshold f(cid:24)dg.
+2: Initialize: (cid:18)1;f∇Lm(^(cid:18)
+3: for k = 1; 2; : : : ; K do
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15:
+16: end for
+
+Worker m uploads (cid:14)∇k
+m.
+▷ Save ∇Lm(^(cid:18)
+
+end for
+Server updates via (4).
+
+m) = ∇Lm((cid:18)k)
+
+Worker m uploads nothing.
+
+end if
+
+else
+
+k
+
+0
+
+0
+
+m;∇Lm(^(cid:18)
+
+Server checks condition (12b).
+if worker m violates (12b) then
+
+m);8mg.
+for worker m = 1; : : : ; M do
+
+Algorithm 2 LAG-PS
+1: Input: Stepsize (cid:11) > 0  f(cid:24)dg  and Lm; 8m.
+2: Initialize: (cid:18)1;f^(cid:18)
+3: for k = 1; 2; : : : ; K do
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15:
+16: end for
+
+Server sends (cid:18)k to worker m.
+k
+m = (cid:18)k at server
+Worker m computes ∇Lm((cid:18)k).
+Worker m uploads (cid:14)∇k
+m.
+
+end for
+Server updates via (4).
+
+▷ Save ^(cid:18)
+
+end if
+
+else
+
+No actions at server and worker m.
+
+Table 2: A comparison of LAG-WK and LAG-PS.
+
+Condition (12a) is checked at the worker side after each worker receives (cid:18)k from the server and
+computes its ∇Lm((cid:18)k). If broadcasting is also costly  we can resort to the following server side rule:
+
+(cid:13)(cid:13)(cid:13)^(cid:18)
+
+(cid:13)(cid:13)(cid:13)2 (cid:20) 1
+
+D∑
+
+(cid:13)(cid:13)(cid:13)(cid:18)k+1(cid:0)d (cid:0) (cid:18)k(cid:0)d
+
+(cid:13)(cid:13)(cid:13)2
+
+LAG-PS condition
+
+L2
+m
+
+k(cid:0)1
+m (cid:0) (cid:18)k
+
+(cid:11)2M 2
+
+(cid:24)d
+
+d=1
+
+:
+
+(12b)
+
+The values of f(cid:24)dg and D admit simple choices  e.g.  (cid:24)d = 1=D; 8d with D = 10 used in simula-
+tions.
+LAG-WK vs LAG-PS. To perform (12a)  the server needs to broadcast the current model (cid:18)k  and
+all the workers need to compute the gradient; while performing (12b)  the server needs the estimated
+smoothness constant Lm for all the local functions. On the other hand  as it will be shown in Section
+3  (12a) and (12b) lead to the same worst-case convergence guarantees. In practice  however  the
+server-side condition is more conservative than the worker-side one at communication reduction 
+because the smoothness of Lm readily implies that satisfying (12b) will necessarily satisfy (12a) 
+but not vice versa. Empirically  (12a) will lead to a larger Mk
+c than that of (12b)  and thus extra
+communication overhead will be saved. Hence  (12a) and (12b) can be chosen according to users’
+preferences. LAG-WK and LAG-PS are summarized as Algorithms 1 and 2.
+Regarding our proposed LAG method  three remarks are in order.
+R1) With recursive update of the lagged gradients in (4) and the lagged iterates in (12)  implementing
+LAG is as simple as GD; see Table 1. Both empirically and theoretically  we will further demonstrate
+that using lagged gradients even reduces the overall delay by cutting down costly communication.
+R2) Although both LAG and asynchronous-parallel algorithms in [15–20] leverage stale gradients 
+they are very different. LAG actively creates staleness  and by design  it reduces total communication
+despite the staleness. Asynchronous algorithms passively receives staleness  and increases total
+communication due to the staleness  but it saves run time.
+R3) Compared with existing efforts for communication-efﬁcient learning such as quantized gradient 
+Nesterov’s acceleration  dual coordinate ascent and second-order methods  LAG is not orthogonal
+to all of them. Instead  LAG can be combined with these methods to develop even more powerful
+learning schemes. Extension to the proximal LAG is also possible to cover nonsmooth regularizers.
+
+3
+
+Iteration and communication complexity
+
+In this section  we establish the convergence of LAG  under the following standard conditions.
+Assumption 1: Loss function Lm((cid:18)) is Lm-smooth  and L((cid:18)) is L-smooth.
+Assumption 2: L((cid:18)) is convex and coercive.
+
+Assumption 3: L((cid:18)) is (cid:22)-strongly convex.
+
+5
+
+D∑
+
+(cid:13)(cid:13)(cid:13)(cid:18)k+1(cid:0)d (cid:0) (cid:18)k(cid:0)d
+
+(cid:13)(cid:13)(cid:13)2
+
+The subsequent convergence analysis critically builds on the following Lyapunov function:
+
+Vk := L((cid:18)k) (cid:0) L((cid:18)
+
+(cid:3)
+
+(cid:3)
+
+(cid:12)d
+
+) +
+
+(13)
+is the minimizer of (1)  and f(cid:12)dg is a sequence of constants that will be determined later.
+
+where (cid:18)
+We will start with the sufﬁcient descent of our Vk in (13).
+Lemma 3 (descent lemma) Under Assumption 1  if (cid:11) and f(cid:24)dg are chosen properly  there exist
+constants c0;(cid:1)(cid:1)(cid:1) ; cD (cid:21) 0 such that the Lyapunov function in (13) satisﬁes
+
+d=1
+
+(cid:13)(cid:13)(cid:13)∇L((cid:18)k)
+
+(cid:13)(cid:13)(cid:13)2 (cid:0) D∑
+
+cd
+
+(cid:13)(cid:13)(cid:13)(cid:18)k+1(cid:0)d(cid:0)(cid:18)k(cid:0)d
+
+(cid:13)(cid:13)(cid:13)2
+
+Vk+1 (cid:0) Vk (cid:20) (cid:0)c0
+
+(14)
+
+which implies the descent in our Lyapunov function  that is  Vk+1 (cid:20) Vk.
+Lemma 3 is a generalization of GD’s descent lemma. As speciﬁed in the supplementary material 
+under properly chosen f(cid:24)dg  the stepsize (cid:11) 2 (0; 2=L) including (cid:11) = 1=L guarantees (14)  matching
+the stepsize region of GD. With Mk = M and (cid:12)d = 0; 8d in (13)  Lemma 3 reduces to Lemma 1.
+
+d=1
+
+3.1 Convergence in strongly convex case
+
+√
+D (cid:0) d + 1
+D=(cid:24)
+2(cid:11)
+
+(16)
+
+(cid:12)1 = (cid:1)(cid:1)(cid:1) = (cid:12)D :=
+)
+
+and
+
+(
+
+(cid:0)1
+ϵ
+
+(
+
+L
+
+) (cid:0) L(
+
+(cid:3)) (cid:20)(
+
+We ﬁrst present the convergence under the smooth and strongly convex condition.
+Theorem 1 (strongly convex case) Under Assumptions 1-3  the iterates f(cid:18)kg of LAG satisfy
+
+(cid:3)
+
+(cid:18)K
+
+(15)
+is the minimizer of L((cid:18)) in (1)  and c((cid:11);f(cid:24)dg) 2 (0; 1) is a constant depending on (cid:11); f(cid:24)dg
+where (cid:18)
+and f(cid:12)dg and the condition number (cid:20) := L=(cid:22)  which are speciﬁed in the supplementary material.
+Iteration complexity. The iteration complexity in its generic form is complicated since c((cid:11);f(cid:24)dg)
+depends on the choice of several parameters. Speciﬁcally  if we choose the parameters as follows
+
+(cid:18)
+
+1 (cid:0) c((cid:11);f(cid:24)dg)
+
+K V0
+
+)
+
+(cid:24)1 = (cid:1)(cid:1)(cid:1) = (cid:24)D := (cid:24) <
+
+1
+D
+
+and
+
+(cid:11) :=
+
+1 (cid:0) p
+
+D(cid:24)
+
+L
+
+then  following Theorem 1  the iteration complexity of LAG in this case is
+
+ILAG(ϵ) =
+
+(cid:20)
+
+1 (cid:0) p
+
+:
+
+log
+
+D(cid:24)
+
+(17)
+(cid:0)1)  but
+The iteration complexity in (17) is on the same order of GD’s iteration complexity (cid:20) log(ϵ
+has a worse constant. This is the consequence of using a smaller stepsize in (16) (relative to (cid:11) = 1=L
+in GD) to simplify the choice of other parameters. Empirically  LAG with (cid:11) = 1=L can achieve
+almost the same empirical iteration complexity as GD; see Section 4. Building on the iteration
+complexity  we study next the communication complexity of LAG. In the setting of our interest  we
+deﬁne the communication complexity as the total number of uploads over all the workers needed to
+achieve accuracy ϵ. While the accuracy refers to the objective optimality error in the strongly convex
+case  it is considered as the gradient norm in general (non)convex cases.
+The power of LAG is best illustrated by numerical examples; see an example of LAG-WK in Figure
+2. Clearly  workers with a small smoothness constant communicate with the server less frequently.
+This intuition will be formally treated in the next lemma.
+Lemma 4 (lazy communication) Deﬁne the importance factor of every worker m as H(m) :=
+Lm=L. If the stepsize (cid:11) and the constants f(cid:24)dg in the conditions (12) satisfy (cid:24)D (cid:20) (cid:1)(cid:1)(cid:1) (cid:20) (cid:24)d (cid:20)
+(cid:1)(cid:1)(cid:1) (cid:20) (cid:24)1 and worker m satisﬁes
+
+/
+
+H2(m) (cid:20) (cid:24)d
+
+(d(cid:11)2L2M 2) := (cid:13)d
+
+(18)
+
+then  until the k-th iteration  worker m communicates with the server at most k=(d + 1) rounds.
+Lemma 4 asserts that if the worker m has a small Lm (a close-to-linear loss function) such that
+H2(m) (cid:20) (cid:13)d  then under LAG  it only communicates with the server at most k=(d + 1) rounds.
+This is in contrast to the total of k communication rounds involved per worker under GD. Ideally 
+we want as many workers satisfying (18) as possible  especially when d is large.
+
+6
+
+To quantify the overall communication reduction 
+we deﬁne the heterogeneity score function as
+
+∑
+
+1
+M
+
+1(H2(m) (cid:20) (cid:13))
+
+m2M
+
+h((cid:13)) :=
+
+(19)
+where the indicator 1 equals 1 when H2(m) (cid:20) (cid:13)
+holds  and 0 otherwise. Clearly  h((cid:13)) is a nonde-
+creasing function of (cid:13)  that depends on the distribu-
+tion of smoothness constants L1; L2; : : : ; LM . It is
+also instructive to view it as the cumulative distribu-
+tion function of the deterministic quantity H2(m) 
+implying h((cid:13)) 2 [0; 1]. Putting it in our context  the
+critical quantity h((cid:13)d) lower bounds the fraction of
+workers that communicate with the server at most k=(d + 1) rounds until the k-th iteration. We are
+now ready to present the communication complexity.
+Proposition 5 (communication complexity) With (cid:13)d deﬁned in (18) and the function h((cid:13)) in (19) 
+the communication complexity of LAG denoted as CLAG(ϵ) is bounded by
+
+Figure 2: Communication events of workers
+1; 3; 5; 7; 9 over 1; 000 iterations. Each stick
+is an upload. A setup with L1 < : : : < L9.
+
+)
+
+)
+
+(
+1 (cid:0) ∆ (cid:22)C(h;f(cid:13)dg)
+
+)
+
+M ILAG(ϵ)
+
+(20)
+
+(
+1 (cid:0) D∑
+
+(
+
+d=1
+
+CLAG(ϵ) (cid:20)
+
+1
+d
+
+(cid:0) 1
+
+d + 1
+
+h ((cid:13)d)
+
+M ILAG(ϵ) :=
+
+∑
+
+(
+
+)
+
+d+1
+
+)
+
+)
+
+(
+
+D
+d=1
+
+1
+d
+
+√
+
+h ((cid:13)d).
+
+(cid:0) 1
+
+/(
+
+CLAG(ϵ) (cid:20)
+
+1 (cid:0) ∆ (cid:22)C(h; (cid:24))
+
+where the constant is deﬁned as ∆ (cid:22)C(h;f(cid:13)dg) :=
+The communication complexity in (20) crucially depends on the iteration complexity ILAG(ϵ) as
+well as what we call the fraction of reduced communication per iteration ∆ (cid:22)C(h;f(cid:13)dg). Simply
+choosing the parameters as (16)  it follows from (17) and (20) that (cf. (cid:13)d = (cid:24)(1 (cid:0) p
+(cid:0)1)
+CGD(ϵ)
+(21)
+(cid:0)1). In (21)  due to the nondecreasing prop-
+where the GD’s complexity is CGD(ϵ) = M (cid:20) log(ϵ
+erty of h((cid:13))  increasing the constant (cid:24) yields a smaller fraction of workers 1 (cid:0) ∆ (cid:22)C(h; (cid:24)) that are
+communicating per iteration  yet with a larger number of iterations (cf. (17)). The key enabler of
+LAG’s communication reduction is a heterogeneous environment associated with a favorable h((cid:13))
+ensuring that the beneﬁt of increasing (cid:24) is more signiﬁcant than its effect on increasing iteration
+complexity. More precisely  for a given (cid:24)  if h((cid:13)) guarantees ∆ (cid:22)C(h; (cid:24)) >
+D(cid:24)  then we have
+CLAG(ϵ) <CGD(ϵ). Intuitively speaking  if there is a large fraction of workers with small Lm  LAG
+has lower communication complexity than GD. An example follows to illustrate this reduction.
+Example. Consider Lm = 1; m ̸= M  and LM = L (cid:21) M 2 ≫ 1  where we have H(m) =
+1=L; m ̸= M; H(M ) = 1  implying that h((cid:13)) (cid:21) 1 (cid:0) 1
+M   if (cid:13) (cid:21) 1=L2. Choosing D (cid:21) M and
+)]/(
+(cid:24) = M 2D=L2 < 1=D in (16) such that (cid:13)D (cid:21) 1=L2 in (18)  we have (cf. (21))
+
+(cid:0)2M
+
+(cid:0)2d
+
+1 (cid:0)
+
+(
+
+)
+
+D(cid:24)
+
+:
+
+[
+
+p
+
+D(cid:24))
+
+/
+
+CLAG(ϵ)
+
+CGD(ϵ) (cid:20)
+
+1 (cid:0)
+
+1 (cid:0) 1
+
+D + 1
+
+1 (cid:0) M D=L
+
+(cid:25) M + D
+M (D + 1)
+
+(cid:25) 2
+M
+
+:
+
+(22)
+
+)(
+1 (cid:0) 1
+M
+
+Due to technical issues in the convergence analysis  the current condition on h((cid:13)) to ensure LAG’s
+communication reduction is relatively restrictive. Establishing communication reduction on a
+broader learning setting that matches the LAG’s intriguing empirical performance is in our agenda.
+
+3.2 Convergence in (non)convex case
+
+LAG’s convergence and communication reduction guarantees go beyond the strongly-convex case.
+We next establish the convergence of LAG for general convex functions.
+Theorem 2 (convex case) Under Assumptions 1 and 2  if (cid:11) and f(cid:24)dg are chosen properly  then
+
+L((cid:18)K ) (cid:0) L((cid:18)
+
+(cid:3)
+
+) = O (1=K) :
+
+For nonconvex objective functions  LAG can guarantee the following convergence result.
+Theorem 3 (nonconvex case) Under Assumption 1  if (cid:11) and f(cid:24)dg are chosen properly  then
+
+(cid:13)(cid:13)2 = o (1=K) and min
+
+(cid:13)(cid:13)∇L((cid:18)k)
+
+(cid:13)(cid:13)2 = o (1=K) :
+
+(cid:13)(cid:13)(cid:18)k+1 (cid:0) (cid:18)k
+
+min
+1(cid:20)k(cid:20)K
+
+1(cid:20)k(cid:20)K
+
+7
+
+(23)
+
+(24)
+
+01WK 101WK 301WK 501WK 701002003004005006007008009001000Iteration index k01WK 9Increasing Lm
+
+Increasing Lm
+
+Uniform Lm
+
+Uniform Lm
+
+Figure 3: Iteration and communication complexity in synthetic datasets.
+
+Linear regression
+
+Linear regression
+
+Logistic regression
+
+Logistic regression
+
+Figure 4: Iteration and communication complexity in real datasets.
+
+Theorems 2 and 3 assert that with the judiciously designed lazy gradient aggregation rules  LAG can
+achieve order of convergence rate identical to GD for general (non)convex objective functions.
+Similar to Proposition 5  in the supplementary material  we have also shown that in the (non)convex
+case  LAG still requires less communication than GD  under certain conditions on the function h((cid:13)).
+
+4 Numerical tests and conclusions
+
+(cid:3)
+
+∑
+
+m2M Lm.
+
+To validate the theoretical results  this section evaluates the empirical performance of LAG in linear
+and logistic regression tasks. All experiments were performed using MATLAB on an Intel CPU @
+3.4 GHz (32 GB RAM) desktop. By default  we consider one server  and nine workers. Throughout
+the test  we use L((cid:18)k) (cid:0) L((cid:18)
+) as ﬁgure of merit of our solution. For logistic regression  the regular-
+(cid:0)3. To benchmark LAG  we consider the following approaches.
+ization parameter is set to (cid:21) = 10
+▷ Cyc-IAG is the cyclic version of the incremental aggregated gradient (IAG) method [9  10] that
+resembles the recursion (4)  but communicates with one worker per iteration in a cyclic fashion.
+▷ Num-IAG also resembles the recursion (4)  and is the non-uniform-sampling enhancement of SAG
+[12]  but it randomly selects one worker to obtain a fresh gradient per-iteration with the probability
+of choosing worker m equal to Lm=
+▷ Batch-GD is the GD iteration (2) that communicates with all the workers per iteration.
+For LAG-WK  we choose (cid:24)d = (cid:24) = 1=D with D = 10  and for LAG-PS  we choose more aggressive
+(cid:24)d = (cid:24) = 10=D with D = 10. Stepsizes for LAG-WK  LAG-PS  and GD are chosen as (cid:11) = 1=L;
+to optimize performance and guarantee stability  (cid:11) = 1=(M L) is used in Cyc-IAG and Num-IAG.
+We consider two synthetic data tests: a) linear regression with increasing smoothness constants 
+e.g.  Lm = (1:3m(cid:0)1 + 1)2; 8m; and  b) logistic regression with uniform smoothness constants  e.g. 
+L1 = : : : = L9 = 4; see Figure 3. For the case of increasing Lm  it is not surprising that both LAG
+variants need fewer communication rounds. Interesting enough  for uniform Lm  LAG-WK still has
+marked improvements on communication  thanks to its ability of exploiting the hidden smoothness
+of the loss functions; that is  the local curvature of Lm may not be as steep as Lm.
+Performance is also tested on the real datasets [2]: a) linear regression using Housing  Body fat 
+Abalone datasets; and  b) logistic regression using Ionosphere  Adult  Derm datasets; see Figure 4.
+Each dataset is evenly split into three workers with the number of features used in the test equal to the
+minimal number of features among all datasets; see the details of parameters and data allocation in
+the supplement material. In all tests  LAG-WK outperforms the alternatives in terms of both metrics 
+especially reducing the needed communication rounds by several orders of magnitude. Its needed
+communication rounds can be even smaller than the number of iterations  if none of workers violate
+
+8
+
+2004006008001000Number of iteration10-5100Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GD101102103Number of communications (uploads)10-5100Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GD00.511.522.5Number of iteration×10410-5100Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GD101102103104Number of communications (uploads)10-5100Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GD010002000300040005000Number of iteration10-5100105Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GD101102103104Number of communications (uploads)10-5100105Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GD00.511.522.533.5Number of iteration×10410-810-610-410-2100102Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GD101102103104Number of communications (uploads)10-5100Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GDAlgorithm
+Cyclic-IAG
+Num-IAG
+LAG-PS
+LAG-WK
+Batch GD
+
+M = 9
+5271
+3466
+1756
+412
+5283
+
+M = 18
+10522
+5283
+3610
+657
+10548
+
+Table 3: Communication complexity (ϵ = 10
+
+Linear regression
+
+Logistic regression
+
+M = 9
+33300
+22113
+14423
+
+584
+33309
+
+M = 27
+15773
+5815
+5944
+1058
+15822
+(cid:0)8) in real dataset under different number of workers.
+
+M = 27
+97773
+37262
+44598
+1723
+97821
+
+M = 18
+65287
+30540
+29968
+1098
+65322
+
+Figure 5: Iteration and communication complexity in Gisette dataset.
+
+the trigger condition (12) at certain iterations. Additional tests under different number of workers
+are listed in Table 3  which corroborate the effectiveness of LAG when it comes to communication
+reduction. Similar performance gain has also been observed in the additional logistic regression test
+on a larger dataset Gisette. The dataset was taken from [7] which was constructed from the MNIST
+data [8]. After random selecting subset of samples and eliminating all-zero features  it contains 2000
+samples xn 2 R4837. We randomly split this dataset into nine workers. The performance of all the
+algorithms is reported in Figure 5 in terms of the iteration and communication complexity. Clearly 
+LAG-WK and LAG-PS achieve the same iteration complexity as GD  and outperform Cyc- and Num-
+IAG. Regarding communication complexity  two LAG variants reduce the needed communication
+rounds by several orders of magnitude compared with the alternatives.
+Conﬁrmed by the impressive empirical performance on both synthetic and real datasets  this paper
+developed a promising communication-cognizant method for distributed machine learning that we
+term Lazily Aggregated gradient (LAG) approach. LAG can achieve the same convergence rates as
+batch gradient descent (GD) in smooth strongly-convex  convex  and nonconvex cases  and requires
+fewer communication rounds than GD given that the datasets at different workers are heterogeneous.
+To overcome the limitations of LAG  future work consists of incorporating smoothing techniques to
+handle nonsmooth loss functions  and robustifying our aggregation rules to deal with cyber attacks.
+
+Acknowledgments
+
+The work by T. Chen and G. Giannakis is supported in part by NSF 1500713 and 1711471  and NIH
+1R01GM104975-01. The work by T. Chen is also supported by the Doctoral Dissertation Fellowship
+from the University of Minnesota. The work by T. Sun is supported in part by China Scholarship
+Council. The work by W. Yin is supported in part by NSF DMS-1720237 and ONR N0001417121.
+
+9
+
+012345Number of iteration×10510-1100101102103Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GD101102103104105Number of communications (uploads)10-1100101102103Objective errorCyc-IAGNum-IAGLAG-PSLAG-WKBatch-GDReferences
+[1] A. Nedic and A. Ozdaglar  “Distributed subgradient methods for multi-agent optimization ” IEEE Trans.
+
+Automat. Control  vol. 54  no. 1  pp. 48–61  Jan. 2009.
+
+[2] G. B. Giannakis  Q. Ling  G. Mateos  I. D. Schizas  and H. Zhu  “Decentralized Learning for Wireless
+Communications and Networking ” in Splitting Methods in Communication and Imaging  Science and
+Engineering. New York: Springer  2016.
+
+[3] J. Dean  G. Corrado  R. Monga  K. Chen  M. Devin  M. Mao  A. Senior  P. Tucker  K. Yang  Q. V. Le
+et al.  “Large scale distributed deep networks ” in Proc. Advances in Neural Info. Process. Syst.  Lake
+Tahoe  NV  2012  pp. 1223–1231.
+
+[4] B. McMahan  E. Moore  D. Ramage  S. Hampson  and B. A. y Arcas  “Communication-efﬁcient learning
+of deep networks from decentralized data ” in Proc. Intl. Conf. Artiﬁcial Intell. and Stat.  Fort Lauderdale 
+FL  Apr. 2017  pp. 1273–1282.
+
+[5] V. Smith  C.-K. Chiang  M. Sanjabi  and A. S. Talwalkar  “Federated multi-task learning ” in Proc. Ad-
+
+vances in Neural Info. Process. Syst.  Long Beach  CA  Dec. 2017  pp. 4427–4437.
+
+[6] I. Stoica  D. Song  R. A. Popa  D. Patterson  M. W. Mahoney  R. Katz  A. D. Joseph  M. Jor-
+dan  J. M. Hellerstein  J. E. Gonzalez et al.  “A Berkeley view of systems challenges for AI ” arXiv
+preprint:1712.05855  Dec. 2017.
+
+[7] T. Chen  S. Barbarossa  X. Wang  G. B. Giannakis  and Z.-L. Zhang  “Learning and management for
+
+Internet-of-Things: Accounting for adaptivity and scalability ” Proc. of the IEEE  Nov. 2018.
+
+[8] L. Bottou  “Large-Scale Machine Learning with Stochastic Gradient Descent ” in Proc. of COMP-
+
+STAT’2010  Y. Lechevallier and G. Saporta  Eds. Heidelberg: Physica-Verlag HD  2010  pp. 177–186.
+
+[9] L. Bottou  F. E. Curtis  and J. Nocedal  “Optimization methods for large-scale machine learning ” arXiv
+
+preprint:1606.04838  Jun. 2016.
+
+[10] R. Johnson and T. Zhang  “Accelerating stochastic gradient descent using predictive variance reduction ”
+
+in Proc. Advances in Neural Info. Process. Syst.  Lake Tahoe  NV  Dec. 2013  pp. 315–323.
+
+[11] A. Defazio  F. Bach  and S. Lacoste-Julien  “Saga: A fast incremental gradient method with support for
+non-strongly convex composite objectives ” in Proc. Advances in Neural Info. Process. Syst.  Montreal 
+Canada  Dec. 2014  pp. 1646–1654.
+
+[12] M. Schmidt  N. Le Roux  and F. Bach  “Minimizing ﬁnite sums with the stochastic average gradient ”
+
+Mathematical Programming  vol. 162  no. 1-2  pp. 83–112  Mar. 2017.
+
+[13] M. Li  D. G. Andersen  A. J. Smola  and K. Yu  “Communication efﬁcient distributed machine learning
+with the parameter server ” in Proc. Advances in Neural Info. Process. Syst.  Montreal  Canada  Dec. 2014 
+pp. 19–27.
+
+[14] B. McMahan and D. Ramage  “Federated learning: Collaborative machine learning without centralized
+training data ” Google Research Blog  Apr. 2017. [Online]. Available: https://research.googleblog.com/
+2017/04/federated-learning-collaborative.html
+
+[15] L. Cannelli  F. Facchinei  V. Kungurtsev  and G. Scutari  “Asynchronous parallel algorithms for nonconvex
+
+big-data optimization: Model and convergence ” arXiv preprint:1607.04818  Jul. 2016.
+
+[16] T. Sun  R. Hannah  and W. Yin  “Asynchronous coordinate descent under more realistic assumptions ” in
+
+Proc. Advances in Neural Info. Process. Syst.  Long Beach  CA  Dec. 2017  pp. 6183–6191.
+
+[17] Z. Peng  Y. Xu  M. Yan  and W. Yin  “Arock: an algorithmic framework for asynchronous parallel coordi-
+
+nate updates ” SIAM J. Sci. Comp.  vol. 38  no. 5  pp. 2851–2879  Sep. 2016.
+
+[18] B. Recht  C. Re  S. Wright  and F. Niu  “Hogwild: A lock-free approach to parallelizing stochastic gradi-
+ent descent ” in Proc. Advances in Neural Info. Process. Syst.  Granada  Spain  Dec. 2011  pp. 693–701.
+
+[19] J. Liu  S. Wright  C. Ré  V. Bittorf  and S. Sridhar  “An asynchronous parallel stochastic coordinate
+
+descent algorithm ” J. Machine Learning Res.  vol. 16  no. 1  pp. 285–322  2015.
+
+[20] X. Lian  Y. Huang  Y. Li  and J. Liu  “Asynchronous parallel stochastic gradient for nonconvex optimiza-
+
+tion ” in Proc. Advances in Neural Info. Process. Syst.  Montreal  Canada  Dec. 2015  pp. 2737–2745.
+
+10
+
+[21] M. I. Jordan  J. D. Lee  and Y. Yang  “Communication-efﬁcient distributed statistical inference ” J. Amer-
+
+ican Statistical Association  vol. to appear  2018.
+
+[22] Y. Zhang  J. C. Duchi  and M. J. Wainwright  “Communication-efﬁcient algorithms for statistical opti-
+
+mization.” J. Machine Learning Res.  vol. 14  no. 11  2013.
+
+[23] A. T. Suresh  X. Y. Felix  S. Kumar  and H. B. McMahan  “Distributed mean estimation with limited
+
+communication ” in Proc. Intl. Conf. Machine Learn.  Sydney  Australia  Aug. 2017  pp. 3329–3337.
+
+[24] D. Alistarh  D. Grubic  J. Li  R. Tomioka  and M. Vojnovic  “QSGD: Communication-efﬁcient SGD via
+gradient quantization and encoding ” In Proc. Advances in Neural Info. Process. Syst.  pages 1709–1720 
+Long Beach  CA  Dec. 2017.
+
+[25] W. Wen  C. Xu  F. Yan  C. Wu  Y. Wang  Y. Chen  and H. Li  “TernGrad: Ternary gradients to reduce
+communication in distributed deep learning ” In Proc. Advances in Neural Info. Process. Syst.  pages
+1509–1519  Long Beach  CA  Dec. 2017.
+
+[26] A. F. Aji and K. Heaﬁeld  “Sparse communication for distributed gradient descent ” In Proc. of Empirical
+
+Methods in Natural Language Process.  pages 440–445  Copenhagen  Denmark  Sep. 2017.
+
+[27] M. Jaggi  V. Smith  M. Takác  J. Terhorst  S. Krishnan  T. Hofmann  and M. I. Jordan  “Communication-
+efﬁcient distributed dual coordinate ascent ” in Proc. Advances in Neural Info. Process. Syst.  Montreal 
+Canada  Dec. 2014  pp. 3068–3076.
+
+[28] C. Ma  J. Koneˇcn`y  M. Jaggi  V. Smith  M. I. Jordan  P. Richtárik  and M. Takáˇc  “Distributed optimization
+with arbitrary local solvers ” Optimization Methods and Software  vol. 32  no. 4  pp. 813–848  Jul. 2017.
+
+[29] O. Shamir  N. Srebro  and T. Zhang  “Communication-efﬁcient distributed optimization using an approx-
+imate newton-type method ” in Proc. Intl. Conf. Machine Learn.  Beijing  China  Jun. 2014  pp. 1000–
+1008.
+
+[30] Y. Zhang and X. Lin  “DiSCO: Distributed optimization for self-concordant empirical loss ” in Proc. Intl.
+
+Conf. Machine Learn.  Lille  France  Jun. 2015  pp. 362–370.
+
+[31] Y. Liu  C. Nowzari  Z. Tian  and Q. Ling  “Asynchronous periodic event-triggered coordination of multi-
+agent systems ” in Proc. IEEE Conf. Decision Control  Melbourne  Australia  Dec. 2017  pp. 6696–6701.
+
+[32] G. Lan  S. Lee  and Y. Zhou  “Communication-efﬁcient algorithms for decentralized and stochastic opti-
+
+mization ” arXiv preprint:1701.03961  Jan. 2017.
+
+[33] Y. Nesterov  Introductory Lectures on Convex Optimization: A basic course. Berlin  Germany: Springer 
+
+2013  vol. 87.
+
+[34] D. Blatt  A. O. Hero  and H. Gauchman  “A convergent incremental gradient method with a constant step
+
+size ” SIAM J. Optimization  vol. 18  no. 1  pp. 29–51  Feb. 2007.
+
+[35] M. Gurbuzbalaban  A. Ozdaglar  and P. A. Parrilo  “On the convergence rate of incremental aggregated
+
+gradient algorithms ” SIAM J. Optimization  vol. 27  no. 2  pp. 1035–1048  Jun. 2017.
+
+[36] M. Lichman  “UCI machine learning repository ” 2013. [Online]. Available: http://archive.ics.uci.edu/ml
+
+[37] L. Song  A. Smola  A. Gretton  K. M. Borgwardt  and J. Bedo  “Supervised feature selection via depen-
+
+dence estimation ” in Proc. Intl. Conf. Machine Learn.  Corvallis  OR  Jun. 2007  pp. 823–830.
+
+[38] Y. LeCun  L. Bottou  Y. Bengio  and P. Haffner  “Gradient-based learning applied to document recogni-
+
+tion ” Proc. of the IEEE  vol. 86  no. 11  pp. 2278–2324  Nov. 1998.
+
+11
+
+,Tianyi Chen
+Georgios Giannakis
+Tao Sun
+Wotao Yin

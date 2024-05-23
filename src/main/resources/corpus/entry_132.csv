@@ -1,0 +1,742 @@
+2016,A Multi-Batch L-BFGS Method for Machine Learning,The question of how to parallelize the stochastic gradient descent (SGD) method has received much attention in the literature. In this paper  we focus instead on batch methods that use a sizeable fraction of the training set at each iteration to facilitate parallelism  and that employ second-order information. In order to improve the learning process  we follow a multi-batch approach in which the batch changes at each iteration. This can cause difficulties because L-BFGS employs gradient differences to update the Hessian approximations  and when these gradients are computed using different data points the process can be unstable. This paper shows how to perform stable quasi-Newton updating in the multi-batch setting  illustrates the behavior of the algorithm in a distributed computing platform  and studies its convergence properties for both the convex and nonconvex cases.,A Multi-Batch L-BFGS Method for Machine
+
+Learning
+
+Albert S. Berahas
+
+Northwestern University
+
+Evanston  IL
+
+albertberahas@u.northwestern.edu
+
+Jorge Nocedal
+
+Northwestern University
+
+Evanston  IL
+
+j-nocedal@northwestern.edu
+
+Martin Takáˇc
+
+Lehigh University
+
+Bethlehem  PA
+
+takac.mt@gmail.com
+
+Abstract
+
+The question of how to parallelize the stochastic gradient descent (SGD) method
+has received much attention in the literature. In this paper  we focus instead on batch
+methods that use a sizeable fraction of the training set at each iteration to facilitate
+parallelism  and that employ second-order information. In order to improve the
+learning process  we follow a multi-batch approach in which the batch changes
+at each iteration. This can cause difﬁculties because L-BFGS employs gradient
+differences to update the Hessian approximations  and when these gradients are
+computed using different data points the process can be unstable. This paper shows
+how to perform stable quasi-Newton updating in the multi-batch setting  illustrates
+the behavior of the algorithm in a distributed computing platform  and studies its
+convergence properties for both the convex and nonconvex cases.
+
+1
+
+Introduction
+
+It is common in machine learning to encounter optimization problems involving millions of parameters
+and very large datasets. To deal with the computational demands imposed by such applications  high
+performance implementations of stochastic gradient and batch quasi-Newton methods have been
+developed [1  11  9]. In this paper we study a batch approach based on the L-BFGS method [20] that
+strives to reach the right balance between efﬁcient learning and productive parallelism.
+In supervised learning  one seeks to minimize empirical risk 
+
+n(cid:88)
+
+i=1
+
+n(cid:88)
+
+i=1
+
+F (w) :=
+
+1
+n
+
+f (w; xi  yi) def=
+
+1
+n
+
+fi(w) 
+
+i=1 denote the training examples and f (·; x  y) : Rd → R is the composition of a
+where (xi  yi)n
+prediction function (parametrized by w) and a loss function. The training problem consists of ﬁnding
+an optimal choice of the parameters w ∈ Rd with respect to F   i.e. 
+
+fi(w).
+
+(1.1)
+
+n(cid:88)
+
+i=1
+
+F (w) =
+
+min
+w∈Rd
+
+1
+n
+
+At present  the preferred optimization method is the stochastic gradient descent (SGD) method [23  5] 
+and its variants [14  24  12]  which are implemented either in an asynchronous manner (e.g. when
+
+30th Conference on Neural Information Processing Systems (NIPS 2016)  Barcelona  Spain.
+
+using a parameter server in a distributed setting) or following a synchronous mini-batch approach that
+exploits parallelism in the gradient evaluation [2  22  13]. A drawback of the asynchronous approach
+is that it cannot use large batches  as this would cause updates to become too dense and compromise
+the stability and scalability of the method [16  22]. As a result  the algorithm spends more time in
+communication as compared to computation. On the other hand  using a synchronous mini-batch
+approach one can achieve a near-linear decrease in the number of SGD iterations as the mini-batch
+size is increased  up to a certain point after which the increase in computation is not offset by the
+faster convergence [26].
+An alternative to SGD is a batch method  such as L-BFGS  which is able to reach high training
+accuracy and allows one to perform more computation per node  so as to achieve a better balance
+with communication costs [27]. Batch methods are  however  not as efﬁcient learning algorithms as
+SGD in a sequential setting [6]. To beneﬁt from the strength of both methods some high performance
+systems employ SGD at the start and later switch to a batch method [1].
+Multi-Batch Method. In this paper  we follow a different approach consisting of a single method
+that selects a sizeable subset (batch) of the training data to compute a step  and changes this batch at
+each iteration to improve the learning abilities of the method. We call this a multi-batch approach
+to differentiate it from the mini-batch approach used in conjunction with SGD  which employs a
+very small subset of the training data. When using large batches it is natural to employ a quasi-
+Newton method  as incorporating second-order information imposes little computational overhead
+and improves the stability and speed of the method. We focus here on the L-BFGS method  which
+employs gradient information to update an estimate of the Hessian and computes a step in O(d) ﬂops 
+where d is the number of variables. The multi-batch approach can  however  cause difﬁculties to
+L-BFGS because this method employs gradient differences to update Hessian approximations. When
+the gradients used in these differences are based on different data points  the updating procedure can
+be unstable. Similar difﬁculties arise in a parallel implementation of the standard L-BFGS method  if
+some of the computational nodes devoted to the evaluation of the function and gradient are unable to
+return results on time — as this again amounts to using different data points to evaluate the function
+and gradient at the beginning and the end of the iteration. The goal of this paper is to show that stable
+quasi-Newton updating can be achieved in both settings without incurring extra computational cost  or
+special synchronization. The key is to perform quasi-Newton updating based on the overlap between
+consecutive batches. The only restriction is that this overlap should not be too small  something that
+can be achieved in most situations.
+Contributions. We describe a novel implementation of the batch L-BFGS method that is robust in
+the absence of sample consistency; i.e.  when different samples are used to evaluate the objective
+function and its gradient at consecutive iterations. The numerical experiments show that the method
+proposed in this paper — which we call the multi-batch L-BFGS method — achieves a good balance
+between computation and communication costs. We also analyze the convergence properties of the
+new method (using a ﬁxed step length strategy) on both convex and nonconvex problems.
+
+2 The Multi-Batch Quasi-Newton Method
+
+In a pure batch approach  one applies a gradient based method  such as L-BFGS [20]  to the
+deterministic optimization problem (1.1). When the number n of training examples is large  it is
+natural to parallelize the evaluation of F and ∇F by assigning the computation of the component
+functions fi to different processors. If this is done on a distributed platform  it is possible for some
+of the computational nodes to be slower than the rest. In this case  the contribution of the slow (or
+unresponsive) computational nodes could be ignored given the stochastic nature of the objective
+function. This leads  however  to an inconsistency in the objective function and gradient at the
+beginning and at the end of the iteration  which can be detrimental to quasi-Newton methods. Thus 
+we seek to ﬁnd a fault-tolerant variant of the batch L-BFGS method that is capable of dealing with
+slow or unresponsive computational nodes.
+A similar challenge arises in a multi-batch implementation of the L-BFGS method in which the entire
+i=1} is not employed at every iteration  but rather  a subset of the data is
+training set T = {(xi  yi)n
+used to compute the gradient. Speciﬁcally  we consider a method in which the dataset is randomly
+divided into a number of batches — say 10  50  or 100 — and the minimization is performed with
+respect to a different batch at every iteration. At the k-th iteration  the algorithm chooses a batch
+
+2
+
+Sk ⊂ {1  . . .   n}  computes
+1
+|Sk|
+
+F Sk (wk) =
+
+(cid:88)
+
+i∈Sk
+
+fi (wk)  
+
+∇F Sk (wk) = gSk
+
+k =
+
+1
+|Sk|
+
+∇fi (wk)  
+
+(2.2)
+
+and takes a step along the direction −HkgSk
+k   where Hk is an approximation to ∇2F (wk)−1. Allow-
+ing the sample Sk to change freely at every iteration gives this approach ﬂexibility of implementation
+and is beneﬁcial to the learning process  as we show in Section 4. (We refer to Sk as the sample of
+training points  even though Sk only indexes those points.)
+The case of unresponsive computational nodes and the multi-batch method are similar. The main
+difference is that node failures create unpredictable changes to the samples Sk  whereas a multi-batch
+method has control over sample generation. In either case  the algorithm employs a stochastic approx-
+imation to the gradient and can no longer be considered deterministic. We must  however  distinguish
+our setting from that of the classical SGD method  which employs small mini-batches and noisy
+gradient approximations. Our algorithm operates with much larger batches so that distributing the
+function evaluation is beneﬁcial and the compute time of gSk
+k is not overwhelmed by communication
+costs. This gives rise to gradients with relatively small variance and justiﬁes the use of a second-order
+method such as L-BFGS.
+Robust Quasi-Newton Updating. The difﬁculties created by the use of a different sample Sk at each
+iteration can be circumvented if consecutive samples Sk and Sk+1 overlap  so that Ok = Sk∩Sk+1 (cid:54)=
+∅. One can then perform stable quasi-Newton updating by computing gradient differences based on
+this overlap  i.e.  by deﬁning
+(2.3)
+in the notation given in (2.2). The correction pair (yk  sk) can then be used in the BFGS update.
+When the overlap set Ok is not too small  yk is a useful approximation of the curvature of the objective
+function F along the most recent displacement  and will lead to a productive quasi-Newton step. This
+observation is based on an important property of Newton-like methods  namely that there is much
+more freedom in choosing a Hessian approximation than in computing the gradient [7  3]. Thus  a
+smaller sample Ok can be employed for updating the inverse Hessian approximation Hk than for
+computing the batch gradient gSk
+k . In summary  by ensuring that
+k
+unresponsive nodes do not constitute the vast majority of all working nodes in a fault-tolerant parallel
+implementation  or by exerting a small degree of control over the creation of the samples Sk in the
+multi-batch method  one can design a robust method that naturally builds upon the fundamental
+properties of BFGS updating.
+We should mention in passing that a commonly used strategy for ensuring stability of quasi-Newton
+updating in machine learning is to enforce gradient consistency [25]  i.e.  to use the same sample
+Sk to compute gradient evaluations at the beginning and the end of the iteration. Another popular
+remedy is to use the same batch Sk for multiple iterations [19]  alleviating the gradient inconsistency
+problem at the price of slower convergence. In this paper  we assume that achieving such sample
+consistency is not possible (in the fault-tolerant case) or desirable (in a multi-batch framework)  and
+wish to design a new variant of L-BFGS that imposes minimal restrictions in the sample changes.
+
+in the search direction −HkgSk
+
+sk+1 = wk+1 − wk 
+
+yk+1 = gOk
+
+k+1 − gOk
+k  
+
+2.1 Speciﬁcation of the Method
+At the k-th iteration  the multi-batch BFGS algorithm chooses a set Sk ⊂ {1  . . .   n} and computes a
+new iterate
+(2.4)
+is the batch gradient (2.2) and Hk is the inverse BFGS Hessian
+
+where αk is the step length  gSk
+k
+matrix approximation that is updated at every iteration by means of the formula
+
+wk+1 = wk − αkHkgSk
+k  
+
+Hk+1 = V T
+
+k HkVk + ρksksT
+k  
+
+ρk = 1
+yT
+k sk
+
+ 
+
+Vk = I − ρkyksT
+k .
+
+To compute the correction vectors (sk  yk)  we determine the overlap set Ok = Sk ∩ Sk+1 consisting
+of the samples that are common at the k-th and k + 1-st iterations. We deﬁne
+
+(cid:88)
+
+i∈Sk
+
+F Ok (wk) =
+
+1
+|Ok|
+
+(cid:88)
+
+i∈Ok
+
+fi (wk)  
+
+∇F Ok (wk) = gOk
+
+k =
+
+1
+|Ok|
+
+3
+
+(cid:88)
+
+i∈Ok
+
+∇fi (wk)  
+
+and compute the correction vectors as in (2.3). In this paper we assume that αk is constant.
+In the limited memory version  the matrix Hk is deﬁned at each iteration as the result of applying
+m BFGS updates to a multiple of the identity matrix  using a set of m correction pairs {si  yi}
+kept in storage. The memory parameter m is typically in the range 2 to 20. When computing the
+matrix-vector product in (2.4) it is not necessary to form that matrix Hk since one can obtain this
+product via the two-loop recursion [20]  using the m most recent correction pairs {si  yi}. After the
+step has been computed  the oldest pair (sj  yj) is discarded and the new curvature pair is stored.
+A pseudo-code of the proposed method is given below  and depends on several parameters. The
+parameter r denotes the fraction of samples in the dataset used to deﬁne the gradient  i.e.  r = |S|n .
+The parameter o denotes the length of overlap between consecutive samples  and is deﬁned as a
+fraction of the number of samples in a given batch S  i.e.  o = |O|
+|S|
+
+.
+
+Algorithm 1 Multi-Batch L-BFGS
+Input: w0 (initial iterate)  T = {(xi  yi)  for i = 1  . . .   n} (training set)  m (memory parameter)  r
+(batch  fraction of n)  o (overlap  fraction of batch)  k ← 0 (iteration counter).
+(cid:46) As shown in Firgure 1
+1: Create initial batch S0
+2: for k = 0  1  2  ... do
+3:
+4:
+5:
+6:
+7:
+8:
+9: end for
+
+Calculate the search direction pk = −HkgSk
+Choose the step length αk > 0
+Compute wk+1 = wk + αkpk
+Create the next batch Sk+1
+Compute the curvature pairs sk+1 = wk+1 − wk and yk+1 = gOk
+Replace the oldest pair (si  yi) by sk+1  yk+1
+
+(cid:46) Using L-BFGS formula
+
+k
+
+k+1 − gOk
+
+k
+
+2.2 Sample Generation
+
+We now discuss how the sample Sk+1 is created at each iteration (Line 8 in Algorithm 1).
+Distributed Computing with Faults. Consider a distributed implementation in which slave nodes
+read the current iterate wk from the master node  compute a local gradient on a subset of the
+dataset  and send it back to the master node for aggregation in the calculation (2.2). Given a time
+(computational) budget  it is possible for some nodes to fail to return a result. The schematic in
+Figure 1a illustrates the gradient calculation across two iterations  k and k+1  in the presence of faults.
+Here Bi  i = 1  ...  B denote the batches of data that each slave node i receives (where T = ∪iBi) 
+and ˜∇f (w) is the gradient calculation using all nodes that responded within the preallocated time.
+
+Figure 1: Sample and Overlap formation.
+
+Let Jk ⊂ {1  2  ...  B} and Jk+1 ⊂ {1  2  ...  B} be the set of indices of all nodes that returned a
+gradient at the k-th and k + 1-st iterations  respectively. Using this notation Sk = ∪j∈JkBj and
+Sk+1 = ∪j∈Jk+1Bj  and we deﬁne Ok = ∪j∈Jk∩Jk+1Bj. The simplest implementation in this
+setting preallocates the data on each compute node  requiring minimal data communication  i.e.  only
+
+4
+
+MASTERNODESLAVENODESMASTERNODE(a)(b)wkwkwkwkB1B1B2B2B3B3BBBB···wk+1wk+1wk+1wk+1B1B1B2B2B3B3BBBB···˜rfBB(wk)˜rfBB(wk)˜rfB3(wk)˜rfB3(wk)˜rfB1(wk)˜rfB1(wk)˜rfBB(wk+1)˜rfBB(wk+1)˜rfB1(wk+1)˜rfB1(wk+1)˜rf(wk)˜rf(wk+1)SHUFFLEDDATAndSHUFFLEDDATAO0O0O1O1O2O2O3O3O4O4O5O5O6S0S1S2S3S4S5S6one data transfer. In this case the samples Sk will be independent if node failures occur randomly.
+On the other hand  if the same set of nodes fail  then sample creation will be biased  which is harmful
+both in theory and practice. One way to ensure independent sampling is to shufﬂe and redistribute the
+data to all nodes after a certain number of iterations.
+Multi-batch Sampling. We propose two strategies for the multi-batch setting.
+Figure 1b illustrates the sample creation process in the ﬁrst strategy. The dataset is shufﬂed and
+batches are generated by collecting subsets of the training set  in order. Every set (except S0) is
+of the form Sk = {Ok−1  Nk  Ok}  where Ok−1 and Ok are the overlapping samples with batches
+Sk−1 and Sk+1 respectively  and Nk are the samples that are unique to batch Sk. After each pass
+through the dataset  the samples are reshufﬂed  and the procedure described above is repeated. In our
+implementation samples are drawn without replacement  guaranteeing that after every pass (epoch)
+all samples are used. This strategy has the advantage that it requires no extra computation in the
+evaluation of gOk
+k
+The second sampling strategy is simpler and requires less control. At every iteration k  a batch Sk is
+created by randomly selecting |Sk| elements from {1  . . . n}. The overlapping set Ok is then formed
+by randomly selecting |Ok| elements from Sk (subsampling). This strategy is slightly more expensive
+since gOk
+
+k+1 requires extra computation  but if the overlap is small this cost is not signiﬁcant.
+
+k+1  but the samples {Sk} are not independent.
+
+and gOk
+
+3 Convergence Analysis
+
+In this section  we analyze the convergence properties of the multi-batch L-BFGS method (Algorithm
+1) when applied to the minimization of strongly convex and nonconvex objective functions  using a
+ﬁxed step length strategy. We assume that the goal is to minimize the empirical risk F given in (1.1) 
+but note that a similar analysis could be used to study the minimization of the expected risk.
+
+3.1 Strongly Convex case
+
+(cid:2)
+
+(cid:3)2
+
+Due to the stochastic nature of the multi-batch approach  every iteration of Algorithm 1 employs a
+gradient that contains errors that do not converge to zero. Therefore  by using a ﬁxed step length
+strategy one cannot establish convergence to the optimal solution w(cid:63)  but only convergence to a
+neighborhood of w(cid:63) [18]. Nevertheless  this result is of interest as it reﬂects the common practice of
+using a ﬁxed step length and decreasing it only if the desired testing error has not been achieved. It
+also illustrates the tradeoffs that arise between the size of the batch and the step length.
+In our analysis  we make the following assumptions about the objective function and the algorithm.
+Assumptions A.
+1. F is twice continuously differentiable.
+2. There exist positive constants ˆλ and ˆΛ such that ˆλI (cid:22) ∇2F O(w) (cid:22) ˆΛI for all w ∈ Rd and all
+3. There is a constant γ such that ES
+≤ γ2 for all w ∈ Rd and all sets S ⊂
+4. The samples S are drawn independently and ∇F S(w) is an unbiased estimator of the true
+Note that Assumption A.2 implies that the entire Hessian ∇2F (w) also satisﬁes
+
+sets O ⊂ {1  2  . . .   n}.
+{1  2  . . .   n}.
+gradient ∇F (w) for all w ∈ Rd  i.e.  ES[∇F S(w)] = ∇F (w).
+∀w ∈ Rd 
+
+λI (cid:22) ∇2F (w) (cid:22) ΛI 
+
+(cid:107)∇F S(w)(cid:107)
+
+for some constants λ  Λ > 0. Assuming that every sub-sampled function F O(w) is strongly convex
+is not unreasonable as a regularization term is commonly added in practice when that is not the case.
+We begin by showing that the inverse Hessian approximations Hk generated by the multi-batch
+L-BFGS method have eigenvalues that are uniformly bounded above and away from zero. The proof
+technique used is an adaptation of that in [8].
+Lemma 3.1. If Assumptions A.1-A.2 above hold  there exist constants 0 < µ1 ≤ µ2 such that the
+Hessian approximations {Hk} generated by Algorithm 1 satisfy
+
+µ1I (cid:22) Hk (cid:22) µ2I 
+
+for k = 0  1  2  . . .
+
+5
+
+Utilizing Lemma 3.1  we show that the multi-batch L-BFGS method with a constant step length
+converges to a neighborhood of the optimal solution.
+Theorem 3.2. Suppose that Assumptions A.1-A.4 hold and let F (cid:63) = F (w(cid:63))  where w(cid:63) is the
+minimizer of F . Let {wk} be the iterates generated by Algorithm 1 with αk = α ∈ (0 
+2µ1λ )  starting
+from w0. Then for all k ≥ 0 
+
+1
+
+E[F (wk) − F (cid:63)] ≤ (1 − 2αµ1λ)k[F (w0) − F (cid:63)] + [1 − (1 − αµ1λ)k]
+
+k→∞−−−−→
+
+αµ2
+
+2γ2Λ
+4µ1λ
+
+.
+
+αµ2
+
+2γ2Λ
+4µ1λ
+
+The bound provided by this theorem has two components: (i) a term decaying linearly to zero  and
+(ii) a term identifying the neighborhood of convergence. Note that a larger step length yields a
+more favorable constant in the linearly decaying term  at the cost of an increase in the size of the
+neighborhood of convergence. We will consider again these tradeoffs in Section 4  where we also
+note that larger batches increase the opportunities for parallelism and improve the limiting accuracy
+in the solution  but slow down the learning abilities of the algorithm.
+One can establish convergence of the multi-batch L-BFGS method to the optimal solution w(cid:63) by
+employing a sequence of step lengths {αk} that converge to zero according to the schedule proposed
+by Robbins and Monro [23]. However  that provides only a sublinear rate of convergence  which is of
+little interest in our context where large batches are employed and some type of linear convergence is
+expected. In this light  Theorem 3.2 is more relevant to practice.
+
+3.2 Nonconvex case
+
+The BFGS method is known to fail on noconvex problems [17  10]. Even for L-BFGS  which
+makes only a ﬁnite number of updates at each iteration  one cannot guarantee that the Hessian
+approximations have eigenvalues that are uniformly bounded above and away from zero. To establish
+convergence of the BFGS method in the nonconvex case cautious updating procedures have been
+proposed [15]. Here we employ a cautious strategy that is well suited to our particular algorithm; we
+skip the update  i.e.  set Hk+1 = Hk  if the curvature condition
+
+yT
+k sk ≥ (cid:107)sk(cid:107)2
+
+(3.5)
+is not satisﬁed  where  > 0 is a predetermined constant. Using said mechanism we show that the
+eigenvalues of the Hessian matrix approximations generated by the multi-batch L-BFGS method are
+bounded above and away from zero (Lemma 3.3). The analysis presented in this section is based on
+the following assumptions.
+Assumptions B.
+1. F is twice continuously differentiable.
+2. The gradients of F are Λ-Lipschitz continuous  and the gradients of F O are ΛO-Lipschitz
+
+3. The function F (w) is bounded below by a scalar (cid:98)F .
+continuous for all w ∈ Rd and all sets O ⊂ {1  2  . . .   n}.
+(cid:2)
+4. There exist constants γ ≥ 0 and η > 0 such that ES
+≤ γ2 + η(cid:107)∇F (w)(cid:107)2 for all
+w ∈ Rd and all sets S ⊂ {1  2  . . .   n}.
+5. The samples S are drawn independently and ∇F S(w) is an unbiased estimator of the true
+gradient ∇F (w) for all w ∈ Rd  i.e.  E[∇F S(w)] = ∇F (w).
+Lemma 3.3. Suppose that Assumptions B.1-B.2 hold and let  > 0 be given. Let {Hk} be the
+Hessian approximations generated by Algorithm 1  with the modiﬁcation that Hk+1 = Hk whenever
+(3.5) is not satisﬁed. Then  there exist constants 0 < µ1 ≤ µ2 such that
+for k = 0  1  2  . . .
+
+(cid:107)∇F S(w)(cid:107)
+
+(cid:3)2
+
+µ1I (cid:22) Hk (cid:22) µ2I 
+
+We can now follow the analysis in [4  Chapter 4] to establish the following result about the behavior
+of the gradient norm for the multi-batch L-BFGS method with a cautious update strategy.
+Theorem 3.4. Suppose that Assumptions B.1-B.5 above hold  and let  > 0 be given. Let {wk} be
+the iterates generated by Algorithm 1  with αk = α ∈ (0  µ1
+2ηΛ )  starting from w0  and with the
+
+µ2
+
+6
+
+modiﬁcation that Hk+1 = Hk whenever (3.5) is not satisﬁed. Then 
+
+2[F (w0) − (cid:98)F ]
+
+αµ1L
+
+αµ2
+2γ2Λ
+µ1
+
+≤
+
++
+
+E(cid:104) 1
+
+L
+
+(cid:107)∇F (wk)(cid:107)2(cid:105)
+
+L−1(cid:88)
+
+k=0
+
+L→∞−−−−→
+
+αµ2
+2γ2Λ
+µ1
+
+.
+
+This result bounds the average norm of the gradient of F after the ﬁrst L − 1 iterations  and shows
+that the iterates spend increasingly more time in regions where the objective function has a small
+gradient.
+
+k+1 − gSk
+
+4 Numerical Results
+In this Section  we present numerical results that evaluate the proposed robust multi-batch L-BFGS
+scheme (Algorithm 1) on logistic regression problems. Figure 2 shows the performance on the
+webspam dataset1  where we compare it against three methods: (i) multi-batch L-BFGS without
+enforcing sample consistency (L-BFGS)  where gradient differences are computed using different
+samples  i.e.  yk = gSk+1
+k ; (ii) multi-batch gradient descent (Gradient Descent)  which is
+obtained by setting Hk = I in Algorithm 1; and  (iii) serial SGD  where at every iteration one
+sample is used to compute the gradient. We run each method with 10 different random seeds  and 
+where applicable  report results for different batch (r) and overlap (o) sizes. The proposed method
+is more stable than the standard L-BFGS method; this is especially noticeable when r is small. On
+the other hand  serial SGD achieves similar accuracy as the robust L-BFGS method and at a similar
+rate (e.g.  r = 1%)  at the cost of n communications per epochs versus
+r(1−o) communications per
+epoch. Figure 2 also indicates that the robust L-BFGS method is not too sensitive to the size of
+overlap. Similar behavior was observed on other datasets  in regimes where r · o was not too small.
+We mention in passing that the L-BFGS step was computed using the a vector-free implementation
+proposed in [9].
+
+1
+
+Figure 2: webspam dataset. Comparison of Robust L-BFGS  L-BFGS (multi-batch L-BFGS without
+enforcing sample consistency)  Gradient Descent (multi-batch Gradient method) and SGD for various
+batch (r) and overlap (o) sizes. Solid lines show average performance  and dashed lines show worst
+and best performance  over 10 runs (per algorithm). K = 16 MPI processes.
+
+We also explore the performance of the robust multi-batch L-BFGS method in the presence of node
+failures (faults)  and compare it to the multi-batch variant that does not enforce sample consistency
+(L-BFGS). Figure 3 illustrates the performance of the methods on the webspam dataset  for various
+
+1LIBSVM: https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary.html.
+
+7
+
+00.511.522.5310−410−2100102104Epochsk∇F(w)kwebspam α = 1 r= 1% K = 16 o=20% Robust L−BFGSL−BFGSGradient DescentSGD00.511.522.5310−410−310−210−1100Epochsk∇F(w)kwebspam α = 1 r= 5% K = 16 o=20% Robust L−BFGSL−BFGSGradient DescentSGD00.511.522.5310−410−310−210−1100Epochsk∇F(w)kwebspam α = 1 r= 10% K = 16 o=20% Robust L−BFGSL−BFGSGradient DescentSGD00.511.522.5310−410−310−210−1100101Epochsk∇F(w)kwebspam α = 1 r= 1% K = 16 o=5% Robust L−BFGSL−BFGSGradient DescentSGD00.511.522.5310−410−2100102Epochsk∇F(w)kwebspam α = 1 r= 1% K = 16 o=10% Robust L−BFGSL−BFGSGradient DescentSGD00.511.522.5310−410−310−210−1100Epochsk∇F(w)kwebspam α = 1 r= 1% K = 16 o=30% Robust L−BFGSL−BFGSGradient DescentSGDprobabilities of node failures p ∈ {0.1  0.3  0.5}  and suggests that the robust L-BFGS variant is
+more stable.
+
+Figure 3: webspam dataset. Comparison of Robust L-BFGS and L-BFGS (multi-batch L-BFGS
+without enforcing sample consistency)  for various node failure probabilities p. Solid lines show
+average performance  and dashed lines show worst and best performance  over 10 runs (per algorithm).
+K = 16 MPI processes.
+
+Lastly  we study the strong and weak scaling properties of the robust L-BFGS method on artiﬁcial
+data (Figure 4). We measure the time needed to compute a gradient (Gradient) and the associated
+communication (Gradient+C)  as well as  the time needed to compute the L-BFGS direction (L-
+BFGS) and the associated communication (L-BFGS+C)  for various batch sizes (r). The ﬁgure
+on the left shows strong scaling of multi-batch LBFGS on a d = 104 dimensional problem with
+n = 107 samples. The size of input data is 24GB  and we vary the number of MPI processes 
+K ∈ {1  2  . . .   128}. The time it takes to compute the gradient decreases with K  however  for small
+values of r  the communication time exceeds the compute time. The ﬁgure on the right shows weak
+scaling on a problem of similar size  but with varying sparsity. Each sample has 10 · K non-zero
+elements  thus for any K the size of local problem is roughly 1.5GB (for K = 128 size of data
+192GB). We observe almost constant time for the gradient computation while the cost of computing
+the L-BFGS direction decreases with K; however  if communication is considered  the overall time
+needed to compute the L-BFGS direction increases slightly.
+
+Figure 4: Strong and weak scaling of multi-batch L-BFGS method.
+
+5 Conclusion
+
+This paper describes a novel variant of the L-BFGS method that is robust and efﬁcient in two settings.
+The ﬁrst occurs in the presence of node failures in a distributed computing implementation; the second
+arises when one wishes to employ a different batch at each iteration in order to accelerate learning.
+The proposed method avoids the pitfalls of using inconsistent gradient differences by performing
+quasi-Newton updating based on the overlap between consecutive samples. Numerical results show
+that the method is efﬁcient in practice  and a convergence analysis illustrates its theoretical properties.
+
+Acknowledgements
+
+The ﬁrst two authors were supported by the Ofﬁce of Naval Research award N000141410313  the
+Department of Energy grant DE-FG02-87ER25047 and the National Science Foundation grant
+DMS-1620022. Martin Takáˇc was supported by National Science Foundation grant CCF-1618717.
+
+8
+
+05010015020025030010−610−410−2100Iterations/Epochsk∇F(w)kwebspam α = 0.1 p= 0.1 K = 16 Robust L−BFGSL−BFGS05010015020025030010−510−410−310−210−1100Iterations/Epochsk∇F(w)kwebspam α = 0.1 p= 0.3 K = 16 Robust L−BFGSL−BFGS05010015020025030010−510−410−310−210−1100Iterations/Epochsk∇F(w)kwebspam α = 0.1 p= 0.5 K = 16 Robust L−BFGSL−BFGS10110210−610−410−2100r = 0.04%Number of MPI processes − KElapsed Time [s]Strong Scaling r = 0.08%r = 0.16%r = 0.32%r = 0.63%r = 1.25%r = 2.50%r = 5.00%r = 10.00%GradientGradient+CL−BFGSL−BFGS+C10110210−610−510−410−310−210−1r = 0.04%Number of MPI processes − KElapsed Time [s]Weak Scaling − Fix problem dimensions r = 0.08%r = 0.16%r = 0.32%r = 0.63%r = 1.25%r = 2.50%r = 5.00%r = 10.00%GradientGradient+CL−BFGSL−BFGS+CReferences
+[1] A. Agarwal  O. Chapelle  M. Dudík  and J. Langford. A reliable effective terascale linear learning system.
+
+The Journal of Machine Learning Research  15(1):1111–1133  2014.
+
+[2] D. P. Bertsekas and J. N. Tsitsiklis. Parallel and Distributed Computation: Numerical Methods  volume 23.
+
+Prentice hall Englewood Cliffs  NJ  1989.
+
+[3] R. Bollapragada  R. Byrd  and J. Nocedal. Exact and inexact subsampled newton methods for optimization.
+
+arXiv preprint arXiv:1609.08502  2016.
+
+[4] L. Bottou  F. E. Curtis  and J. Nocedal. Optimization methods for large-scale machine learning. arXiv
+
+preprint arXiv:1606.04838  2016.
+
+[5] L. Bottou and Y. LeCun. Large scale online learning. In NIPS  pages 217–224  2004.
+[6] O. Bousquet and L. Bottou. The tradeoffs of large scale learning. In NIPS  pages 161–168  2008.
+[7] R. H. Byrd  G. M. Chin  W. Neveitt  and J. Nocedal. On the use of stochastic Hessian information in
+
+optimization methods for machine learning. SIAM Journal on Optimization  21(3):977–995  2011.
+
+[8] R. H. Byrd  S. L. Hansen  J. Nocedal  and Y. Singer. A stochastic quasi-newton method for large-scale
+
+optimization. SIAM Journal on Optimization  26(2):1008–1031  2016.
+
+[9] W. Chen  Z. Wang  and J. Zhou. Large-scale L-BFGS using MapReduce. In NIPS  pages 1332–1340  2014.
+[10] Y.-H. Dai. Convergence properties of the BFGS algoritm. SIAM Journal on Optimization  13(3):693–701 
+
+2002.
+
+[11] J. Dean  G. Corrado  R. Monga  K. Chen  M. Devin  M. Mao  A. Senior  P. Tucker  K. Yang  Q. V. Le  et al.
+
+Large scale distributed deep networks. In NIPS  pages 1223–1231  2012.
+
+[12] A. Defazio  F. Bach  and S. Lacoste-Julien. SAGA: A fast incremental gradient method with support for
+
+non-strongly convex composite objectives. In NIPS  pages 1646–1654  2014.
+
+[13] I. Goodfellow  Y. Bengio  and A. Courville. Deep learning. Book in preparation for MIT Press  2016.
+[14] R. Johnson and T. Zhang. Accelerating stochastic gradient descent using predictive variance reduction. In
+
+NIPS  pages 315–323  2013.
+
+[15] D.-H. Li and M. Fukushima. On the global convergence of the BFGS method for nonconvex unconstrained
+
+optimization problems. SIAM Journal on Optimization  11(4):1054–1064  2001.
+
+[16] H. Mania  X. Pan  D. Papailiopoulos  B. Recht  K. Ramchandran  and M. I. Jordan. Perturbed iterate
+
+analysis for asynchronous stochastic optimization. arXiv preprint arXiv:1507.06970  2015.
+
+[17] W. F. Mascarenhas. The BFGS method with exact line searches fails for non-convex objective functions.
+
+Mathematical Programming  99(1):49–61  2004.
+
+[18] A. Nedi´c and D. Bertsekas. Convergence rate of incremental subgradient algorithms.
+
+Optimization: Algorithms and Applications  pages 223–264. Springer  2001.
+
+In Stochastic
+
+[19] J. Ngiam  A. Coates  A. Lahiri  B. Prochnow  Q. V. Le  and A. Y. Ng. On optimization methods for deep
+
+learning. In ICML  pages 265–272  2011.
+
+[20] J. Nocedal and S. Wright. Numerical Optimization. Springer New York  2 edition  1999.
+[21] M. J. Powell. Some global convergence properties of a variable metric algorithm for minimization without
+
+exact line searches. Nonlinear programming  9(1):53–72  1976.
+
+[22] B. Recht  C. Re  S. Wright  and F. Niu. HOGWILD!: A lock-free approach to parallelizing stochastic
+
+gradient descent. In NIPS  pages 693–701  2011.
+
+[23] H. Robbins and S. Monro. A stochastic approximation method. The Annals of Mathematical Statistics 
+
+pages 400–407  1951.
+
+[24] M. Schmidt  N. Le Roux  and F. Bach. Minimizing ﬁnite sums with the stochastic average gradient.
+
+Mathematical Programming  page 1–30  2016.
+
+[25] N. N. Schraudolph  J. Yu  and S. Günter. A stochastic quasi-Newton method for online convex optimization.
+
+In AISTATS  pages 436–443  2007.
+
+[26] M. Takáˇc  A. Bijral  P. Richtárik  and N. Srebro. Mini-batch primal and dual methods for SVMs. In ICML 
+
+pages 1022–1030  2013.
+
+[27] Y. Zhang and X. Lin. DiSCO: Distributed optimization for self-concordant empirical loss. In ICML  pages
+
+362–370  2015.
+
+9
+
+,Assaf Glazer
+Omer Weissbrod
+Michael Lindenbaum
+Shaul Markovitch
+Heiko Strathmann
+Dino Sejdinovic
+Samuel Livingstone
+Zoltan Szabo
+Arthur Gretton
+Albert Berahas
+Jorge Nocedal
+Martin Takac

@@ -1,0 +1,935 @@
+2019,Efficient Forward Architecture Search,We propose a neural architecture search (NAS) algorithm  Petridish  to iteratively 
+add shortcut connections to existing network layers. The added shortcut connections 
+effectively perform gradient boosting on the augmented layers.
+The proposed algorithm is motivated by the feature selection algorithm 
+forward stage-wise linear regression  since we consider NAS as a generalization 
+of feature selection for regression  where NAS selects shortcuts among layers 
+instead of selecting features. 
+In order to reduce the number of trials of possible connection combinations  we train
+jointly all possible connections at each stage of growth while leveraging
+feature selection techniques to choose a subset of them. 
+We experimentally show this process to be an efficient forward 
+architecture search algorithm that can find competitive 
+models using few GPU days in both the search space of repeatable 
+network modules (cell-search) and the space of general networks (macro-search). 
+Petridish is particularly well-suited for warm-starting from existing models 
+crucial for lifelong-learning scenarios.,Efﬁcient Forward Architecture Search
+
+Hanzhang Hu 1 John Langford 2 Rich Caruana 2
+
+Saurajit Mukherjee 2 Eric Horvitz 2 Debadeepta Dey2
+
+1Carnegie Mellon University  2Microsoft Research
+
+hanzhang@cs.cmu.edu  {jcl rcaruana saurajim horvitz dedey}@microsoft.com
+
+Abstract
+
+We propose a neural architecture search (NAS) algorithm  Petridish  to iteratively
+add shortcut connections to existing network layers. The added shortcut connec-
+tions effectively perform gradient boosting on the augmented layers. The proposed
+algorithm is motivated by the feature selection algorithm forward stage-wise linear
+regression  since we consider NAS as a generalization of feature selection for
+regression  where NAS selects shortcuts among layers instead of selecting features.
+In order to reduce the number of trials of possible connection combinations  we
+train jointly all possible connections at each stage of growth while leveraging
+feature selection techniques to choose a subset of them. We experimentally show
+this process to be an efﬁcient forward architecture search algorithm that can ﬁnd
+competitive models using few GPU days in both the search space of repeatable
+network modules (cell-search) and the space of general networks (macro-search).
+Petridish is particularly well-suited for warm-starting from existing models crucial
+for lifelong-learning scenarios.
+
+1
+
+Introduction
+
+Neural networks have achieved state-of-the-art performance on large scale supervised learning tasks
+across domains like computer vision  natural language processing  audio and speech-related tasks
+using architectures manually designed by skilled practitioners  often via trial and error. Neural
+architecture search (NAS) (Zoph & Le  2017; Zoph et al.  2018; Real et al.  2018; Pham et al. 
+2018; Liu et al.  2019; Han Cai  2019) algorithms attempt to automatically ﬁnd good architectures
+given data-sets. In this work  we view NAS as a bi-level combinatorial optimization problem (Liu
+et al.  2019)  where we seek both the optimal architecture and its associated optimal parameters.
+Interestingly  this formulation generalizes the well-studied problem of feature selection for linear
+regression (Tibshirani  1994; Efron et al.  2004; Das & Kempe  2011). This observation permits us to
+draw and leverage parallels between NAS algorithms and feature selection algorithms.
+A plethora of NAS works have leveraged sampling methods including reinforcement learning (Zoph &
+Le  2017; Zoph et al.  2018; Liu et al.  2018)  evolutionary algorithms (Real et al.  2017  2018; Elsken
+et al.  2018a)  and Bayesian optimization (Kandasamy et al.  2018) to enumerate architectures that
+are then independently trained. Interestingly  these approaches are uncommon for feature selection.
+Indeed  sample-based NAS often takes hundreds of GPU-days to ﬁnd good architectures  and can be
+barely better than random search (Elsken et al.  2018b).
+Another common NAS approach is analogous to sparse optimization (Tibshirani  1994) or backward
+elimination for feature selection  e.g.  (Liu et al.  2019; Pham et al.  2018; Han Cai  2019; Xie et al. 
+2019). The approach starts with a super-graph that is the union of all possible architectures  and learns
+to down-weight the unnecessary edges gradually via gradient descent or reinforcement learning. Such
+approaches drastically cut down the search time of NAS. However  these methods require domain
+knowledge to create the initial super-graphs  and typically need to reboot the search if the domain
+knowledge is updated.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+In this work  we instead take an approach that is analogous to a forward feature selection algorithm
+and iteratively grow existing networks. Although forward methods such as Orthogonal Matching
+Pursuit (Pati et al.  1993) and Least-angle Regression (Efron et al.  2004) are common in feature
+selection and can often result in performance guarantees  there are only a similar NAS approaches (Liu
+et al.  2017). Such forward algorithms are attractive  when one wants to expand existing models as
+extra computation becomes viable. Forward methods can utilize such extra computational resources
+without rebooting the training as in backward methods and sparse optimization. Furthermore  forward
+methods naturally result in a spectrum of models of various complexities to suitably choose from.
+Crucially  unlike backward approaches  forward methods do not need to specify a ﬁnite search space
+up front making them more general and easier to use when warm-starting from prior available models
+and for lifelong learning.
+Speciﬁcally  inspired by early neural network growth work (Fahlman & Lebiere  1990)  we propose
+a method (Petridish) of growing networks from small to large  where we opportunistically add
+shortcut connections in a fashion that is analogous to applying gradient boosting (Friedman  2002)
+to the intermediate feature layers. To select from the possible shortcut connections  we also exploit
+sparsity-inducing regularization (Tibshirani  1994) during the training of the eligible shortcuts.
+We experiment with Petridish for both the cell-search (Zoph et al.  2018)  where we seek a shortcut
+connection pattern and repeat it using a manually designed skeleton network to form an architecture 
+and the less common but more general macro-search  where shortcut connections can be freely
+formed. Experimental results show Petridish macro-search to be better than previous macro-search
+NAS approaches on vision tasks  and brings macro-search performance up to par with cell-search
+counter to beliefs from other NAS works (Zoph & Le  2017; Pham et al.  2018) that macro-search
+is inferior to cell-search. Petridish cell-search also ﬁnds models that are more cost-efﬁcient than
+those from (Liu et al.  2019)  while using similar training computation. This indicates that forward
+selection methods for NAS are effective and useful.
+We summarize our contribution as follows.
+
+• We propose a forward neural architecture search algorithm that is analogous to gradient
+boosting on intermediate layers  allowing models to grow in complexity during training and
+warm-start from existing architectures and weights.
+• On CIFAR10 and PTB  the proposed method ﬁnds competitive models in few GPU-days
+• The ablation studies of the hyper-parameters highlight the importance of starting conditions
+
+with both cell-search and macro-search.
+
+to algorithm performance.
+
+2 Background and Related Work
+
+Sample-based. Zoph & Le (2017) leveraged policy gradients (Williams  1992) to learn to sample
+networks  and established the now-common framework of sampling networks and evaluating them
+after a few epochs of training. The policy-gradient sampler has been replaced with evolutionary
+algorithms (Schaffer et al.  1990; Real et al.  2018; Elsken et al.  2018a)  Bayesian optimization (Kan-
+dasamy et al.  2018)  and Monte Carlo tree search (Negrinho & Gordon  2017). Multiple search-
+spaces (Elsken et al.  2018b) are also studied under this framework. Zoph et al. (2018) introduce
+the idea of cell-search  where we learn a connection pattern  called a cell  and stack cells to form
+networks. Liu et al. (2018) further learn how to stack cells with hierarchical cells. Cai et al. (2018)
+evolve networks starting from competitive existing models via net-morphism (Wei et al.  2016).
+Weight-sharing. The sample-based framework of (Zoph & Le  2017) spends most of its training
+computation in evaluating the sampled networks independently  and can cost hundreds of GPU-days
+during search. This framework is revolutionized by Pham et al. (2018)  who share the weights of
+the possible networks and train all possible networks jointly. Liu et al. (2019) formalize NAS with
+weight-sharing as a bi-level optimization (Colson et al.  2007)  where the architecture and the model
+parameters are jointly learned. Xie et al. (2019) leverage policy gradient to update the architecture in
+order to update the whole bi-level optimization with gradient descent.
+Forward NAS. Forward NAS originates from one of the earliest NAS works by Fahlman & Lebiere
+(1990) termed “Cascade-Correlation”  in which  neurons are added to networks iteratively. Each new
+neuron takes input from existing neurons  and maximizes the correlation between its activation and
+
+2
+
+the residual in network prediction. Then the new neuron is frozen and is used to improve the ﬁnal
+prediction. This idea of iterative growth has been recently studied in (Cortes et al.  2017; Huang et al. 
+2018) via gradient boosting (Friedman  2002). While Petridish is similar to gradient boosting  it is
+applicable to any layer  instead of only the ﬁnal layer. Furthermore  Petridish initializes weak learners
+without freezing or affecting the current model  unlike in gradient boosting  which freezes previous
+models. Elsken et al. (2018a); Cai et al. (2018) have explored forward search via iterative model
+changes called net-morphisms (Wei et al.  2016)  and control the iterative change via reinforcement
+learning and evolutionary algorithms. Liu et al. (2017) select models by predicting their performances
+based on those of some sampled models.
+
+3 Preliminaries
+Gradient Boosting: Let H be a space of weak learners. Each step of gradient boosting seeks a weak
+learner h∗ ∈ H that is the most similar to the negative functional gradient  −∇ˆyL  of the loss L with
+respect to the prediction ˆy. The similarity is measured by their Frobenius inner product.
+
+h∗ = arg min
+h∈H
+
+(cid:104)∇ˆyL  h(cid:105).
+
+(1)
+
+Then we update the predictor to be ˆy ← ˆy + ηh∗  where η is the learning rate.
+NAS Optimization: Given data sample x with label y from a distribution D  a neural network
+architecture α with parameters w produces a prediction ˆy(x; α  w) and suffers a prediction loss
+(cid:96)(ˆy(x; α  w)  y). The expected loss is then
+
+L(α  w) = Ex y∼D[(cid:96)(ˆy(x; α  w)  y)] ≈ 1
+
+(2)
+In practice  the loss L is estimated on the empirical training data Dtrain. Following (Liu et al.  2019) 
+the problem of neural architecture search can be formulated as a bi-level optimization (Colson et al. 
+2007) of the network architecture α and the model parameters w under the loss L as follows.
+
+(cid:96)(ˆy(x; α  w)  y).
+
+(x y)∈Dtrain
+
+|Dtrain|
+
+(cid:88)
+
+L(α  w(α)) 
+
+min
+
+α
+
+s.t. w(α) = arg min
+
+w
+
+L(α  w)
+
+and c(α) ≤ K 
+
+(3)
+
+where c(α) is the test-time computational cost of the architecture  and K is some constant. Formally 
+let x1  x2  ... be intermediate layers in a feed-forward network. Then a shortcut from layer xi to xj
+(j > i) using operation op is represented by (xi  xj  op)  where the operation op is a unary operation
+such as 3x3 conv. We merge multiple shortcuts to the same xj with summation  unless speciﬁed
+otherwise using ablation studies. Hence  the architecture α is a collection of shortcut connections.
+Feature Selection Analogy: We note that Eq. 3 generalizes feature selection for linear predic-
+tion (Tibshirani  1994; Pati et al.  1993; Das & Kempe  2011)  where α selects feature subsets  w is
+the prediction coefﬁcient  and the loss is expected square error. Hence  we can understand a NAS
+algorithm by considering its application to feature selection  as discussed in the introduction and
+related works. This work draws a parallel to the feature selection algorithm Forward-Stagewise
+Linear Regression (FSLR) (Efron et al.  2004) with small step sizes  which is an approximation to
+Least-angle Regression (Efron et al.  2004). In FSLR  we iteratively update with small step sizes
+the weight of the feature that correlates the most with the prediction residual. Viewing candidate
+features as weak learners  the residuals become the gradient of the square loss with respect to the
+linear prediction. Hence  FSLR is also understood as gradient boosting (Friedman  2002).
+Cell-search vs. Macro-search: In this work  we consider both cell-search  a popular NAS search
+space where a network is a predeﬁned sequence of some learned connection patterns (Zoph et al. 
+2018; Real et al.  2018; Pham et al.  2018; Liu et al.  2019)  called cells  and macro-search  a more
+general NAS where no repeatable patterns are required. For a fair comparison between the two  we
+set both macro and cell searches to start with the same seed model  which consists of a sequence
+of simple cells. Both searches also choose from the same set of shortcuts. The only difference is
+cell-search cells changing uniformly and macro-search cells changing independently.
+
+4 Methodology: Efﬁcient Forward Architecture Search (Petridish)
+
+Following gradient boosting strictly would limit the model growth to be only at the prediction layer
+of the network  ˆy. Instead  this work seeks to jointly expand the expressiveness of the network at
+
+3
+
+Algorithm 1 Petridish.initialize_candidates
+1: Input: (1) Lx  the list of layers in the current model (macro-search) or current cell (cell-search)
+in topological order; (2) is_out(x)  whether we are to expand at x; (3) λ  hyper parameter for
+selection shortcut connections.
+
+x  the modiﬁed Lx with weak learners xc; (2) Lc  the list of xc created; (3) (cid:96)extra 
+
+the additional training loss.
+x ← Lx; Lc ← empty list;
+if not is_out(xk)
+Compute the eligible inputs In(xk)  and index them as z1  ...  zI.
+
+(cid:96)extra ← 0
+then continue end if
+
+2: Output: (1) L(cid:48)
+3: L(cid:48)
+4: for xk in enumerate(Lx) do
+5:
+6:
+7:
+8:
+9:
+Append xc to Lc.
+10:
+11: Modify xk in L(cid:48)
+12: end for
+
+xc ←(cid:80)I
+(cid:96)extra ← (cid:96)extra + λ(cid:80)I
+
+(cid:80)J
+
+i=1
+
+j=1 αk
+
+(cid:80)J
+i jopj(sg(zi)).
+Insert the layer xc right before xk in L(cid:48)
+x.
+j=1 |αk
+i j|.
+
+i=1
+
+x so that xk ← xk + sf(xc).
+
+intermediate layers  x1  x2  .... Speciﬁcally  we consider adding a weak learner hk ∈ Hk at each xk 
+where Hk (speciﬁed next) is the space of weak learners for layer xk. hk helps reduce the gradient of
+the loss L with respect to xk  ∇xkL = Ex y∼D[∇xk (cid:96)(ˆy(x; α  w)  y)]  i.e.  we choose hk with
+
+hk = arg min
+h∈Hk
+
+(cid:104)h ∇xkL(α  w)(cid:105) = arg min
+h∈Hk
+
+(cid:104)h  Ex y∼D[∇xk (cid:96)(ˆy(x; α  w)  y)](cid:105).
+
+(4)
+
+Then we expand the model by adding hk to xk. In other words  we replace each xk with xk + ηhk in
+the original network  where η is a scalar variable initialized to 0. The modiﬁed model then can be
+trained with backpropagation. We next specify the weak learner space  and how they are learned.
+Weak Learner Space: The weak learner space Hk for a layer xk is formally
+
+Hk = {opmerge(op1(z1)  ...  opImax(zImax)) : z1  ...  zImax ∈ In(xk)  op1  ...  opImax ∈ Op} 
+
+(5)
+
+where Op is the set of eligible unary operations  In(xk) is the set of allowed input layers  Imax is the
+number of shortcuts to merge together in a weak learner  and opmerge is a merge operation to combine
+the shortcuts into a tensor of the same shape as xk. On vision tasks  following (Liu et al.  2019)  we
+set Op to contain separable conv 3x3 and 5x5  dilated conv 3x3 and 5x5  max and average pooling
+3x3  and identity. The separable conv is applied twice as per (Liu et al.  2019). Following (Zoph
+et al.  2018; Liu et al.  2019)  we set In(xk) to be layers that are topologically earlier than xk  and are
+either in the same cell as xk or the outputs of the previous two cells. We choose Imax = 3 through an
+ablation study from amongst 2  3 or 4 in Sec. B.5  and we set opmerge to be a concatenation followed
+by a projection with conv 1x1 through an ablation study in Sec. B.3 against weighted sum.
+(cid:0) IJ
+Weak Learning with Weight Sharing: In gradient boosting  one typically optimizes Eq. 4 by
+minimizing (cid:104)h ∇xkL(cid:105) for multiple h  and selecting the best h afterwards. However  as there are
+
+(cid:1) possible weak learners in the space of Eq. 5  where I = |In(xk)| and J = |Op|  it may be
+
+Imax
+costly to enumerate all possibilities. Inspired by the parameter sharing works in NAS (Pham et al. 
+2018; Liu et al.  2019) and model compression in neural networks (Huang et al.  2017a)  we propose
+to jointly train the union of all weak learners  while learning to select the shortcut connections. This
+process also only costs a constant factor more than training one weak learner. Speciﬁcally  we ﬁt the
+following joint weak learner xc for a layer xk in order to minimize (cid:104)xc ∇xkL(cid:105):
+
+xc =
+
+αi jopj(zi) 
+
+(6)
+
+i=1
+
+j=1
+
+where opj ∈ Op and zi ∈ In(xk) enumerate all possible operations and inputs  and αi j ∈ R
+is the weight of the shortcut opj(zi). Each opj(zi) is normalized with batch-normalization to
+have approximately zero mean and unit variance in expectation  so αi j reﬂects the importance
+of the operation. To select the most important operations  we minimize (cid:104)xc ∇xkL(cid:105) with an L1-
+
+4
+
+I(cid:88)
+
+J(cid:88)
+
+(a)
+
+(b)
+
+Figure 1: (a) Blue boxes are in the parent model  and red boxes are for weak learning. Operations are
+joined together in a weighted sum to form xc  in order to match −∇xkL. (b) The top Imax operations
+are selected and merged with a concatenation  followed by a projection.
+
+i j  the learned operation weights of xc for layer xk.
+
+Algorithm 2 Petridish.ﬁnalize_candidates
+1: Inputs: (1) L(cid:48)
+x  the list of layers of the model in topological order; (2) Lc  list of selection
+modules in L(cid:48)
+x; (3) αk
+2: Output: A modiﬁed L(cid:48)
+3: for xc in Lc do
+Let A = {αk
+4:
+Sort {|α| : α ∈ A}  and let op1  ...  opImax be operations with the largest associated |α|.
+5:
+Replace xc with proj(concat(op1  ...  opImax)) in L(cid:48)
+x. proj is to the same shape as xk.
+6:
+7: end for
+8: Remove all sg(·). Replace each sf(x) with a ηx  where η is a scalar variable initialized to 0.
+
+i j : i = 1  ...  I  j = 1  ...  J} be the weights of operations in xc.
+
+x  which is to be trained with backpropagation for a few epochs.
+
+regularization on the weight vector (cid:126)α  i.e. 
+
+λ(cid:107)(cid:126)α(cid:107)1 = λ
+
+I(cid:88)
+
+J(cid:88)
+
+i=1
+
+j=1
+
+|αi j| 
+
+(7)
+
+(cid:80)J
+
+so that xc =(cid:80)I
+
+where λ is a hyper-parameter which we choose in the appendix B.6. L1-regularization  known as
+Lasso (Tibshirani  1994)  induces sparsity in the parameter and is widely used for feature selection.
+Weak Learning Implementation: A naïve implementation of joint weak learning needs to compute
+∇xkL and freeze the existing model during weak learner training. Here we provide a modiﬁcation
+to avoid these two costly requirements. Algorithm 1 describes the proposed implementation and
+Fig. 1a illustrates the weak learning computation graph. We leverage a custom operation called
+stop-gradient  sg  which has the property that for any x  sg(x) = x and ∇xsg(x) = 0. Similarly 
+we deﬁne the complimentary operation stop-forward  sf(x) = x − sg(x)  i.e.  sf(x) = 0 and
+∇xsf(x) = Id  the identity function. Speciﬁcally  on line 7  we apply sg to inputs of weak learners 
+j=1 αi jopj(sg(zi)) does not affect the gradient of the existing model. Next 
+on line 11  we replace the layer xk with xk + sf(xc)  so that the prediction of the model is unaffected
+by weak learning. Finally  the gradient of the loss with respect to any weak learner parameter θ is:
+(8)
+This means that sf and sg not only prevent the weak learning from affecting the training of existing
+model  but also enable us to minimize (cid:104)∇xkL  xc(cid:105) via backpropagation on the whole network. Thus 
+we no longer need explicitly compute ∇xkL nor freeze the existing model weights during weak
+learning. Furthermore  since weak learners of different layers do not interact during weak learning 
+we grow the network at all xk that are ends of cells at the same time.
+Finalize Weak Learners: In Algorithm 2 and Fig. 1b  we ﬁnalize the weak learners. We select
+in each xc the top Imax shortcuts according to the absolute value of αi j  and merge them with a
+
+∇θL = ∇xk+sf(xc)L∇xcsf(xc)∇θxc = ∇xkL∇θxc = ∇θ(cid:104)∇xkL  xc(cid:105).
+
+i=1
+
+5
+
+concatenation followed by a projection to the shape of xk. We note that the weighted sum during weak
+learning is a special case of concatenation-projection  and we use an ablation study in appendix B.3
+to validate this replacement. We also note that most NAS works (Zoph et al.  2018; Real et al. 
+2018; Pham et al.  2018; Liu et al.  2019; Xie et al.  2019; Han Cai  2019) have similar set-ups of
+concatenating intermediate layers in cells and projecting the results. We train the ﬁnalized models for
+a few epochs  warm-starting from the parameters in weak learning.
+Remarks: A key design concept of Petridish is amortization  where we require the computational
+costs of weak learning and model training to be a constant factor of each other. We further design
+Petridish to do both at the same time. Following these principles  it only costs a constant factor of
+additional computation to augment models with Petridish while training the model concurrently.
+We also note that since Petridish only grows models  noise in weak learning and model training
+can result in sub-optimal short-cut selections. To mitigate this potential problem and to reduce the
+search variance  we utilize multiple parallel workers of Petridish  each of which can warm-start from
+intermediate models of each other. We defer this implementation detail to the appendix.
+
+5 Experiments
+
+We report the search results on CIFAR-10 (Krizhevsky  2009) and the transfer result on Ima-
+geNet (Russakovsky et al.  2015). Ablation studies for choosing the hyper parameters are deferred to
+appendix B  which also demonstrates the importance of blocking the inﬂuence of weak learners to
+the existing models during weak learning via sf and sg. We also search on Penn Tree Bank (Marcus
+et al.  1993)  and show that it is not an interesting data-set for evaluating NAS algorithms.
+
+5.1 Search Results on CIFAR10
+
+Set-up: Following (Zoph et al.  2018; Liu et al.  2019)  we search on a shallow and slim networks 
+which have N = 3 normal cells in each of the three feature map resolution  one transition cell
+between each pair of adjacent resolutions  and F = 16 initial ﬁlter size. Then we scale up the found
+model to have N = 6 and F = 32 for a ﬁnal training from scratch. During search  we use the last
+5000 training images as a validation set. The starting seed model is a modiﬁed ResNet (He et al. 
+2016)  where the output of a cell is the sum of the input and the result of applying two 3x3 separable
+conv to the input. This is one of the simplest seeds in the search space popularized by (Zoph et al. 
+2018; Pham et al.  2018; Liu et al.  2019). The seed model is trained for 200 epochs  with a batch
+size of 32 and a learning rate that decays from 0.025 to 0 in cosine decay (Loshchilov & Hutter 
+2017). We apply drop-path (Larsson et al.  2017) with probability 0.6 and the standard CIFAR-10
+cut-out (DeVries & Taylor  2017). Weak learner selection and ﬁnalization are trained for 80 epochs
+each  using the same parameters. The ﬁnal model training is from scratch for 600 epochs on all
+training images with the same parameters.
+Search Results: Table 1 depicts the test-errors  model parameters  and search computation of the
+proposed methods along with many state-of-the-art methods. We mainly compare against models of
+fewer than 3.5M parameters  since these models can be easily transferred to ILSVRC (Russakovsky
+et al.  2015) mobile setting via a standard procedure (Zoph et al.  2018). The ﬁnal training of Petridish
+models is repeated ﬁve times. Petridish cell search ﬁnds a model with 2.87±0.13% error rate with
+2.5M parameters  in 5 GPU-days using GTX 1080. Increasing ﬁlters to F = 37  the model has
+2.75±0.21% error rate with 3.2M parameters. This is one of the better models among models that
+have fewer than 3.5M parameters  and is in particular better than DARTS (Liu et al.  2019).
+Petridish macro search ﬁnds a model that achieves 2.85± 0.12% error rate using 2.2M parameters
+in the same search computation. This is signiﬁcantly better than previous macro search results  and
+showcases that macro search can ﬁnd cost-effective architectures that are previously only found
+through cell search. This is important  because the NAS literature has been moving away from macro
+architecture search  as early works (Zoph et al.  2018; Pham et al.  2018; Real et al.  2018) have
+shown that cell search results tend to be superior to those from macro search. However  this result
+may be explained by the superior initial models of cell search: the initial model of Petridish is one of
+the simplest models that any of the listed cell search methods proposes and evaluates  and it already
+achieves 4.6% error rate using only 0.4M parameters  a result already on-par or better than any other
+macro search result.
+
+6
+
+Method
+Zoph & Le (2017)†
+Zoph & Le (2017) + more ﬁlters†
+Real et al. (2017)†
+ENAS macro (Pham et al.  2018)†
+ENAS macro + more ﬁlters†
+Lemonade I (Elsken et al.  2018a)
+Petridish initial model (N = 6  F = 32)
+Petridish initial model (N = 12  F = 64)
+Petridish macro
+NasNet-A (Zoph et al.  2018)
+AmoebaNet-B (Real et al.  2018)
+PNAS (Liu et al.  2017)†
+ENAS cell (Pham et al.  2018)
+Lemonade II (Elsken et al.  2018a)
+DARTS (Liu et al.  2019)
+SNAS (Xie et al.  2019)
+Luo et al. (2018)†
+PARSEC (Casale et al.  2019)
+DARTS random (Liu et al.  2019)
+16 Random Models in Petridish space
+Petridish cell w/o feature selection
+Petridish cell
+Petridish cell more ﬁlters (F=37)
+
+(mil.)
+7.1
+37.4
+5.4
+21.3
+38
+8.9
+0.4
+3.1
+2.2
+3.3
+2.8
+3.2
+4.6
+3.98
+3.4
+2.8
+3.3
+3.7
+3.1
+
+2.5
+3.2
+
+2.27 ± 0.15
+2.50 ± 0.28
+
+Search
+
+(GPU-Days)
+
+1680+
+1680+
+2500
+0.32
+0.32
+56
+–
+–
+5
+
+1800
+3150
+225
+0.45
+56
+4
+1.5
+0.4
+1
+–
+–
+–
+5
+5
+
+Method
+Inception-v1 (Szegedy et al.  2015)
+MobileNetV2 (Sandler et al.  2018)
+NASNet-A (Zoph et al.  2017)
+AmoebaNet-A (Real et al.  2018)
+PNAS (Liu et al.  2017a)
+DARTS (Liu et al.  2019)
+SNAS (Xie et al.  2019)
+Proxyless (Han Cai  2019)†
+Path-level (Cai et al.  2018)†
+PARSEC (Casale et al.  2019)
+Petridish macro (N=6 F=44)
+Petridish cell (N=6 F=44)
+
+# params
+
+(mil.)
+6.6
+6.9
+5.3
+5.1
+5.1
+4.9
+4.3
+7.1
+–
+5.6
+4.3
+4.8
+
+# multi-add
+
+(mil.)
+1448
+585
+564
+555
+588
+595
+522
+465
+588
+–
+511
+598
+
+Search
+
+(GPU-Days)
+
+–
+–
+
+1800
+3150
+225
+4
+1.6
+8.3
+8.3
+1
+5
+5
+
+(%)
+4.47
+3.65
+5.4
+4.23
+3.87
+3.37
+4.6
+
+3.06 ± 0.12
+
+2.83 | 2.85± 0.12
+
+2.65
+
+2.55 ± 0.05
+3.41 ± 0.09
+
+2.89
+3.50
+
+3.53
+
+2.76 ± 0.09
+2.85 ± 0.02
+2.81 ± 0.03
+3.29 ± 0.15
+3.32 ± 0.15
+3.26 ± 0.10
+
+2.61 | 2.87 ± 0.13
+2.51 | 2.75 ± 0.21
+
+top-1 Test Error
+
+(%)
+30.2
+28.0
+26.0
+25.5
+25.8
+26.9
+27.3
+24.9
+25.5
+26.0
+
+28.5 | 28.7 ± 0.15
+26.0 | 26.3 ± 0.20
+
+Table 1: Comparison against state-of-the-art recognition results on CIFAR-10. Results marked with
+† are not trained with cutout. The ﬁrst block represents approaches for macro-search. The second
+block represents approaches for cell-search. We report Petridish results in the format of “best | mean
+± standard deviation” among ﬁve repetitions of the ﬁnal training.
+
+# params
+
+Test Error
+
+Table 2: The performance of the best CIFAR model transferred to ILSVRC. Variance is from multiple
+training of the same model from scratch. † These searches start from PyramidNet(Han et al.  2017).
+
+We also run multiple instances of Petridish cell-search  and Table 3 reports performance of the
+best model of each search run. We observe that the models from the separate runs have similar
+performances. On average  the search time is 10.5 GPU-days and the model takes 2.8M parameters to
+achieve 2.88% average mean error rate. In addition  we experiment with replacing feature selection
+with random choice and leaving all other parts intact  i.e.  we keep initialization and ﬁnalization of
+weak learners with parallel workers. The average of mean error rate of the ﬁnal-trained models is
+3.26 ± 0.04%  close to random models  shown near the bottom of Table 1.
+Transfer to ImageNet: We focus on the mobile setting for the model transfer results on
+ILSVRC (Russakovsky et al.  2015)  which means we limit the number of multi-add per image
+to be within 600M. We transfer the ﬁnal models on CIFAR-10 to ILSVRC by adding an initial 3x3
+
+7
+
+# params
+
+Search
+
+(GPU-Days)
+
+Table 3: Performances of the best models from
+multiple instances of Petridish cell-search.
+Test Error
+2.80 ± 0.10
+2.87 ± 0.13
+2.88 ± 0.15
+2.90 ± 0.12
+2.95 ± 0.09
+
+(mil.)
+3.32
+2.5
+2.2
+2.61
+3.38
+
+7.5
+5
+12
+18
+10
+
+(%)
+
+Figure 2: Petridish naturally ﬁnd a collection
+of models of different complexity and accuracy.
+Models outside of the lower convex hull are re-
+moved for clarity.
+
+conv of stride of 2  followed by two transition cells  to down-sample the 224x224 input images to
+28x28 with F ﬁlters. In macro-search  where no transition cells are speciﬁcally learned  we again
+use the the modiﬁed ResNet cells from the initial seed model as the replacement. After this initial
+down-sampling  the architecture is the same as in CIFAR-10 ﬁnal models. Following (Liu et al. 
+2019)  we train these models for 250 epochs with batch size 128  weight decay 3 ∗ 10−5  and initial
+SGD learning rate of 0.1 (decayed by a factor of 0.97 per epoch).
+Table 2 depicts performance of the transferred models. The Petridish cell-search model achieves
+26.3±0.2% error rate using 4.8M parameters and 598M multiply-adds  which is on par with state-
+of-the-art results listed in the second block of Table 2. By utilizing feature selection techniques to
+evaluate multiple model expansions at the same time  Petridish is able to ﬁnd models faster by one or
+two orders of magnitude than early methods that train models independently  such as NASNet (Zoph
+et al.  2018)  AmoebaNet (Real et al.  2018)  and PNAS (Liu et al.  2017). In comparison to super-
+graph methods such as DARTS (Liu et al.  2019)  Petridish cell-search takes similar search time to
+ﬁnd a more accurate model.
+The Petridish macro-search model achieves 28.7±0.15% error rate using 4.3M parameters and 511M
+multiply-adds  a comparable result to the human-designed models in the ﬁrst block of Table 2.
+Though this is one of the ﬁrst successful transfers of macro-search result on CIFAR to ImageNet 
+the relative performance gap between cell-search and macro-search widens after the transfer. This
+may be because the default transition cell is not adequate for transfer to more complex data-sets. As
+Petridish gradually expands existing models  we naturally receive a gallery of models of various
+computational costs and accuracy. Figure 2 showcases the found models.
+
+5.2 Search Results on Penn Treebank
+Petridish when used to grow the cell of a recurrent neural network achieves a best test perplexity of
+55.85 and average test perplexity of 56.39 ± 0.38 across 8 search runs with different random seeds
+on PTB. This is competitive with the best search result of (Li & Talwalkar  2019) of 55.5 via random
+search with weight sharing. In spite of good performance we don’t put much signiﬁcance on this
+particular language-modeling task with this data set because no NAS algorithm appears to perform
+better than random search (Li & Talwalkar  2019)  as detailed in appendix C.
+
+6 Conclusion
+
+We formulate NAS as a bi-level optimization problem  which generalizes feature selection for linear
+regression. We propose an efﬁcient forward selection algorithm that applies gradient boosting to
+intermediate layers  and generalizes the feature selection algorithm LARS (Efron et al.  2004). We
+also speed weak learning via weight sharing  training the union of weak learners and selecting a subet
+from the union via L1-regularization. We demonstrate experimentally that forward model growth can
+ﬁnd accurate models in a few GPU-days via cell and macro searches.
+
+8
+
+Acknowledgements
+We thank J. Andrew Bagnell and Martial Hebert for their support and helpful discussions.
+
+References
+Cai  Han  Yang  Jiacheng  Zhang  Weinan  Han  Song  and Yu  Yong. Path-level network transforma-
+
+tion for efﬁcient architecture search. In ICML  2018.
+
+Casale  Francesco Paolo  Gordon  Jonathan  and Fusi  Nicolo. Probabilistic neural architecture search.
+
+In arxiv.org/abs/1902.05116  2019.
+
+Colson  Benoît  Marcotte  Patrice  and Savard  Gilles. An overview of bilevel optimization. In Annals
+
+of operations research  2007.
+
+Cortes  Corinna  Gonzalvo  Xavier  Kuznetsov  Vitaly  Mohri  Mehryar  and Yang  Scott. Adanet:
+
+Adaptive structural learning of artiﬁcial neural networks. In ICML  2017.
+
+Das  A. and Kempe  D. Submodular meets spectral: Greedy algorithms for subset selection  sparse
+
+approximation and dictionary selection. In ICML  2011.
+
+DeVries  Terrance and Taylor  Graham. Improved regularization of convolutional neural networks
+
+with cutout. CoRR  abs/1708.04552  2017.
+
+Efron  Bradley  Hastie  Trevor  Johnstone  Iain  and Tibshirani  Robert. Least angle regression.
+
+Annals of Statistics  32:407–499  2004.
+
+Elsken  Thomas  Metzen  Jan Hendrik  and Hutter  Frank. Efﬁcient multi-objective neural architecture
+
+search via lamarckian evolution. 2018a.
+
+Elsken  Thomas  Metzen  Jan Hendrik  and Hutter  Frank. Neural architecture search: A survey.
+
+CoRR  abs/1808.05377  2018b.
+
+Fahlman  Scott E. and Lebiere  Christian. The cascade-correlation learning architecture. In NIPS 
+
+1990.
+
+Friedman  J.H. Stochastic gradient boosting. Computational Statistics and Data Analysis  2002.
+
+Han  Dongyoon  Kim  Jiwhan  and Kim  Junmo. Deep pyramidal residual networks. In CVPR  2017.
+
+Han Cai  Ligeng Zhu  Song Han. Proxylessnas: Direct neural architecture search on target task and
+
+hardware. In ICLR  2019.
+
+He  K.  Zhang  X.  Ren  S.  and Sun  J. Deep residual learning for image recognition. In CVPR  2016.
+
+Huang  Furong  Ash  Jordan  Langford  John  and Schapire  Robert. Learning deep resnet blocks
+
+sequentially using boosting theory. In ICML  2018.
+
+Huang  G.  Liu  S.  van der Maaten  L.  and Weinberger  K. Condensenet: An efﬁcient densenet using
+
+learned group convolutions. arXiv preprint arXiv:1711.09224  2017a.
+
+Huang  Gao  Liu  Zhuang  van der Maaten  Laurens  and Weinberger  Kilian Q. Densely connected
+
+convolutional networks. In CVPR  2017b.
+
+Kandasamy  Kirthevasan  Neiswanger  Willie  Schneider  Jeff  Poczos  Barnabas  and Xing  Eric.
+
+Neural architecture search with bayesian optimisation and optimal transport. In NIPS  2018.
+
+Krizhevsky  Alex. Learning multiple layers of features from tiny images. Technical report  2009.
+
+Larsson  Gustav  Maire  Michael  and Shakhnarovich  Gregory. Fractalnet: Ultra-deep neural
+
+networks without residuals. In ICLR  2017.
+
+Li  Liam and Talwalkar  Ameet. Random search and reproducibility for neural architecture search.
+
+CoRR  abs/1902.07638  2019. URL http://arxiv.org/abs/1902.07638.
+
+9
+
+Liu  Chenxi  Zoph  Barret  Shlens  Jonathon  Hua  Wei  Li  Li-Jia  Fei-Fei  Li  Yuille  Alan L.  Huang 
+Jonathan  and Murphy  Kevin. Progressive neural architecture search. CoRR  abs/1712.00559 
+2017.
+
+Liu  Hanxiao  Simonyan  Karen  Vinyals  Oriol  Fernando  Chrisantha  and Kavukcuoglu  Koray.
+
+Hierarchical representations for efﬁcient architecture search. In ICLR  2018.
+
+Liu  Hanxiao  Simonyan  Karen  and Yang  Yiming. Darts: Differentiable architecture search. 2019.
+
+Loshchilov  Ilya and Hutter  Frank. Sgdr: Stochastic gradient descent with warm restarts. In ICLR 
+
+2017.
+
+Luo  Renqian  Tian  Fei  Qin  Tao  Chen  Enhong  and Liu  Tie-Yan. Neural architecture optimization.
+
+In NIPS  2018.
+
+Marcus  Mitchell  Santorini  Beatrice  and Marcinkiewicz  Mary Ann. Building a large annotated
+
+corpus of english: The penn treebank. 1993.
+
+Negrinho  Renato and Gordon  Geoffrey J. Deeparchitect: Automatically designing and training deep
+
+architectures. CoRR  abs/1704.08792  2017.
+
+Pati  Y  Rezaiifar  R.  and Krishnaprasad  P. Orthogonal matching pursuit: recursive function
+approximation with application to wavelet decomposition. In Signals  Systems and Computation 
+1993.
+
+Pham  Hieu  Guan  Melody Y.  Zoph  Barret  Le  Quoc V.  and Dean  Jeff. Efﬁcient neural architecture
+
+search via parameter sharing. In ICML  2018.
+
+Real  Esteban  Moore  Sherry  Selle  Andrew  Saxena  Saurabh  Suematsu  Yutaka Leon  Tan  Jie 
+Le  Quoc  and Kurakin  Alex. Large-scale evolution of image classiﬁers. CoRR  abs/1703.01041 
+2017.
+
+Real  Esteban  Aggarwal  Alok  Huang  Yanping  and Le  Quoc V. Regularized evolution for image
+
+classiﬁer architecture search. CoRR  abs/1802.01548  2018.
+
+Russakovsky  Olga  Deng  Jia  Su  Hao  Krause  Jonathan  Satheesh  Sanjeev  Ma  Sean  Huang 
+Zhiheng  Karpathy  Andrej  Khosla  Aditya  Bernstein  Michael  Berg  Alexander C.  and Fei-Fei 
+Li. ImageNet Large Scale Visual Recognition Challenge. IJCV  2015.
+
+Schaffer  J David  Caruana  Richard A  and Eshelman  Larry J. Using genetic search to exploit the
+emergent behavior of neural networks. Physica D: Nonlinear Phenomena  42(1-3):244–248  1990.
+
+Tibshirani  Robert. Regression Shrinkage and Selection Via the Lasso. Journal of the Royal Statistical
+
+Society  Series B  58:267–288  1994.
+
+Wei  Tao  Wang  Changhu  Rui  Yong  and Chen  Chang Wen. Network morphism. In ICML  2016.
+
+Williams  Ronald J. Simple statistical gradient-following algorithms for connectionist reinforcement
+
+learning. In Machine Learning  1992.
+
+Xie  Sirui  Zheng  Hehui  Liu  Chunxiao  and Lin  Liang. Snas: Stochastic neural architecture search.
+
+In ICLR  2019.
+
+Yang  Zhilin  Dai  Zihang  Salakhutdinov  Ruslan  and Cohen  William W. Breaking the softmax
+
+bottleneck: A high-rank rnn language model. ICML  2018.
+
+Ying  Chris  Klein  Aaron  Real  Esteban  Christiansen  Eric  Murphy  Kevin  and Hutter  Frank.
+Nas-bench-101: Towards reproducible neural architecture search. In arxiv.org/abs/1902.09635 
+2019.
+
+Zoph  Barret and Le  Quoc V. Neural architecture search with reinforcement learning. In ICLR  2017.
+
+Zoph  Barret  Vasudevan  Vijay  Shlens  Jonathon  and Le  Quoc V. Learning transferable architectures
+
+for scalable image recognition. In CVPR  2018.
+
+10
+
+,Hanzhang Hu
+John Langford
+Rich Caruana
+Saurajit Mukherjee
+Eric Horvitz
+Debadeepta Dey

@@ -1,0 +1,1038 @@
+2019,High-dimensional multivariate forecasting with low-rank Gaussian Copula Processes,Predicting the dependencies between observations from multiple time series is critical for applications such as anomaly detection  financial risk management  causal analysis  or demand forecasting.
+However  the computational and numerical difficulties of estimating time-varying and high-dimensional covariance matrices often limits existing methods to handling at most a few hundred dimensions or requires making strong assumptions on the dependence between series.
+We propose to combine an RNN-based time series model with a Gaussian copula process output model with a low-rank covariance structure to reduce the computational complexity and handle non-Gaussian marginal distributions.
+This permits to drastically reduce the number of parameters and consequently allows the modeling of time-varying correlations of thousands of time series. We show on several real-world datasets that our method provides significant accuracy improvements over state-of-the-art baselines and perform an ablation study analyzing the contributions of the different components of our model.,High-Dimensional Multivariate Forecasting with
+
+Low-Rank Gaussian Copula Processes
+
+David Salinas
+Naverlabs ∗
+
+david.salinas@naverlabs.com
+
+Michael Bohlke-Schneider
+
+Amazon Research
+
+bohlkem@amazon.com
+
+Laurent Callot
+Amazon Research
+
+lcallot@amazon.com
+
+Roberto Medico
+Ghent University ∗
+
+roberto.medico91@gmail.com
+
+Abstract
+
+Jan Gasthaus
+
+Amazon Research
+
+gasthaus@amazon.com
+
+Predicting the dependencies between observations from multiple time series is
+critical for applications such as anomaly detection  ﬁnancial risk management 
+causal analysis  or demand forecasting. However  the computational and numeri-
+cal difﬁculties of estimating time-varying and high-dimensional covariance matri-
+ces often limits existing methods to handling at most a few hundred dimensions or
+requires making strong assumptions on the dependence between series. We pro-
+pose to combine an RNN-based time series model with a Gaussian copula process
+output model with a low-rank covariance structure to reduce the computational
+complexity and handle non-Gaussian marginal distributions. This permits to dras-
+tically reduce the number of parameters and consequently allows the modeling of
+time-varying correlations of thousands of time series. We show on several real-
+world datasets that our method provides signiﬁcant accuracy improvements over
+state-of-the-art baselines and perform an ablation study analyzing the contribu-
+tions of the different components of our model.
+
+1
+
+Introduction
+
+The goal of forecasting is to predict the distribution of future time series values. Forecasting tasks
+frequently require predicting several related time series  such as multiple metrics for a compute
+ﬂeet or multiple products of the same category in demand forecasting. While these time series are
+often dependent  they are commonly assumed to be (conditionally) independent in high-dimensional
+settings because of the hurdle of estimating large covariance matrices.
+Assuming independence  however  makes such methods unsuited for applications in which the corre-
+lations between time series play an important role. This is the case in ﬁnance  where risk minimizing
+portfolios cannot be constructed without a forecast of the covariance of assets. In retail  a method
+providing a probabilistic forecast for different sellers should take competition relationships and can-
+nibalization effects into account. In anomaly detection  observing several nodes deviating from their
+expected behavior can be cause for alarm even if no single node exhibits clear signs of anomalous
+behavior.
+Multivariate forecasting has been an important topic in the statistics and econometrics literature.
+Several multivariate extensions of classical univariate methods are widely used  such as vector au-
+toregressions (VAR) extending autoregressive models [19]  multivariate state-space models [7]  or
+
+∗Work done while being at Amazon Research
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+Figure 1: Top: covariance matrix predicted by our model for taxi trafﬁc time series for 1214
+locations in New-York at 4 different hours of a Sunday (only a neighborhood of 103 series is shown
+here  for clearer visualization). Bottom: Correlation graph obtained by keeping only pairs with
+covariance above a ﬁxed threshold at the same hours. Both spatial and temporal relations are learned
+from the data as the covariance evolves over time and edges connect locations that are close to each
+other.
+
+multivariate generalized autoregressive conditional heteroskedasticity (MGARCH) models [2]. The
+rapid increase in the difﬁculty of estimating these models due to the growth in number of parameters
+with the dimension of the problem have been binding constraints to move beyond low-dimensional
+cases. To alleviate these limitations  researchers have used dimensionality reduction methods and
+regularization  see for instance [3  5] for VAR models and [34  9] for MGARCH models  but these
+models remain unsuited for applications with more than a few hundreds dimensions [23].
+Forecasting can be seen as an instance of sequence modeling  a topic which has been intensively
+studied by the machine learning community. Deep learning-based sequence models have been suc-
+cessfully applied to audio signals [33]  language modeling [13  30]  and general density estimation
+of univariate sequences [22  21]. Similar sequence modeling techniques have also been used in the
+context of forecasting to make probabilistic predictions for collections of real or integer-valued time
+series [26  36  16]. These approaches ﬁt a global (i.e. shared) sequence-to-sequence model to a
+collection of time series  but generate statistically independent predictions. Outside the forecasting
+domain  similar methods have also been applied to (low-dimensional) multivariate dependent time
+series  e.g. two-dimensional time series of drawing trajectories [13  14].
+Two main issues prevent the estimation of high-dimensional multivariate time series models. The
+ﬁrst one is the O(N 2) scaling of the number of parameters required to express the covariance matrix
+where N denotes the dimension. Using dimensionality reduction techniques like PCA as a pre-
+processing step is a common approach to alleviate this problem  but it separates the estimation of
+the model from the preprocessing step  leading to decreased performance. This motivated [27] to
+perform such a factorization jointly with the model estimation. In this paper we show how the low
+rank plus diagonal covariance structure of the factor analysis model [29  25  10  24] can be used in
+combination with Gaussian copula processes [37] to an LSTM-RNN [15] to jointly learn the tempo-
+ral dynamics and the (time-varying) covariance structure  while signiﬁcantly reducing the number
+of parameters that need to be estimated.
+The second issue affects not only multivariate models  but all global time series models  i.e. models
+that estimate a single model for a collection of time series: In real-world data  the magnitudes of the
+time series can vary drastically between different series of the same data set  often spanning several
+orders of magnitude. In online retail demand forecasting  for example  item sales follow a power-
+law distribution  with a large number of items selling only a few units throughout the year  and a few
+popular items selling thousands of units per day [26]. The challenge posed by this for estimating
+global models across time series has been noted in previous work [26  37  27]. Several approaches
+have been proposed to alleviate this problem  including simple  ﬁxed invertible transformations such
+as the square-root or logarithmic transformations  and the data-adaptive Box-Cox transform [4] 
+
+2
+
+that aims to map a potentially heavy-tailed distribution to a Normal distribution. Other approaches
+includes removing scale with mean-scaling [26]  or with a separate network [27].
+Here  we propose to address this problem by modeling each time series’ marginal distribution sepa-
+rately using a non-parametric estimate of its cumulative distribution function (CDF). Using this CDF
+estimate as the marginal transformation in a Gaussian copula (following [18  17  1]) effectively ad-
+dresses the challenges posed by scaling  as it decouples the estimation of marginal distributions from
+the temporal dynamics and the dependency structure.
+The work most closely related to ours is the recent work [32]  which also proposes to combine deep
+autoregressive models with copula to model correlated time series. Their approach uses a nonpara-
+metric estimate of the copula  whereas we employ a Gaussian copula with low-rank structure that
+is learned jointly with the rest of the model. The nonparametric copula estimate requires splitting a
+N-dimensional cube into ε−N many pieces (where N is the time series dimension and ε is a desired
+precision)  making it difﬁcult to scale that approach to large dimensions. The method also requires
+the marginal distributions and the dependency structure to be time-invariant  an assumption which
+is often violated is practice as shown in Fig. 1. A concurrent approach was proposed in [35] which
+also uses Copula and estimates marginal quantile functions with the approach proposed in [11] and
+models the Cholesky factor as the output of a neural network. Two important differences are that this
+approach requires to estimate O(N 2) parameters to model the covariance matrix instead of O(N )
+with the low-rank approach that we propose  another difference is the use of a non-parametric esti-
+mator for the marginal quantile functions.
+The main contributions of this paper are:
+
+• a method for probabilistic high-dimensional multivariate forecasting (scaling to dimensions
+
+up to an order of magnitude larger than previously reported in [23]) 
+
+• a parametrization of the output distribution based on a low-rank-plus-diagonal covariance
+
+matrix enabling this scaling by signiﬁcantly reducing the number of parameters 
+
+• a copula-based approach for handling different scales and modeling non-Gaussian data 
+• an empirical study on artiﬁcial and six real-world datasets showing how this method im-
+
+proves accuracy over the state of the art while scaling to large dimensions.
+
+The rest of the paper is structured as follows: In Section 2 we introduce the probabilistic forecast-
+ing problem and describe the overall structure of our model. We then describe how we can use the
+empirical marginal distributions in a Gaussian copula to address the scaling problem and handle
+non-Gaussian distributions in Section 3. In Section 4 we describe the parametrization of the covari-
+ance matrix with low-rank-plus-diagonal structure  and how the resulting model can be viewed as
+a low-rank Gaussian copula process. Finally  we report experiments with real-world datasets that
+demonstrate how these contributions combine to allow our model to generate correlated predictions
+that outperform state-of-the-art methods in terms of accuracy.
+
+2 Autoregressive RNN Model for Probabilistic Multivariate Forecasting
+Let us denote the values of a multivariate time series by zi t ∈ D  where i ∈ {1  2  . . .   N} indexes
+the individual univariate component time series  and t indexes time. The domain D is assumed to
+be either R or N. We will denote the multivariate observation vector at time t by zt ∈ DN . Given T
+observations z1  . . .   zT   we are interested in forecasting the future values for τ time units  i.e. we
+want to estimate the joint conditional distribution P (zT +1  ...  zT +τ|z1  . . .   zT ). In a nutshell  our
+model takes the form of a non-linear  deterministic state space model whose state hi t ∈ Rk evolves
+independently for each time series i according to transition dynamics ϕ 
+
+hi t = ϕθh (hi t−1  zi t−1)
+
+i = 1  . . .   N 
+
+(1)
+
+where the transition dynamics ϕ are parametrized using a LSTM-RNN [15]. Note that the LSTM is
+unrolled for each time series separately  but parameters are tied across time series. Given the state
+values hi t for all time series i = 1  2  . . .   N and denoting by ht the collection of state values for
+all series at time t  we parametrize the joint emission distribution using a Gaussian copula 
+
+p(zt|ht) = N ([f1(z1 t)  f2(z2 t)  . . .   fN (zN t)]T | µ(ht)  Σ(ht)).
+
+(2)
+
+3
+
+µ1t
+
+µ2t
+µ4t
+
+  
+
+d1t
+
+0
+0
+
+N
+
+ +
+
+ v1t
+
+v2t
+v4t
+
+ v1t
+
+v2t
+v4t
+
+T
+
+0
+d2t
+0
+
+0
+0
+d4t
+
+µ1t
+
+µ3t
+µ4t
+
+  
+
+d1t
+
+0
+0
+
+N
+
+ +
+
+ v1t
+
+v3t
+v4t
+
+ v1t
+
+v3t
+v4t
+
+T
+
+0
+d3t
+0
+
+0
+0
+d4t
+
+µ1t  d1t  v1t
+
+µ2t  d2t  v2t
+
+µ4t  d4t  v4t
+
+µ1t  d1t  v1t
+
+µ3t  d3t  v3t
+
+µ4t  d4t  v4t
+
+h1t
+
+z1t
+
+h2t
+
+z2t
+
+h4t
+
+z4t
+
+h1t
+
+z1t
+
+h3t
+
+z3t
+
+h4t
+
+z4t
+
+Figure 2: Illustration of our model parametrization. During training  dimensions are sampled at
+random and a local LSTM is unrolled on each of them individually (1  2  4  then 1  3  4 in the
+example). The parameters governing the state updates and parameter projections are shared for all
+time series. This parametrization can express the Low-rank Gaussian distribution on sets of series
+that varies during training or prediction.
+
+The transformations fi : D → R here are invertible mappings of the form Φ−1 ◦ ˆFi  where Φ
+denotes the cumulative distribution function of the standard normal distribution  and ˆFi denotes an
+estimate of the marginal distribution of the i-th time series zi 1  . . .   zi T . The role of these functions
+fi is to transform the data for the i-th time series such that marginally it follows a standard normal
+distribution. The functions µ(·) and Σ(·) map the state ht to the mean and covariance of a Gaussian
+distribution over the transformed observations (described in more detail in Section 4).
+Under this model  we can factorize the joint distribution of the observations as
+
+p(z1  . . . zT +τ ) =
+
+p(zt|z1  . . .   zt−1) =
+
+p(zt|ht).
+
+(3)
+
+t=1
+
+t=1
+
+Both the state update function ϕ and the mappings µ(·) and Σ(·) have free parameters that are
+learned from the data. We denote θ the vector of all free parameters  consisting of the parameters of
+the state update θh as well as θµ and θΣ which denote the free parameters in µ(·) and Σ(·). Given
+θ and hT +1  we can produce Monte Carlo samples from the joint predictive distribution
+
+T +τ(cid:89)
+
+T +τ(cid:89)
+
+T +τ(cid:89)
+
+t=T +1
+
+p(zT +1  . . . zT +τ|z1  . . .   zT ) = p(zT +1  . . . zT +τ|hT +1) =
+
+p(zt|ht)
+
+(4)
+
+by sequentially sampling from P (zt|ht) and updating ht using ϕ 2. We learn the parameters θ from
+the observed data z1  . . .   zT using maximum likelihood estimation by i.e. by minimizing the loss
+function
+
+− log p(z1  z2  . . .   zT ) = − T(cid:88)
+
+log p(zt|ht) 
+
+(5)
+
+using stochastic gradient descent-based optimization. To handle long time series  we employ a data
+augmentation strategy which randomly samples ﬁxed-size slices of length T (cid:48) + τ from the time
+series during training  where we ﬁx the context length hyperparameter T (cid:48) to τ. During prediction 
+only the last T (cid:48) time steps are used in computing the initial state for prediction.
+
+t=1
+
+3 Gaussian Copula
+A copula function C : [0  1]N → [0  1] is the CDF of a joint distribution of a collection of real
+random variables U1  . . .   UN with uniform marginal distribution [8]  i.e.
+C(u1  . . .   uN ) = P (U1 ≤ u1  . . .   UN ≤ uN ).
+
+Sklar’s theorem [28] states that any joint cumulative distribution F admits a representation in terms
+of its univariate marginals Fi and a copula function C 
+
+F (z1  . . .   zN ) = C(F1(z1)  . . .   FN (zN )).
+
+2Note that the model complexity scales linearly with the number of Monte Carlo samples.
+
+4
+
+When the marginals are continuous the copula C is unique and is given by the joint distribution
+of the probability integral transforms of the original variables  i.e. u ∼ C where ui = Fi(zi).
+Furthermore  if zi is continuous then ui ∼ U(0  1).
+A common modeling choice for C is to use the Gaussian copula  deﬁned by:
+
+C(F1(z1)  . . .   Fd(zN )) = φµ Σ(Φ−1(F1(z1))  . . .   Φ−1(FN (zN ))) 
+
+where Φ : R → [0  1] is the CDF of the standard normal and φµ Σ is a multivariate normal distribu-
+tion parametrized with µ ∈ RN and Σ ∈ RN×N . In this model  the observations z  the marginally
+uniform random variables u and the Gaussian random variables x are related as follows:
+
+x Φ−→ u F −1−−−→ z
+
+z F−→ u Φ−1−−−→ x.
+
+Setting fi = Φ−1 ◦ ˆFi results in the model in Eq. (2).
+The marginal distributions Fi are not given a priori and need to be estimated from data. We use
+the non-parametric approach of [18] proposed in the context of estimating high-dimensional distri-
+butions with sparse covariance structure. In particular  they use the empirical CDF of the marginal
+distributions 
+
+m(cid:88)
+
+t=1
+
+ˆFi(v) =
+
+1
+m
+
+1zit≤v 
+
+where m observations are considered. As we require the transformations fi to be differentiable  we
+use a linearly-interpolated version of the empirical CDF resulting in a piecewise-constant derivative
+ˆF (cid:48)(u). This allow us to write the log-density of the original observations under our model as
+
+log p(z; µ  Σ) = log φµ Σ(Φ−1( ˆF (z))) + log
+= log φµ Σ(Φ−1( ˆF (z))) + log
+ˆF (z)
+= log φµ Σ(Φ−1( ˆF (z))) − log φ(Φ−1( ˆF (z)) + log ˆF (cid:48)(z)
+
+Φ−1( ˆF (z))
+Φ−1(u) + log
+
+d
+dz
+d
+du
+
+d
+dz
+
+which are the individual terms in the total loss (5) where φ is the probability density function of the
+standard normal.
+The number of past observations m used to estimate the empirical CDFs is an hyperparameter and
+left constant in our experiments with m = 100 3.
+
+4 Low-rank Gaussian Process Parametrization
+After applying the marginal transformations fi(·) our model assumes a joint multivariate Gaussian
+distribution over the transformed data. In this section we describe how the parameters µ(ht) and
+Σ(ht) of this emission distribution are obtained from the LSTM state ht.
+We begin by describing how a low-rank-plus-diagonal parametrization of the covariance matrix can
+be used to keep the computational complexity and the number of parameters manageable as the
+number of time series N grows. We then show how  by viewing the emission distribution as a
+time-varying low-rank Gaussian Process gt ∼ GP(˜µt(·)  kt(· ·))  we can train the model by only
+considering a subset of time series in each mini-batch further alleviating memory constraints and
+allowing the model to be applied to very high-dimensional sets of time series.
+Let us denote the vector of transformed observations by
+
+xt = f (zt) = [f1(z1 t)  f2(z2 t)  . . .   fN (zN t)]T  
+
+so that p(xt|ht) = N (xt|µ(ht)  Σ(ht)). The covariance matrix Σ(ht) is a N × N symmetric
+positive deﬁnite matrix with O(N 2) free parameters. Evaluating the Gaussian likelihood naïvely
+
+3This makes the underlying assumption that the marginal distributions are stationary  which is violated e.g.
+in case of a linear trend. Standard time series techniques such as de-trending or differencing can be used to
+pre-process the data such that this assumption is satisﬁed.
+
+5
+
+requires O(N 3) operations. Using a structured parametrization of the covariance matrix as the
+sum of a diagonal matrix and a low rank matrix  Σ = D + V V T where D ∈ RN×N is diagonal
+and V ∈ RN×r  results in a compact representation with O(N × r) parameters. This allows the
+likelihood to be evaluated using O(N r2+r3) operations. As the rank hyperparameter r can typically
+be chosen to be much smaller than N  this leads to a signiﬁcant speedup.
+In all our low-rank
+experiments we use r = 10. We investigate the sensitivity to this parameter of accuracy and speed
+in the Appendix.
+Recall from Eq. 1 that hi t represents the state of an LSTM unrolled with values preceding zi t. In
+order to deﬁne the mapping Σ(ht)  we deﬁne mappings for its components
+
+(cid:35)(cid:34)
+
+(cid:35)T
+
+v1(h1 t)
+
+. . .
+
+vN (hN t)
+
+v1(h1 t)
+
+. . .
+
+vN (hN t)
+
+= Dt + VtV T
+t .
+
+d1(h1 t)
+
+0
+
+(cid:34)
+
+ +
+
+0
+
+...
+
+dN (hN t)
+
+Σ(ht) =
+
+Note that the component mappings di and vi depend only on the state hi t for the i-th component
+time series  but not on the states of the other time series. Instead of learning separate mappings
+di  vi  and µi for each time series  we parametrize them in terms of the shared functions ˜d  ˜v  and
+˜µ  respectively. These functions depend on an E-dimensional feature vector ei ∈ RE for each
+individual time series. The vectors ei can either be features of the time series that are known a
+priori  or can be embeddings that are learned with the rest of the model (or a combination of both).
+Deﬁne the vector yi t = [hi t; ei]T ∈ Rp×1  which concatenates the state for time series i at time t
+with the features ei of the i-th time series and use the following parametrization:
+
+µi(hi t) = ˜µ(yi t) = wT
+di(hi t) = ˜d(yi t) = s(wT
+vi(hi t) = ˜v(yi t) = Wvyi t 
+
+µ yi t
+
+d yi t)
+
+where s(x) = log(1 + ex) maps to positive values  wµ ∈ Rp×1  wd ∈ Rp×1  Wv ∈ Rr×p are
+parameters.
+All parameters θµ = {wµ  w˜µ}  θΣ = {wd  Wv  w ˜d} as well as the LSTM update parameters θh
+are learned by optimizing Eq. 5. These parameters are shared for all time series and can therefore be
+used to parametrize a GP. We can view the distribution of xt as a Gaussian process evaluated at points
+yi t  i.e. xi t = gt(yi t)  where gt ∼ GP(˜µ(·)  k(· ·))  with k(y  y(cid:48)) = 1y=y(cid:48) ˜d(y) + ˜v(y)T ˜v(y(cid:48)).
+Using this view it becomes apparent that we can train the model by evaluating the Gaussian terms
+in the loss only on random subsets of the time series in each iteration  i.e. we can train the model
+using batches of size B (cid:28) N as illustrated in Figure 2 (in our experiments we use B = 20).
+Further  if prior information about the covariance structure is available (e.g. in the case of spatial
+data the covariance might be directly related to the distance between points)  this information can
+be easily incorporated directly into the kernel  either by exclusively using a pre-speciﬁed kernel or
+by combining it with the learned  time-varying kernel speciﬁed above.
+
+5 Experiments
+
+Synthetic experiment. We ﬁrst perform an experiment on synthetic data demonstrating that our
+approach can recover complex time-varying low-rank covariance patterns from multi-dimensional
+observations. An artiﬁcial dataset is generated by drawing T observations from a normal distribution
+with time-varying mean and covariance matrix  zt ∼ N (ρtu  Σt) where ρt = sin(t)  Σt = U StU T
+and
+
+(cid:21)
+
+(cid:20) σ2
+
+1
+
+St =
+
+ρtσ1σ2
+
+ρtσ1σ2
+
+σ2
+2
+
+The coefﬁcients of u ∈ RN×1 and U ∈ RN×r are drawn uniformly in [a  b] and σ1  σ2 are ﬁxed
+constants. By construction  the rank of Σt is 2. Both the mean and correlation coefﬁcient of the
+two underlying latent variables oscillate through time as ρt oscillates between -1 and 1.
+In our
+experiments  the constants are set to σ1 = σ2 = 0.1  a = −0.5  b = 0.5 and T = 24  000.
+In Figure 3  we compare the one-step-ahead predicted covariance given by our model  i.e. the lower
+triangle of Σ(ht)  to the true covariance  showing that the model is able to recover the complex
+underlying pattern of the covariance matrix.
+
+6
+
+Figure 3: True (solid line) and predicted (dashed line) covariance after training with N = 4 (left) and
+N = 8 (right) time series. Each line corresponds to an entry in the lower triangle of Σt (including
+the diagonal  i.e. 10 lines in the left plot  28 in the right).
+
+Experiments with real-world datasets. The following publicly-available datasets are used to
+compare the accuracy of different multivariate forecasting models.
+
+• Exchange rate: daily exchange rate between 8 currencies as used in [16]
+• Solar: hourly photo-voltaic production of 137 stations in Alabama State used in [16]
+• Electricity: hourly time series of the electricity consumption of 370 customers [6]
+• Trafﬁc: hourly occupancy rate  between 0 and 1  of 963 San Francisco car lanes [6]
+• Taxi: spatio-temporal trafﬁc time series of New York taxi rides [31] taken at 1214 locations
+every 30 minutes in the months of January 2015 (training set) and January 2016 (test set)
+
+• Wikipedia: daily page views of 2000 Wikipedia pages used in [11]
+
+Each dataset is split into a training and test set by using all data prior to a ﬁxed date for the training
+and by using rolling windows for the test set. We measure accuracy on forecasts starting on time
+points equally spaced after the last point seen for training. For hourly datasets  accuracy is measured
+on 7 rolling time windows  for all other datasets we use 5 time windows  except for taxi  where
+57 windows are used in order to cover the full test set. The number of steps predicted τ  domain 
+time-frequency  dimension N and time-steps available for training T is given in the appendix for all
+datasets.
+
+Evaluation against baseline and ablation study. As we are looking into modeling correlated
+time series  only methods that are able to produce correlated samples are considered in our compar-
+isons. The ﬁrst baseline is VAR  a multivariate linear vector auto-regressive model using lag 1 and
+a lag corresponding to the periodicity of the data. The second is GARCH  a multivariate conditional
+heteroskedasticity model proposed by [34] with implementation from [12]. More details about these
+methods can be found in the supplement.
+We also compare with different RNN architectures  distributions  and data transformation schemes
+to show the beneﬁt of the low-rank Gaussian Copula Process that we propose. The most straightfor-
+ward alternative to our approach is a single global LSTM that receives and predicts all target dimen-
+sions at once. We refer to this architecture as Vec-LSTM. We compare this architecture with the GP
+approach described in Section 4  where the LSTM is unrolled on each dimensions separately before
+reconstructing the joint distribution. For the output distribution in the Vec-LSTM architecture  we
+compare independent4  low-rank and full-rank normal distributions. For the data transformation we
+compare the copula approach that we propose  the mean scaling operation proposed in [26]  and no
+transformation.
+
+4Note that samples are still correlated with a diagonal noise due to the conditioning on the LSTM state.
+
+7
+
+0102030405060700.0040.0020.0000.0020.0040.0060102030405060700.0040.0020.0000.0020.0040.006baseline
+
+architecture
+
+data transformation
+
+distribution CRPS ratio CRPS-Sum ratio
+
+num params ratio
+
+-
+-
+
+VAR
+GARCH
+Vec-LSTM
+Vec-LSTM-ind
+Vec-LSTM
+Vec-LSTM-ind-scaling
+Vec-LSTM
+Vec-LSTM-fullrank
+Vec-LSTM-fullrank-scaling Vec-LSTM
+Vec-LSTM
+Vec-LSTM-lowrank-Copula
+GP
+GP-scaling
+GP-Copula
+
+GP
+GP
+GP
+
+-
+-
+
+None
+
+None
+
+Mean-scaling
+
+Mean-scaling
+
+Copula
+None
+
+Mean-scaling
+
+Copula
+
+-
+-
+
+Independent
+Independent
+
+Full-rank
+Full-rank
+Low-rank
+Low-rank
+Low-rank
+Low-rank
+
+10.0
+7.8
+3.6
+1.4
+29.1
+22.5
+1.1
+4.5
+2.0
+1.0
+
+10.9
+6.3
+6.8
+1.4
+44.4
+37.6
+1.7
+9.5
+3.4
+1.0
+
+35.0
+6.2
+13.9
+13.9
+103.4
+103.4
+20.3
+1.0
+1.0
+1.0
+
+Table 1: Baselines summary and average ratio compared to GP-Copula for CRPS  CRPS-Sum and
+number of parameters on all datasets.
+
+The description of the baselines as well as their average performance compared to GP-Copula are
+given in Table 1. For evaluation  we generate 400 samples from each model and evaluate multi-step
+accuracy using the continuous ranked probability score metric [20] that measures the accuracy of
+the predicted distribution (see supplement for details). We compute the CRPS metric on each time
+series individually (CRPS) as well on the sum of all time series (CRPS-Sum). Both metrics are
+averaged over the prediction horizon and over the evaluation time points. RNN models are trained
+only once with the dates preceding the ﬁrst rolling time point and the same trained model is then
+used on all rolling evaluations.
+Table 2 reports the CRPS-Sum accuracy of all methods (some entries are missing due to models
+requiring too much memory or having divergent losses). The individual time series CRPS as well as
+mean squared error are also reported in the supplement. Models that do not have data transforma-
+tions are generally less accurate and more unstable. We believe this to be caused by the large scale
+variation between series also noted in [26  27]. In particular  the copula transformation performs
+better than mean-scaling for GP  where GP-Copula signiﬁcantly outperforms GP-scaling.
+The GP-Copula model that we propose provides signiﬁcant accuracy improvements on most
+datasets.
+In our comparison CRPS and CRPS-Sum are improved by on average 10% and 40%
+(respectively) compared to the second best models for those metrics Vec-LSTM-lowrank-Copula
+and Vec-LSTM-ind-scaling. One factor might be that the training is made more robust by adding
+randomness  as GP models need to predict different groups of series for each training example  mak-
+ing it harder to overﬁt. Note also that the number of parameters is drastically smaller compared to
+Vec-LSTM architectures. For the trafﬁc dataset  the GP models have 44K parameters to estimate
+compared to 1.1M in a Vec-LSTM with a low-rank distribution and 38M parameters with a full-rank
+distribution. The complexity of the number of parameters are also given in Table 3.
+We also qualitatively assess the covariance structure predicted by our model. In Fig. 1  we plot the
+predicted correlation matrix for several time steps after training on the Taxi dataset. We following
+the approach in [18] and reconstruct the covariance graph by truncating edges whose correlation
+coefﬁcient is less than a threshold kept constant over time. Fig. 1 shows the spatio-temporal cor-
+relation graph obtained at different hours. The predicted correlation matrices show how the model
+reconstructs the evolving topology of spatial relationships in the city trafﬁc. Covariance matrices
+predicted over time by our model can also be found in the appendix for other datasets.
+Additional details concerning the processing of the datasets  hyper-parameter optimization  eval-
+uations  and model are given in the supplement. The code to perform the evaluations of
+our methods and different baselines is available at https://github.com/mbohlkeschneider/gluon-
+ts/tree/mv_release.
+
+6 Conclusion
+
+We presented an approach to obtain probabilistic forecast of high-dimensional multivariate time
+series. By using a low-rank approximation  we can avoid the potentially very large number of pa-
+rameters of a full covariate matrix and by using a low-rank Gaussian Copula process we can stably
+optimize directly parameters of an autoregressive model. We believe that such techniques allow-
+ing to estimate high-dimensional time varying covariance matrices may open the door to several
+applications in anomaly detection  imputation or graph analysis for time series data.
+
+8
+
+dataset
+estimator
+
+CRPS-Sum
+
+exchange
+
+solar
+
+elec
+
+trafﬁc
+
+taxi
+
+wiki
+
+VAR
+GARCH
+Vec-LSTM-ind
+Vec-LSTM-ind-scaling
+Vec-LSTM-fullrank
+Vec-LSTM-fullrank-scaling
+Vec-LSTM-lowrank-Copula
+GP
+GP-scaling
+GP-Copula
+
+0.010+/-0.000
+0.020+/-0.000
+0.009+/-0.000
+0.008+/-0.001
+0.646+/-0.114
+0.394+/-0.174
+0.007+/-0.000
+0.011+/-0.001
+0.009+/-0.000
+0.007+/-0.000
+
+0.524+/-0.001
+0.869+/-0.000
+0.470+/-0.039
+0.391+/-0.017
+0.956+/-0.000
+0.920+/-0.035
+0.319+/-0.011
+0.828+/-0.010
+0.368+/-0.012
+0.337+/-0.024
+
+0.031+/-0.000
+0.278+/-0.000
+0.731+/-0.007
+0.025+/-0.001
+0.999+/-0.000
+0.747+/-0.020
+0.064+/-0.008
+0.947+/-0.016
+0.022+/-0.000
+0.024+/-0.002
+
+0.144+/-0.000
+0.368+/-0.000
+0.110+/-0.020
+0.087+/-0.041
+-
+-
+0.103+/-0.006
+2.198+/-0.774
+0.079+/-0.000
+0.078+/-0.002
+
+0.292+/-0.000
+-
+0.429+/-0.000
+0.506+/-0.005
+-
+-
+0.326+/-0.007
+0.425+/-0.199
+0.183+/-0.395
+0.208+/-0.183
+
+3.400+/-0.003
+-
+0.801+/-0.029
+0.133+/-0.002
+-
+-
+0.241+/-0.033
+0.933+/-0.003
+1.483+/-1.034
+0.086+/-0.004
+
+Table 2: CRPS-sum accuracy comparison (lower is better  best two methods are in bold). Mean and
+std are obtained by rerunning each method three times.
+
+input
+
+independent
+
+Vec-LSTM O(N k) O(N k)
+GP
+
+O(k)
+
+O(k)
+
+output
+low-rank
+full-rank
+O(N rk) O(N 2k)
+O(N 2k)
+O(rk)
+
+Table 3: Number of parameters for input and output projection of different models. We recall that
+N and k denotes the dimension and size of the LSTM state.
+
+References
+[1] Wolfgang Aussenegg and Christian Cech. A new copula approach for high-dimensional real
+world portfolios. University of Applied Sciences bﬁ Vienna  Austria. Working paper series 
+68(2012):1–26  2012.
+
+[2] Luc Bauwens  Sébastien Laurent  and Jeroen VK Rombouts. Multivariate garch models: a
+
+survey. Journal of applied econometrics  21(1):79–109  2006.
+
+[3] Ben S Bernanke  Jean Boivin  and Piotr Eliasz. Measuring the effects of monetary policy: a
+factor-augmented vector autoregressive (favar) approach. The Quarterly journal of economics 
+120(1):387–422  2005.
+
+[4] G. E. P. Box and D. R. Cox. An analysis of transformations. Journal of the Royal Statistical
+
+Society. Series B (Methodological)  26(2):211–252  1964.
+
+[5] Laurent AF Callot and Anders B Kock. Oracle efﬁcient estimation and forecasting with the
+adaptive lasso and the adaptive group lasso in vector autoregressions. Essays in Nonlinear
+Time Series Econometrics  pages 238–268  2014.
+
+[6] Dua Dheeru and Eﬁ Karra Taniskidou. UCI machine learning repository  2017.
+
+[7] James Durbin and Siem Jan Koopman. Time series analysis by state space methods  volume 38.
+
+Oxford University Press  2012.
+
+[8] Gal Elidan. Copulas in machine learning.
+
+In Piotr Jaworski  Fabrizio Durante  and Wolf-
+gang Karl Härdle  editors  Copulae in Mathematical and Quantitative Finance  pages 39–60 
+Berlin  Heidelberg  2013. Springer Berlin Heidelberg.
+
+[9] Robert Engle. Dynamic conditional correlation: A simple class of multivariate generalized au-
+toregressive conditional heteroskedasticity models. Journal of Business & Economic Statistics 
+20(3):339–350  2002.
+
+[10] B S Everitt. An Introduction to Latent Variable Models. Chapman and Hill  1984.
+
+[11] Jan Gasthaus  Benidis Benidis  Konstantinos  Yuyang Wang  Syama S. Rangapuram  David
+Salinas  Valentin Flunkert  and Tim Januschowski. Probabilistic forecasting with spline quan-
+tile function RNNs. AISTATS  2019.
+
+9
+
+[12] Alexios Ghalanos. rmgarch: Multivariate GARCH models.  2019. R package version 1.3-6.
+
+[13] Alex Graves. Generating sequences with recurrent neural networks.
+
+arXiv:1308.0850  2013.
+
+arXiv preprint
+
+[14] Karol Gregor  Ivo Danihelka  Alex Graves  and Daan Wierstra. DRAW: A recurrent neural
+
+network for image generation. CoRR  abs/1502.04623  2015.
+
+[15] Sepp Hochreiter and Jürgen Schmidhuber. Long short-term memory. Neural computation 
+
+9(8):1735–1780  1997.
+
+[16] Guokun Lai  Wei-Cheng Chang  Yiming Yang  and Hanxiao Liu. Modeling long- and short-
+
+term temporal patterns with deep neural networks. CoRR  abs/1703.07015  2017.
+
+[17] Han Liu  Fang Han  Ming Yuan  John Lafferty  Larry Wasserman  et al. High-dimensional
+semiparametric Gaussian copula graphical models. The Annals of Statistics  40(4):2293–2326 
+2012.
+
+[18] Han Liu  John Lafferty  and Larry Wasserman. The nonparanormal: Semiparametric es-
+Journal of Machine Learning Research 
+
+timation of high dimensional undirected graphs.
+10(Oct):2295–2328  2009.
+
+[19] Helmut Lütkepohl. New introduction to multiple time series analysis. Springer Science &
+
+Business Media  2005.
+
+[20] James E Matheson and Robert L Winkler. Scoring rules for continuous probability distribu-
+
+tions. Management science  22(10):1087–1096  1976.
+
+[21] Junier Oliva  Avinava Dubey  Manzil Zaheer  Barnabas Poczos  Ruslan Salakhutdinov  Eric
+Xing  and Jeff Schneider. Transformation autoregressive networks. In Jennifer Dy and An-
+dreas Krause  editors  Proceedings of the 35th International Conference on Machine Learning 
+volume 80 of Proceedings of Machine Learning Research  pages 3898–3907  Stockholmsmäs-
+san  Stockholm Sweden  10–15 Jul 2018. PMLR.
+
+[22] George Papamakarios  Theo Pavlakou  and Iain Murray. Masked autoregressive ﬂow for den-
+sity estimation.
+In I. Guyon  U. V. Luxburg  S. Bengio  H. Wallach  R. Fergus  S. Vish-
+wanathan  and R. Garnett  editors  Advances in Neural Information Processing Systems 30 
+pages 2338–2347. Curran Associates  Inc.  2017.
+
+[23] Andrew J Patton. A review of copula models for economic time series. Journal of Multivariate
+
+Analysis  110:4–18  2012.
+
+[24] Sam Roweis and Zoubin Ghahramani. A unifying review of linear Gaussian models. Neural
+
+Computation  11(2):305–345  1999.
+
+[25] Donald B Rubin and Dorothy T Thayer. EM algorithms for ML factor analysis. Psychometrika 
+
+47(1):69–76  1982.
+
+[26] David Salinas  Valentin Flunkert  and Jan Gasthaus. Deepar: Probabilistic forecasting with
+
+autoregressive recurrent networks. CoRR  abs/1704.04110  2017.
+
+[27] Rajat Sen  Hsiang-Fu Yu  and Inderjit Dhillon. Think globally  act locally: A deep neural net-
+work approach to high-dimensional time series forecasting. arXiv preprint arXiv:1905.03806 
+2019.
+
+[28] M Sklar. Fonctions de repartition à n dimensions et leurs marges. Publications de l’Institut de
+
+Statistique de l’Université de Paris   8:229–231  1959.
+
+[29] C. Spearman. "general intelligence " objectively determined and measured. The American
+
+Journal of Psychology  15(2):201–292  1904.
+
+[30] Ilya Sutskever  Oriol Vinyals  and Quoc V Le. Sequence to sequence learning with neural
+
+networks. In Advances in Neural Information Processing Systems  pages 3104–3112  2014.
+
+10
+
+[31] NYC Taxi and Limousine Commission. TLC trip record data. https://www1.nyc.gov/
+
+site/tlc/about/tlc-trip-record-data.page  2015.
+
+[32] J. Toubeau  J. Bottieau  F. Vallée  and Z. De Grève. Deep learning-based multivariate proba-
+bilistic forecasting for short-term scheduling in power markets. IEEE Transactions on Power
+Systems  34(2):1203–1215  March 2019.
+
+[33] Aäron van den Oord  Sander Dieleman  Heiga Zen  Karen Simonyan  Oriol Vinyals  Alex
+Graves  Nal Kalchbrenner  Andrew W. Senior  and Koray Kavukcuoglu. Wavenet: A genera-
+tive model for raw audio. CoRR  abs/1609.03499  2016.
+
+[34] Roy Van der Weide. Go-garch: a multivariate generalized orthogonal garch model. Journal of
+
+Applied Econometrics  17(5):549–564  2002.
+
+[35] Ruofeng Wen and Kari Torkkola. Deep generative quantile-copula models for probabilistic
+
+forecasting. arXiv preprint arXiv:1907.10697  2019.
+
+[36] Ruofeng Wen  Kari Torkkola  and Balakrishnan Narayanaswamy. A multi-horizon quantile
+
+recurrent forecaster. arXiv preprint arXiv:1711.11053  2017.
+
+[37] Andrew Gordon Wilson and Zoubin Ghahramani. Copula processes.
+
+In Proceedings of
+the 23rd International Conference on Neural Information Processing Systems - Volume 2 
+NIPS’10  pages 2460–2468  USA  2010. Curran Associates Inc.
+
+11
+
+,David Salinas
+Michael Bohlke-Schneider
+Laurent Callot
+Roberto Medico
+Jan Gasthaus

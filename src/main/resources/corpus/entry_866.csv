@@ -1,0 +1,828 @@
+2017,Breaking the Nonsmooth Barrier: A Scalable Parallel Method for Composite Optimization,Due to their simplicity and excellent performance  parallel asynchronous variants of stochastic gradient descent have become popular methods to solve a wide range of large-scale optimization problems on multi-core architectures. Yet  despite their practical success  support for nonsmooth objectives is still lacking  making them unsuitable for many problems of interest in machine learning  such as the Lasso  group Lasso or empirical risk minimization with convex constraints.   In this work  we propose and analyze ProxASAGA  a fully asynchronous sparse method inspired by SAGA  a variance reduced incremental gradient algorithm. The proposed method is easy to implement and significantly outperforms the state of the art on several nonsmooth  large-scale problems. We prove that our method achieves a theoretical linear speedup with respect to the sequential version under assumptions on the sparsity of gradients and block-separability of the proximal term. Empirical benchmarks on a multi-core architecture illustrate practical speedups of up to 12x on a 20-core machine.,Breaking the Nonsmooth Barrier: A Scalable Parallel
+
+Method for Composite Optimization
+
+Fabian Pedregosa
+
+INRIA/ENS∗
+Paris  France
+
+R´emi Leblond
+INRIA/ENS∗
+Paris  France
+
+Simon Lacoste-Julien
+
+MILA and DIRO
+
+Universit´e de Montr´eal  Canada
+
+Abstract
+
+Due to their simplicity and excellent performance  parallel asynchronous variants
+of stochastic gradient descent have become popular methods to solve a wide range
+of large-scale optimization problems on multi-core architectures. Yet  despite their
+practical success  support for nonsmooth objectives is still lacking  making them
+unsuitable for many problems of interest in machine learning  such as the Lasso 
+group Lasso or empirical risk minimization with convex constraints. In this work 
+we propose and analyze PROXASAGA  a fully asynchronous sparse method in-
+spired by SAGA  a variance reduced incremental gradient algorithm. The proposed
+method is easy to implement and signiﬁcantly outperforms the state of the art on
+several nonsmooth  large-scale problems. We prove that our method achieves a
+theoretical linear speedup with respect to the sequential version under assump-
+tions on the sparsity of gradients and block-separability of the proximal term.
+Empirical benchmarks on a multi-core architecture illustrate practical speedups of
+up to 12x on a 20-core machine.
+
+1
+
+Introduction
+
+The widespread availability of multi-core computers motivates the development of parallel methods
+adapted for these architectures. One of the most popular approaches is HOGWILD (Niu et al.  2011) 
+an asynchronous variant of stochastic gradient descent (SGD). In this algorithm  multiple threads run
+the update rule of SGD asynchronously in parallel. As SGD  it only requires visiting a small batch
+of random examples per iteration  which makes it ideally suited for large scale machine learning
+problems. Due to its simplicity and excellent performance  this parallelization approach has recently
+been extended to other variants of SGD with better convergence properties  such as SVRG (Johnson
+& Zhang  2013) and SAGA (Defazio et al.  2014).
+Despite their practical success  existing parallel asynchronous variants of SGD are limited to smooth
+objectives  making them inapplicable to many problems in machine learning and signal processing.
+In this work  we develop a sparse variant of the SAGA algorithm and consider its parallel asyn-
+chronous variants for general composite optimization problems of the form:
+
+f (x) + h(x)
+
+arg min
+x∈Rp
+
+  with f (x) := 1
+
+where each fi is convex with L-Lipschitz gradient  the average function f is µ-strongly convex and
+h is convex but potentially nonsmooth. We further assume that h is “simple” in the sense that we
+have access to its proximal operator  and that it is block-separable  that is  it can be decomposed
+hB([x]B)  where B is a partition of the coefﬁcients into
+
+block coordinate-wise as h(x) = �B∈B
+
+∗DI ´Ecole normale sup´erieure  CNRS  PSL Research University
+
+i=1 fi(x)
+
+ 
+
+(OPT)
+
+n�n
+
+31st Conference on Neural Information Processing Systems (NIPS 2017)  Long Beach  CA  USA.
+
+subsets which will call blocks and hB only depends on coordinates in block B. Note that there is
+no loss of generality in this last assumption as a unique block covering all coordinates is a valid
+partition  though in this case  our sparse variant of the SAGA algorithm reduces to the original SAGA
+algorithm and no gain from sparsity is obtained.
+This template models a broad range of problems arising in machine learning and signal processing:
+the ﬁnite-sum structure of f includes the least squares or logistic loss functions; the proximal term
+h includes penalties such as the �1 or group lasso penalty. Furthermore  this term can be extended-
+valued  thus allowing for convex constraints through the indicator function.
+
+Contributions. This work presents two main contributions. First  in §2 we describe Sparse Proxi-
+mal SAGA  a novel variant of the SAGA algorithm which features a reduced cost per iteration in the
+presence of sparse gradients and a block-separable penalty. Like other variance reduced methods  it
+enjoys a linear convergence rate under strong convexity. Second  in §3 we present PROXASAGA  a
+lock-free asynchronous parallel version of the aforementioned algorithm that does not require con-
+sistent reads. Our main results states that PROXASAGA obtains (under assumptions) a theoretical
+linear speedup with respect to its sequential version. Empirical benchmarks reported in §4 show that
+this method dramatically outperforms state-of-the-art alternatives on large sparse datasets  while the
+empirical speedup analysis illustrates the practical gains as well as its limitations.
+
+1.1 Related work
+
+Asynchronous coordinate-descent. For composite objective functions of the form (OPT)  most of
+the existing literature on asynchronous optimization has focused on variants of coordinate descent.
+Liu & Wright (2015) proposed an asynchronous variant of (proximal) coordinate descent and proved
+a near-linear speedup in the number of cores used  given a suitable step size. This approach has been
+recently extended to general block-coordinate schemes by Peng et al. (2016)  to greedy coordinate-
+descent schemes by You et al. (2016) and to non-convex problems by Davis et al. (2016). However 
+as illustrated by our experiments  in the large sample regime coordinate descent compares poorly
+against incremental gradient methods like SAGA.
+
+Variance reduced incremental gradient and their asynchronous variants.
+Initially proposed in
+the context of smooth optimization by Le Roux et al. (2012)  variance reduced incremental gradient
+methods have since been extended to minimize composite problems of the form (OPT) (see table
+below). Smooth variants of these methods have also recently been extended to the asynchronous set-
+ting  where multiple threads run the update rule asynchronously and in parallel. Interestingly  none
+of these methods achieve both simultaneously  i.e. asynchronous optimization of composite prob-
+lems. Since variance reduced incremental gradient methods have shown state of the art performance
+in both settings  this generalization is of key practical interest.
+
+Objective
+
+Smooth
+
+Composite
+
+Sequential Algorithm
+SVRG (Johnson & Zhang  2013)
+SDCA (Shalev-Shwartz & Zhang  2013)
+SAGA (Defazio et al.  2014)
+PROXSDCA (Shalev-Shwartz et al.  2012)
+SAGA (Defazio et al.  2014)
+ProxSVRG (Xiao & Zhang  2014)
+
+Asynchronous Algorithm
+
+SVRG (Reddi et al.  2015)
+PASSCODE (Hsieh et al.  2015  SDCA variant)
+ASAGA (Leblond et al.  2017  SAGA variant)
+
+This work: PROXASAGA
+
+On the difﬁculty of a composite extension. Two key issues explain the paucity in the develop-
+ment of asynchronous incremental gradient methods for composite optimization. The ﬁrst issue
+is related to the design of such algorithms. Asynchronous variants of SGD are most competitive
+when the updates are sparse and have a small overlap  that is  when each update modiﬁes a small
+and different subset of the coefﬁcients. This is typically achieved by updating only coefﬁcients for
+which the partial gradient at a given iteration is nonzero 2 but existing schemes such as the lagged
+updates technique (Schmidt et al.  2016) are not applicable in the asynchronous setting. The second
+
+2Although some regularizers are sparsity inducing  large scale datasets are often extremely sparse and lever-
+
+aging this property is crucial for the efﬁciency of the method.
+
+2
+
+difﬁculty is related to the analysis of such algorithms. All convergence proofs crucially use the Lip-
+schitz condition on the gradient to bound the noise terms derived from asynchrony. However  in the
+composite case  the gradient mapping term (Beck & Teboulle  2009)  which replaces the gradient
+in proximal-gradient methods  does not have a bounded Lipschitz constant. Hence  the traditional
+proof technique breaks down in this scenario.
+
+Other approaches. Recently  Meng et al. (2017); Gu et al. (2016) independently proposed a dou-
+bly stochastic method to solve the problem at hand. Following Meng et al. (2017) we refer to it
+as Async-PROXSVRCD. This method performs coordinate descent-like updates in which the true
+gradient is replaced by its SVRG approximation. It hence features a doubly-stochastic loop: at each
+iteration we select a random coordinate and a random sample. Because the selected coordinate block
+is uncorrelated with the chosen sample  the algorithm can be orders of magnitude slower than SAGA
+in the presence of sparse gradients. Appendix F contains a comparison of these methods.
+
+1.2 Deﬁnitions and notations
+
+By convention  we denote vectors and vector-valued functions in lowercase boldface (e.g. x) and
+matrices in uppercase boldface (e.g. D). The proximal operator of a convex lower semicontinuous
+2�x− z�2}. A function f is said to be
+function h is deﬁned as proxh(x) := arg minz∈Rp{h(z) + 1
+L-smooth if it is differentiable and its gradient is L-Lipschitz continuous. A function f is said to be
+µ-strongly convex if f − µ
+2� · �2 is convex. We use the notation κ := L/µ to denote the condition
+number for an L-smooth and µ-strongly convex function.3
+I p denotes the p-dimensional identity matrix  1{cond} the characteristic function  which is 1 if cond
+i=1 αi.
+evaluates to true and 0 otherwise. The average of a vector or matrix is denoted α := 1
+We use � · � for the Euclidean norm. For a positive semi-deﬁnite matrix D  we deﬁne its associated
+distance as �x�2
+D := �x  Dx�. We denote by [ x ]b the b-th coordinate in x. This notation is
+overloaded so that for a collection of blocks T = {B1  B2  . . .}  [x]T denotes the vector x restricted
+to the coordinates in the blocks of T . For convenience  when T consists of a single block B we use
+[x]B as a shortcut of [x]{B}. Finally  we distinguish E  the full expectation taken with respect to all
+the randomness in the system  from E  the conditional expectation of a random it (the random index
+sampled at each iteration by SGD-like algorithms) conditioned on all the “past”  which the context
+will clarify.
+
+n�n
+
+2 Sparse Proximal SAGA
+
+Original SAGA algorithm. The original SAGA algorithm (Defazio et al.  2014) maintains two
+moving quantities: the current iterate x and a table (memory) of historical gradients (αi)n
+i=1. At
+every iteration  it samples an index i ∈ {1  . . .   n} uniformly at random  and computes the next
+iterate (x+  α+) according to the following recursion:
+(1)
+On each iteration  this update rule requires to visit all coefﬁcients even if the partial gradients ∇fi are
+sparse. Sparse partial gradients arise in a variety of practical scenarios: for example  in generalized
+linear models the partial gradients inherit the sparsity pattern of the dataset. Given that large-scale
+datasets are often sparse 4 leveraging this sparsity is crucial for the success of the optimizer.
+
+ui = ∇fi(x) − αi + α ; x+ = proxγh�x − γui�; α+
+
+i = ∇fi(x) .
+
+Sparse Proximal SAGA algorithm. We will now describe an algorithm that leverages sparsity
+in the partial gradients by only updating those blocks that intersect with the support of the partial
+gradients. Since in this update scheme some blocks might appear more frequently than others  we
+will need to counterbalance this undersirable effect with a well-chosen block-wise reweighting of
+the average gradient and the proximal term.
+In order to make precise this block-wise reweighting  we deﬁne the following quantities. We denote
+by Ti the extended support of ∇fi  which is the set of blocks that intersect the support of ∇fi 
+3Since we have assumed that each individual fi is L-smooth  f itself is L-smooth – but it could have a
+smaller smoothness constant. Our rates are in terms of this bigger L/µ  as is standard in the SAGA literature.
+4For example  in the LibSVM datasets suite  8 out of the 11 datasets (as of May 2017) with more than a
+
+million samples have a density between 10−4 and 10−6.
+
+3
+
+formally deﬁned as Ti := {B : supp(∇fi) ∩ B �= ∅  B ∈ B}. For totally separable penalties such
+as the �1 norm  the blocks are individual coordinates and so the extended support covers the same
+coordinates as the support. Let dB := n/nB  where nB :=�i
+1{B ∈ Ti} is the number of times
+that B ∈ Ti. For simplicity we assume nB > 0  as otherwise the problem can be reformulated
+without block B. The update rule in (1) requires computing the proximal operator of h  which
+involves a full pass on the coordinates. In our proposed algorithm  we replace h in (1) with the
+function ϕi(x) := �B∈Ti
+dBhB(x)  whose form is justiﬁed by the following three properties.
+First  this function is zero outside Ti  allowing for sparse updates. Second  because of the block-wise
+reweighting dB  the function ϕi is an unbiased estimator of h (i.e.  E ϕi = h)  property which will
+be crucial to prove the convergence of the method. Third  ϕi inherits the block-wise structure of h
+and its proximal operator can be computed from that of h as [proxγϕi (x)]B = [prox(dB γ)hB (x)]B
+if B ∈ Ti and [proxγϕi (x)]B = [x]B otherwise. Following Leblond et al. (2017)  we will also
+replace the dense gradient estimate ui by the sparse estimate vi := ∇fi(x) − αi + Diα  where
+Di is the diagonal matrix deﬁned block-wise as [Di]B B = dB1{B ∈ Ti}I|B|. It is easy to verify
+that the vector Diα is a weighted projection onto the support of Ti and E Diα = α  making vi an
+unbiased estimate of the gradient.
+We now have all necessary elements to describe the Sparse Proximal SAGA algorithm. As the
+original SAGA algorithm  it maintains two moving quantities: the current iterate x ∈ Rp and a
+table of historical gradients (αi)n
+i=1  αi ∈ Rp. At each iteration  the algorithm samples an index
+i ∈ {1  . . .   n} and computes the next iterate (x+  α+) as:
+
+vi = ∇fi(x) − αi + Diα ; x+ = proxγϕi�x − γvi� ; α+
+
+i = ∇fi(x)  
+
+(SPS)
+
+where in a practical implementation the vector α is updated incrementally at each iteration.
+The above algorithm is sparse in the sense that it only requires to visit and update blocks in the
+extended support: if B /∈ Ti  by the sparsity of vi and proxϕi  we have [x+]B = [x]B. Hence 
+when the extended support Ti is sparse  this algorithm can be orders of magnitude faster than the
+naive SAGA algorithm. The extended support is sparse for example when the partial gradients are
+sparse and the penalty is separable  as is the case of the �1 norm or the indicator function over a
+hypercube  or when the the penalty is block-separable in a way such that only a small subset of the
+blocks overlap with the support of the partial gradients. Initialization of variables and a reduced
+storage scheme for the memory are discussed in the implementation details section of Appendix E.
+Relationship with existing methods. This algorithm can be seen as a generalization of both the
+Standard SAGA algorithm and the Sparse SAGA algorithm of Leblond et al. (2017). When the
+proximal term is not block-separable  then dB = 1 (for a unique block B) and the algorithm defaults
+to the Standard (dense) SAGA algorithm. In the smooth case (i.e.  h = 0)  the algorithm defaults to
+the Sparse SAGA method. Hence we note that the sparse gradient estimate vi in our algorithm is the
+same as the one proposed in Leblond et al. (2017). However  we emphasize that a straightforward
+combination of this sparse update rule with the proximal update from the Standard SAGA algorithm
+results in a nonconvergent algorithm: the block-wise reweighting of h is a surprisingly simple but
+crucial change. We now give the convergence guarantees for this algorithm.
+Theorem 1. Let γ = a
+SAGA converges geometrically in expectation with a rate factor of at least ρ = 1
+is  for xt obtained after t updates  we have the following bound:
+E�xt − x∗�2 ≤ (1 − ρ)tC0   with C0 := �x0 − x∗�2 + 1
+
+5L for any a ≤ 1 and f be µ-strongly convex (µ > 0). Then Sparse Proximal
+κ}. That
+
+5 min{ 1
+
+n   a 1
+
+5L2�n
+
+i=1 �α0
+
+i − ∇fi(x∗)�2
+
+.
+
+Remark. For the step size γ = 1/5L  the convergence rate is (1 − 1/5 min{1/n  1/κ}). We can thus
+identify two regimes: the “big data” regime  n ≥ κ  in which the rate factor is bounded by 1/5n  and
+the “ill-conditioned” regime  κ ≥ n  in which the rate factor is bounded by 1/5κ. This rate roughly
+matches the rate obtained by Defazio et al. (2014). While the step size bound of 1/5L is slightly
+smaller than the 1/3L one obtained in that work  this can be explained by their stronger assumptions:
+each fi is strongly convex whereas they are strongly convex only on average in this work. All proofs
+for this section can be found in Appendix B.
+
+4
+
+i=1
+
+j=1[ ˆαj ]Ti
+
+ˆx = inconsistent read of x
+ˆα = inconsistent read of α
+Sample i uniformly in {1  ...  n}
+Si := support of ∇fi
+Ti := extended support of ∇fi in B
+[ α ]Ti = 1/n�n
+[ δα ]Si = [∇fi(ˆx)]Si − [ ˆαi]Si
+[ ˆv ]Ti = [ δα ]Ti + [Diα ]Ti
+[ δx ]Ti = [proxγϕi (ˆx − γ ˆv)]Ti − [ˆx]Ti
+for B in Ti do
+for b ∈ B do
+
+Algorithm 1 PROXASAGA (analyzed)
+1: Initialize shared variables x and (αi)n
+2: keep doing in parallel
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+19:
+20:
+21: end parallel loop
+
+[ x ]b ← [ x ]b + [ δx ]b
+if b ∈ Si then
+[αi]b ← [∇fi(ˆx)]b
+end if
+end for
+
+end for
+// (‘←’ denotes shared memory update.)
+
+� atomic
+
+i=1  α
+
+Algorithm 2 PROXASAGA (implemented)
+1: Initialize shared variables x  (αi)n
+2: keep doing in parallel
+Sample i uniformly in {1  ...  n}
+3:
+Si := support of ∇fi
+4:
+Ti := extended support of ∇fi in B
+5:
+[ ˆx ]Ti = inconsistent read of x on Ti
+6:
+ˆαi = inconsistent read of αi
+7:
+[ α ]Ti = inconsistent read of α on Ti
+8:
+9:
+[ δα ]Si = [∇fi(ˆx)]Si − [ ˆαi]Si
+10:
+[ ˆv ]Ti = [δα ]Ti + [ Diα ]Ti
+11:
+[ δx ]Ti = [proxγϕi (ˆx − γ ˆv)]Ti − [ˆx]Ti
+for B in Ti do
+12:
+for b in B do
+13:
+14:
+15:
+16:
+17:
+18:
+19:
+20: αi ← ∇fi(ˆx)
+21: end parallel loop
+
+[ x ]b ← [ x ]b + [ δx ]b
+if b ∈ Si then
+end if
+end for
+
+end for
+
+[ α ]b ← [α]b + 1/n[δα]b � atomic
+
+(scalar update) � atomic
+
+� atomic
+
+3 Asynchronous Sparse Proximal SAGA
+
+We introduce PROXASAGA – the asynchronous parallel variant of Sparse Proximal SAGA. In this
+algorithm  multiple cores update a central parameter vector using the Sparse Proximal SAGA intro-
+duced in the previous section  and updates are performed asynchronously. The algorithm parameters
+are read and written without vector locks  i.e.  the vector content of the shared memory can poten-
+tially change while a core is reading or writing to main memory coordinate by coordinate. These
+operations are typically called inconsistent (at the vector level).
+The full algorithm is described in Algorithm 1 for its theoretical version (on which our analysis
+is built) and in Algorithm 2 for its practical implementation. The practical implementation differs
+from the analyzed agorithm in three points. First  in the implemented algorithm  index i is sampled
+before reading the coefﬁcients to minimize memory access since only the extended support needs to
+be read. Second  since our implementation targets generalized linear models  the memory αi can be
+compressed into a single scalar in L20 (see Appendix E). Third  α is stored in memory and updated
+incrementally instead of recomputed at each iteration.
+The rest of the section is structured as follows: we start by describing our framework of analysis; we
+then derive essential properties of PROXASAGA along with a classical delay assumption. Finally 
+we state our main convergence and speedup result.
+
+3.1 Analysis framework
+
+As in most of the recent asynchronous optimization literature  we build on the hardware model in-
+troduced by Niu et al. (2011)  with multiple cores reading and writing to a shared memory parameter
+vector. These operations are asynchronous (lock-free) and inconsistent:5 ˆxt  the local copy of the
+parameters of a given core  does not necessarily correspond to a consistent iterate in memory.
+
+“Perturbed” iterates. To handle this additional difﬁculty  contrary to most contributions in this
+ﬁeld  we choose the “perturbed iterate framework” proposed by Mania et al. (2017) and reﬁned
+by Leblond et al. (2017). This framework can analyze variants of SGD which obey the update rule:
+
+xt+1 = xt − γv(xt  it)   where v veriﬁes the unbiasedness condition E v(x  it) = ∇f (x)
+5This is an extension of the framework of Niu et al. (2011)  where consistent updates were assumed.
+
+5
+
+and the expectation is computed with respect to it. In the asynchronous parallel setting  cores are
+reading inconsistent iterates from memory  which we denote ˆxt. As these inconsistent iterates are
+affected by various delays induced by asynchrony  they cannot easily be written as a function of
+their previous iterates. To alleviate this issue  Mania et al. (2017) choose to introduce an additional
+quantity for the purpose of the analysis:
+
+xt+1 := xt − γv(ˆxt  it)  
+
+(2)
+Note that this equation is the deﬁnition of this new quantity xt. This virtual iterate is useful for the
+convergence analysis and makes for much easier proofs than in the related literature.
+
+the “virtual iterate” – which is never actually computed .
+
+“After read” labeling. How we choose to deﬁne the iteration counter t to label an iterate xt
+matters in the analysis.
+In this paper  we follow the “after read” labeling proposed in Leblond
+et al. (2017)  in which we update our iterate counter  t  as each core ﬁnishes reading its copy of
+the parameters (in the speciﬁc case of PROXASAGA  this includes both ˆxt and ˆαt). This means
+that ˆxt is the (t + 1)th fully completed read. One key advantage of this approach compared to the
+classical choice of Niu et al. (2011) – where t is increasing after each successful update – is that
+it guarantees both that the it are uniformly distributed and that it and ˆxt are independent. This
+property is not veriﬁed when using the “after write” labeling of Niu et al. (2011)  although it is still
+implicitly assumed in the papers using this approach  see Leblond et al. (2017  Section 3.2) for a
+discussion of issues related to the different labeling schemes.
+
+Generalization to composite optimization. Although the perturbed iterate framework was de-
+signed for gradient-based updates  we can extend it to proximal methods by remarking that in the
+sequential setting  proximal stochastic gradient descent and its variants can be characterized by the
+following similar update rule:
+
+xt+1 = xt − γg(xt  vit   it)   with g(x  v  i) := 1
+
+(3)
+where as before v veriﬁes the unbiasedness condition E v = ∇f (x). The Proximal Sparse SAGA
+iteration can be easily written within this template by using ϕi and vi as deﬁned in §2. Using this
+deﬁnition of g  we can deﬁne PROXASAGA virtual iterates as:
+(4)
+it = ∇fit (ˆxt). Our theoretical
+
+where as in the sequential case  the memory terms are updated as ˆαt
+analysis of PROXASAGA will be based on this deﬁnition of the virtual iterate xt+1.
+
+xt+1 := xt − γg(ˆxt  ˆvt
+
+γ�x − proxγϕi (x − γv)�  
+
+it = ∇fit (ˆxt) − ˆαt
+
+it   it)   with ˆvt
+
+it + Dit αt
+
+ 
+
+3.2 Properties and assumptions
+
+it is an unbiased estimator of the gradient of f at ˆxt. This property is a
+
+Now that we have introduced the “after read” labeling for proximal methods in Eq. (4)  we can
+leverage the framework of Leblond et al. (2017  Section 3.3) to derive essential properties for the
+analysis of PROXASAGA. We describe below three useful properties arising from the deﬁnition
+of Algorithm 1  and then state a central (but standard) assumption that the delays induced by the
+asynchrony are uniformly bounded.
+Independence: Due to the “after read” global ordering  ir is independent of ˆxt for all r ≥ t. We
+enforce the independence for r = t by having the cores read all the shared parameters before their
+iterations.
+Unbiasedness: The term ˆvt
+consequence of the independence between it and ˆxt.
+Atomicity: The shared parameter coordinate update of [x]b on Line 14 is atomic. This means that
+there are no overwrites for a single coordinate even if several cores compete for the same resources.
+Most modern processors have support for atomic operations with minimal overhead.
+Bounded overlap assumption. We assume that there exists a uniform bound  τ  on the maximum
+number of overlapping iterations. This means that every coordinate update from iteration t is suc-
+cessfully written to memory before iteration t + τ + 1 starts. Our result will give us conditions on τ
+to obtain linear speedups.
+Bounding ˆxt− xt. The delay assumption of the previous paragraph allows to express the difference
+between real and virtual iterate using the gradient mapping gu := g(ˆxu  ˆvu
+ˆxt−xt = γ�t−1
+u are p × p diagonal matrices with terms in {0  +1}. (5)
+
+ugu   where Gt
+
+iu   iu) as:
+
+u=(t−τ )+
+
+Gt
+
+6
+
+0 represents instances where both ˆxu and xu have received the corresponding updates. +1  on
+the contrary  represents instances where ˆxu has not yet received an update that is already in xu by
+deﬁnition. This bound will prove essential to our analysis.
+
+3.3 Analysis
+
+36 min{1  6κ
+
+L with a ≤ a∗(τ ) := 1
+
+In this section  we state our convergence and speedup results for PROXASAGA. The full details
+of the analysis can be found in Appendix C. Following Niu et al. (2011)  we introduce a sparsity
+measure (generalized to the composite setting) that will appear in our results.
+Deﬁnition 1. Let Δ := maxB∈B |{i : Ti � B}|/n. This is the normalized maximum number of
+times that a block appears in the extended support. For example  if a block is present in all Ti  then
+Δ = 1. If no two Ti share the same block  then Δ = 1/n. We always have 1/n ≤ Δ ≤ 1.
+Theorem 2 (Convergence guarantee of PROXASAGA). Suppose τ ≤ 1
+. For any step size
+10√Δ
+τ }  the inconsistent read iterates of Algorithm 1 converge
+γ = a
+κ�  i.e. E�ˆxt − x∗�2 ≤
+in expectation at a geometric rate factor of at least: ρ(a) = 1
+n   a 1
+(1 − ρ)t ˜C0  where ˜C0 is a constant independent of t (≈ nκ
+a C0 with C0 as deﬁned in Theorem ??).
+This last result is similar to the original SAGA convergence result and our own Theorem ??  with
+both an extra condition on τ and on the maximum allowable step size. In the best sparsity case 
+Δ = 1/n and we get the condition τ ≤ √n/10. We now compare the geometric rate above to the one
+of Sparse Proximal SAGA to derive the necessary conditions under which PROXASAGA is linearly
+faster.
+Corollary 1 (Speedup). Suppose τ ≤ 1
+. If κ ≥ n  then using the step size γ = 1/36L  PROXAS-
+10√Δ
+κ ). If κ < n  then using the step size γ = 1/36nµ 
+AGA converges geometrically with rate factor Ω( 1
+PROXASAGA converges geometrically with rate factor Ω( 1
+n ). In both cases  the convergence rate
+is the same as Sparse Proximal SAGA. Thus PROXASAGA is linearly faster than its sequential
+counterpart up to a constant factor. Note that in both cases the step size does not depend on τ.
+Furthermore  if τ ≤ 6κ  we can use a universal step size of Θ(1/L) to get a similar rate for PROX-
+ASAGA than Sparse Proximal SAGA  thus making it adaptive to local strong convexity since the
+knowledge of κ is not required.
+
+5 min� 1
+
+These speedup regimes are comparable with the best ones obtained in the smooth case  including Niu
+et al. (2011); Reddi et al. (2015)  even though unlike these papers  we support inconsistent reads
+and nonsmooth objective functions. The one exception is Leblond et al. (2017)  where the authors
+prove that their algorithm  ASAGA  can obtain a linear speedup even without sparsity in the well-
+conditioned regime. In contrast  PROXASAGA always requires some sparsity. Whether this property
+for smooth objective functions could be extended to the composite case remains an open problem.
+Relative to ASYSPCD  in the best case scenario (where the components of the gradient are uncorre-
+lated  a somewhat unrealistic setting)  ASYSPCD can get a near-linear speedup for τ as big as 4√p.
+Our result states that τ = O(1/√Δ) is necessary for a linear speedup. This means in case Δ ≤ 1/√p
+our bound is better than the one obtained for ASYSPCD. Recalling that 1/n ≤ Δ ≤ 1  it appears
+that PROXASAGA is favored when n is bigger than √p whereas ASYSPCD may have a better bound
+otherwise  though this comparison should be taken with a grain of salt given the assumptions we
+had to make to arrive at comparable quantities. An extended comparison with the related work can
+be found in Appendix D.
+
+4 Experiments
+
+In this section  we compare PROXASAGA with related methods on different datasets. Although
+PROXASAGA can be applied more broadly  we focus on �1 + �2-regularized logistic regression  a
+model of particular practical importance. The objective function takes the form
+
+where ai ∈ Rp and bi ∈ {−1  +1} are the data samples. Following Defazio et al. (2014)  we set
+λ1 = 1/n. The amount of �1 regularization (λ2) is selected to give an approximate 1/10 nonzero
+
+2 �x�2
+
+2 + λ2�x�1
+
+ 
+
+(6)
+
+1
+n
+
+n�i=1
+
+log�1 + exp(−bia�
+
+i x)� + λ1
+
+7
+
+Table 1: Description of datasets.
+
+Dataset
+KDD 2010 (Yu et al.  2010)
+KDD 2012 (Juan et al.  2016)
+Criteo (Juan et al.  2016)
+
+n
+
+p
+
+19 264 097
+149 639 105
+45 840 617
+
+1 163 024
+54 686 452
+1 000 000
+
+density
+10−6
+2 × 10−7
+4 × 10−5
+
+L
+
+28.12
+1.25
+1.25
+
+Δ
+0.15
+0.85
+0.89
+
+Figure 1: Convergence for asynchronous stochastic methods for �1 + �2-regularized logistic
+regression. Top: Suboptimality as a function of time for different asynchronous methods using 1
+and 10 cores. Bottom: Running time speedup as function of the number of cores. PROXASAGA
+achieves signiﬁcant speedups over its sequential version while being orders of magnitude faster than
+competing methods. ASYSPCD achieves the highest speedups but it also the slowest overall method.
+
+coefﬁcients. Implementation details are available in Appendix E. We chose the 3 datasets described
+in Table 1
+
+Results. We compare three parallel asynchronous methods on the aforementioned datasets: PROX-
+ASAGA (this work) 6 ASYSPCD  the asynchronous proximal coordinate descent method of Liu &
+Wright (2015) and the (synchronous) FISTA algorithm (Beck & Teboulle  2009)  in which the gra-
+dient computation is parallelized by splitting the dataset into equal batches. We aim to benchmark
+these methods in the most realistic scenario possible; to this end we use the following step size:
+1/2L for PROXASAGA  1/Lc for ASYSPCD  where Lc is the coordinate-wise Lipschitz constant
+of the gradient  while FISTA uses backtracking line-search. The results can be seen in Figure 1
+(top) with both one (thus sequential) and ten processors. Two main observations can be made from
+this ﬁgure. First  PROXASAGA is signiﬁcantly faster on these problems. Second  its asynchronous
+version offers a signiﬁcant speedup over its sequential counterpart.
+In Figure 1 (bottom) we present speedup with respect to the number of cores  where speedup is
+computed as the time to achieve a suboptimality of 10−10 with one core divided by the time to
+achieve the same suboptimality using several cores. While our theoretical speedups (with respect
+to the number of iterations) are almost linear as our theory predicts (see Appendix F)  we observe
+a different story for our running time speedups. This can be attributed to memory access overhead 
+which our model does not take into account. As predicted by our theoretical results  we observe
+
+6A reference C++/Python implementation of is available at https://github.com/fabianp/ProxASAGA
+
+8
+
+������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������������a high correlation between the Δ dataset sparsity measure and the empirical speedup: KDD 2010
+(Δ = 0.15) achieves a 11x speedup  while in Criteo (Δ = 0.89) the speedup is never above 6x.
+Note that although competitor methods exhibit similar or sometimes better speedups  they remain
+orders of magnitude slower than PROXASAGA in running time for large sparse problems. In fact 
+our method is between 5x and 80x times faster (in time to reach 10−10 suboptimality) than FISTA
+and between 13x and 290x times faster than ASYSPCD (see Appendix F.3).
+
+5 Conclusion and future work
+
+In this work  we have described PROXASAGA  an asynchronous variance reduced algorithm with
+support for composite objective functions. This method builds upon a novel sparse variant of the
+(proximal) SAGA algorithm that takes advantage of sparsity in the individual gradients. We have
+proven that this algorithm is linearly convergent under a condition on the step size and that it is
+linearly faster than its sequential counterpart given a bound on the delay. Empirical benchmarks
+show that PROXASAGA is orders of magnitude faster than existing state-of-the-art methods.
+This work can be extended in several ways. First  we have focused on the SAGA method as the basic
+iteration loop  but this approach can likely be extended to other proximal incremental schemes such
+as SGD or ProxSVRG. Second  as mentioned in §3.3  it is an open question whether it is possible to
+obtain convergence guarantees without any sparsity assumption  as was done for ASAGA.
+
+Acknowledgements
+
+The authors would like to thank our colleagues Damien Garreau  Robert Gower  Thomas Kerdreux 
+Geoffrey Negiar  Konstantin Mishchenko and Kilian Fatras for their feedback on this manuscript 
+and Jean-Baptiste Alayrac for support managing the computational resources.
+This work was partially supported by a Google Research Award. FP acknowledges support from the
+chaire ´Economie des nouvelles donn´ees with the data science joint research initiative with the fonds
+AXA pour la recherche.
+
+References
+Bauschke  Heinz and Combettes  Patrick L. Convex analysis and monotone operator theory in
+
+Hilbert spaces. Springer  2011.
+
+Beck  Amir and Teboulle  Marc. Gradient-based algorithms with applications to signal recovery.
+
+Convex Optimization in Signal Processing and Communications  2009.
+
+Davis  Damek  Edmunds  Brent  and Udell  Madeleine. The sound of APALM clapping: faster
+nonsmooth nonconvex optimization with stochastic asynchronous PALM. In Advances in Neural
+Information Processing Systems 29  2016.
+
+Defazio  Aaron  Bach  Francis  and Lacoste-Julien  Simon. SAGA: A fast incremental gradient
+method with support for non-strongly convex composite objectives. In Advances in Neural Infor-
+mation Processing Systems  2014.
+
+Gu  Bin  Huo  Zhouyuan  and Huang  Heng. Asynchronous stochastic block coordinate descent
+
+with variance reduction. arXiv preprint arXiv:1610.09447v3  2016.
+
+Hsieh  Cho-Jui  Yu  Hsiang-Fu  and Dhillon  Inderjit S. PASSCoDe: parallel asynchronous stochas-
+
+tic dual coordinate descent. In ICML  2015.
+
+Johnson  Rie and Zhang  Tong. Accelerating stochastic gradient descent using predictive variance
+
+reduction. In Advances in Neural Information Processing Systems  2013.
+
+Juan  Yuchin  Zhuang  Yong  Chin  Wei-Sheng  and Lin  Chih-Jen. Field-aware factorization ma-
+chines for CTR prediction. In Proceedings of the 10th ACM Conference on Recommender Sys-
+tems. ACM  2016.
+
+9
+
+Le Roux  Nicolas  Schmidt  Mark  and Bach  Francis R. A stochastic gradient method with an ex-
+ponential convergence rate for ﬁnite training sets. In Advances in Neural Information Processing
+Systems  2012.
+
+Leblond  R´emi  Pedregosa  Fabian  and Lacoste-Julien  Simon. ASAGA: asynchronous parallel
+SAGA. Proceedings of the 20th International Conference on Artiﬁcial Intelligence and Statistics
+(AISTATS 2017)  2017.
+
+Liu  Ji and Wright  Stephen J. Asynchronous stochastic coordinate descent: Parallelism and conver-
+
+gence properties. SIAM Journal on Optimization  2015.
+
+Mania  Horia  Pan  Xinghao  Papailiopoulos  Dimitris  Recht  Benjamin  Ramchandran  Kannan 
+and Jordan  Michael I. Perturbed iterate analysis for asynchronous stochastic optimization. SIAM
+Journal on Optimization  2017.
+
+Meng  Qi  Chen  Wei  Yu  Jingcheng  Wang  Taifeng  Ma  Zhi-Ming  and Liu  Tie-Yan. Asyn-
+
+chronous stochastic proximal optimization algorithms with variance reduction. In AAAI  2017.
+
+Nesterov  Yurii. Introductory lectures on convex optimization. Springer Science & Business Media 
+
+2004.
+
+Nesterov  Yurii. Gradient methods for minimizing composite functions. Mathematical Program-
+
+ming  2013.
+
+Niu  Feng  Recht  Benjamin  Re  Christopher  and Wright  Stephen. Hogwild: A lock-free approach
+to parallelizing stochastic gradient descent. In Advances in Neural Information Processing Sys-
+tems  2011.
+
+Peng  Zhimin  Xu  Yangyang  Yan  Ming  and Yin  Wotao. ARock: an algorithmic framework for
+
+asynchronous parallel coordinate updates. SIAM Journal on Scientiﬁc Computing  2016.
+
+Reddi  Sashank J  Hefny  Ahmed  Sra  Suvrit  Poczos  Barnabas  and Smola  Alexander J. On
+variance reduction in stochastic gradient descent and its asynchronous variants. In Advances in
+Neural Information Processing Systems  2015.
+
+Schmidt  Mark  Le Roux  Nicolas  and Bach  Francis. Minimizing ﬁnite sums with the stochastic
+
+average gradient. Mathematical Programming  2016.
+
+Shalev-Shwartz  Shai and Zhang  Tong. Stochastic dual coordinate ascent methods for regularized
+
+loss minimization. Journal of Machine Learning Research  2013.
+
+Shalev-Shwartz  Shai et al.
+
+arXiv:1211.2717  2012.
+
+Proximal stochastic dual coordinate ascent.
+
+arXiv preprint
+
+Xiao  Lin and Zhang  Tong. A proximal stochastic gradient method with progressive variance re-
+
+duction. SIAM Journal on Optimization  2014.
+
+You  Yang  Lian  Xiangru  Liu  Ji  Yu  Hsiang-Fu  Dhillon  Inderjit S  Demmel  James  and Hsieh 
+Cho-Jui. Asynchronous parallel greedy coordinate descent. In Advances In Neural Information
+Processing Systems  2016.
+
+Yu  Hsiang-Fu  Lo  Hung-Yi  Hsieh  Hsun-Ping  Lou  Jing-Kai  McKenzie  Todd G  Chou  Jung-
+Wei  Chung  Po-Han  Ho  Chia-Hua  Chang  Chun-Fu  Wei  Yin-Hsuan  et al. Feature engineering
+and classiﬁer ensemble for KDD cup 2010. In KDD Cup  2010.
+
+Zhao  Tuo  Yu  Mo  Wang  Yiming  Arora  Raman  and Liu  Han. Accelerated mini-batch random-
+ized block coordinate descent method. In Advances in neural information processing systems 
+2014.
+
+10
+
+,Fabian Pedregosa
+Rémi Leblond
+Simon Lacoste-Julien
+Aravind Rajeswaran
+Chelsea Finn
+Sham Kakade
+Sergey Levine

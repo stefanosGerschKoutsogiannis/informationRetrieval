@@ -1,0 +1,807 @@
+2019,Online Normalization for Training Neural Networks,Online Normalization is a new technique for normalizing the hidden activations of a neural network. Like Batch Normalization  it normalizes the sample dimension. While Online Normalization does not use batches  it is as accurate as Batch Normalization. We resolve a theoretical limitation of Batch Normalization by introducing an unbiased technique for computing the gradient of normalized activations. Online Normalization works with automatic differentiation by adding statistical normalization as a primitive. This technique can be used in cases not covered by some other normalizers  such as recurrent networks  fully connected networks  and networks with activation memory requirements prohibitive for batching. We show its applications to image classification  image segmentation  and language modeling. We present formal proofs and experimental results on ImageNet  CIFAR  and PTB datasets.,Online Normalization for Training Neural Networks
+
+Vitaliy Chiley∗
+
+Ilya Sharapov∗
+
+Atli Kosson
+
+Urs Koster
+
+Ryan Reece
+
+Sofía Samaniego de la Fuente
+
+Vishal Subbiah
+
+Michael James∗ †
+
+Cerebras Systems
+
+175 S. San Antonio Road
+Los Altos  California 94022
+
+Abstract
+
+Online Normalization is a new technique for normalizing the hidden activations
+of a neural network. Like Batch Normalization  it normalizes the sample dimen-
+sion. While Online Normalization does not use batches  it is as accurate as Batch
+Normalization. We resolve a theoretical limitation of Batch Normalization by intro-
+ducing an unbiased technique for computing the gradient of normalized activations.
+Online Normalization works with automatic differentiation by adding statistical
+normalization as a primitive. This technique can be used in cases not covered by
+some other normalizers  such as recurrent networks  fully connected networks 
+and networks with activation memory requirements prohibitive for batching. We
+show its applications to image classiﬁcation  image segmentation  and language
+modeling. We present formal proofs and experimental results on ImageNet  CIFAR 
+and PTB datasets.
+
+1
+
+Introduction
+
+Traditionally  neural networks are functions that map inputs deterministically to outputs. Normaliza-
+tion makes this non-deterministic because each sample is affected not only by the network weights
+but also by the statistical distribution of samples. Therefore  normalization re-deﬁnes neural networks
+to be statistical operators. Normalized networks treat each neuron’s output as a random variable that
+ultimately depends on the network’s parameters and input distribution. No matter how it is stimulated 
+a normalized neuron produces an output distribution with zero mean and unit variance.
+While normalization has enjoyed widespread success  current normalization methods have theoretical
+and practical limitations. These limitations stem from an inability to compute the gradient of the
+ideal normalization operator.
+Batch methods are commonly used to approximate ideal normalization. These methods use the
+distribution of the current minibatch as a proxy for the distribution of the entire dataset. They produce
+biased estimates of the gradient that violate a fundamental tenet of stochastic gradient descent (SGD):
+It is not possible to recover the true gradient from any number of small batch evaluations. This bias
+becomes more pronounced as batch size is reduced.
+Increasing the minibatch size provides more accurate approximations of normalization and its gradient
+at the cost of increased memory consumption. This is especially problematic for image processing
+and volumetric networks. Here neural activations outnumber network parameters  and even modest
+batch sizes reduce the trainable network size by an order of magnitude.
+
+∗Equal contribution
+†Corresponding author: michael@cerebras.net
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+Online Normalization is a new algorithm that resolves these limitations while matching or exceeding
+the performance of current methods. It computes unbiased activations and unbiased gradients without
+any use of batching. Online Normalization differentiates through the normalization operator in a
+way that has theoretical justiﬁcation. We show the technique working at scale with the ImageNet [1]
+ResNet-50 [2] classiﬁcation benchmark  as well as with smaller networks for image classiﬁcation 
+image segmentation  and recurrent language modeling.
+Instead of using batches  Online Normalization uses running estimates of activation statistics in the
+forward pass with a corrective guard to prevent exponential behavior. The backward pass implements
+a control process to ensure that back-propagated gradients stay within a bounded distance of true
+gradients. A geometrical analysis of normalization reveals necessary and sufﬁcient conditions that
+characterize the gradient of the normalization operator. We further analyze the effect of approximation
+errors in the forward and backward passes on network dynamics. Based on our ﬁndings we present the
+Online Normalization technique and experiments that compare it with other normalization methods.
+Formal proofs and all details necessary to reproduce results are in the appendix. Additionally we
+provide reference code in PyTorch  TensorFlow  and C [3].
+
+2 Related work
+
+Ioffe and Szegedy introduced normalization of hidden activations [4]  deﬁning it as a transformation
+that uses full dataset statistics to eliminate internal covariate shift. They observed that the inability
+to differentiate through a running estimator of forward statistics produces a gradient that leads to
+divergence [5]. They resolved this with the Batch Normalization method [4]. During training  each
+minibatch is used as a statistical proxy for the entire dataset. This allows use of gradient descent
+without a running estimator process. However  training still maintains running estimates for use
+during validation and inference.
+The success of Batch Normalization has inspired a number of related methods that address its
+limitations. They can be classiﬁed as functional or heuristic methods.
+Functional methods replace the normalization operator with a normalization function. The func-
+tion is chosen to share certain properties of the normalization operator. Layer Normalization [6]
+normalizes across features instead of across samples. Group Normalization [7] generalizes this by
+partitioning features into groups. Weight Normalization [8] and Normalization Propagation [9] apply
+normalization to network weights instead of network activations.
+The advantage of functional normalizers is that they ﬁt within the SGD framework  and work in
+recurrent networks and large networks. However  when compared directly to batch normalization
+they generally perform worse [7].
+Heuristic methods use measurements from previous network iterations to augment the current
+forward and backward passes. These methods do not differentiate through the normalization operator.
+Instead  they combine terms from previous batch-based approximations. An advantage of heuristic
+normalizers is that they use more data to generate better estimates of forward statistics; however  they
+lack correctness and stability guarantees.
+Batch Renormalization [5] is one example of a heuristic method. While it uses an online process to
+estimate dataset statistics  these estimates are based on batches and are only allowed to be within a
+ﬁxed interval of the current batch’s statistics. Batch Renormalization does not differentiate through
+its statistical estimation process  and like Instance Normalization [10]  it cannot be used with fully
+connected layers at a batch size of one.
+Streaming Normalization [11] is also a heuristic method. It performs one weight update for every
+several minibatches. Instead of differentiating through the normalization operator  it averages point
+gradients at long and short time scales. It applies a different mixture in a saw-tooth pattern to each
+minibatch depending on its timing relative to the latest weight update.
+In recurrent networks  circular dependencies between sample statistics and activations pose a chal-
+lenge to normalization [12  13  14]. Recurrent Batch Normalization [12] offers the approach of
+maintaining distinct statistics for each time step. At inference this results in a different linear op-
+eration being applied at each time step  breaking the formalism of recurrent networks. Functional
+normalizers avoid circular dependencies and have been shown to perform better [6].
+
+2
+
+(cid:126)x
+
+P(cid:126)1⊥((cid:126)x)
+
+T(cid:126)y
+
+SN−1
+
+(cid:126)y (cid:48)
+
+P(cid:126)1⊥((cid:126)y (cid:48))
+
+(cid:126)y
+
+(cid:126)1⊥
+
+0
+
+SN−2
+
+(a)
+
+(cid:126)y⊥
+
+(cid:126)1⊥∩ (cid:126)y⊥
+
+P(cid:126)1⊥∩(cid:126)y⊥((cid:126)y (cid:48))
+
+0
+
+(cid:126)x (cid:48)
+
+Figure 1: Geometry of normalization.
+
+(b)
+
+(cid:126)1⊥
+
+3 Principles of normalization
+
+Normalization is an afﬁne transformation fX that maps a scalar random variable x to an output y with
+zero mean and unit variance. It maps every sample in a way that depends on the distribution X 
+
+(1)
+
+fX [x] ≡
+resulting in normalized output y satisfying
+
+x − µ[x]
+σ [x]
+
+x ∼ X  
+and µ(cid:2)y2(cid:3) = 1 .
+
+µ[y] = 0
+
+(2)
+When we apply normalization to network activations  the input distribution X is itself functionally
+dependent on the state of the network  in particular on the weights of all prior layers. This poses a
+challenge for accurate computation of normalization because at no point in time can we observe the
+entire distribution corresponding to the current values of the weights.
+Backpropagation uses the chain rule to compute the derivative of the loss function L with respect to
+hidden activations. We express this using the convention (·)(cid:48) = ∂L/∂(·) as
+
+[y(cid:48)] .
+
+(3)
+
+x(cid:48) =
+
+∂fX[x]
+
+∂x
+
+It is not obvious how to handle the derivative in the preceding equation  which is itself a statistical
+operator. The usual approaches do not work: Automatic differentiation cannot be applied to expec-
+tations. Exact computation over the entire dataset is prohibitive. Ignoring the derivative causes a
+feedback loop between gradient descent and the estimator process  leading to instability [4].
+Batch Normalization avoids these challenges by freezing the network while it measures the statistics
+of a batch. Increasing batch size improves accuracy of the gradients but also increases memory
+requirements and potentially impedes learning. We started our study with the question: Is freezing
+the network the only way to resolve interference between an estimator process and gradient descent?
+It is not. In the following sections we will show how to achieve the asymptotic accuracy of large
+batch normalization while inspecting only one sample at a time.
+
+3.1 Properties of normalized activations and gradients
+Differential geometry provides key insights on normalization. Let (cid:126)x ∈ RN be a ﬁnite-dimensional
+vector whose components approximate the normalizer’s input distribution. In the geometric setting 
+normalization is a function deﬁned on RN . Its output (cid:126)y satisﬁes both conditions of (2). The zero
+mean condition is satisﬁed on the subspace (cid:126)1⊥ orthogonal to the ones vector  whereas the unit
+variance condition is satisﬁed on the sphere SN−1 with radius √N (Figure 1a). Therefore (cid:126)y lies on
+the manifold SN−2 = (cid:126)1⊥ ∩ SN−1.
+Clearly  mapping RN to a sphere is nonlinear. The forward pass (1) does this in two steps: It subtracts
+the same value from all components of (cid:126)x  which is orthogonal projection P(cid:126)1⊥; then it rescales the
+
+3
+
+Figure 2: Two element normalization (N=2).
+
+Figure 3: Gradient bias (BN).
+
+result to SN−1. In contrast  the backward pass (3) is linear because the chain rule produces a product
+of Jacobians. The Jacobian J = [∂yj/∂xi] must suppress gradient components that would move (cid:126)y off
+the manifold’s tangent space. SN−2 is a sphere embedded in a subspace  so its tangent space T(cid:126)y at (cid:126)y
+is orthogonal to both the sphere’s radius (cid:126)y and the subspace’s complement (cid:126)1.
+
+(cid:126)x (cid:48) = J(cid:126)y (cid:48) =⇒ P(cid:126)1((cid:126)x (cid:48)) = P(cid:126)y ((cid:126)x (cid:48)) = 0 .
+
+(4)
+Because (1) is the composition of two steps  J is a product of two factors (Figure 1b). The unbiasing
+step P(cid:126)1⊥ is linear and therefore is also its own Jacobian. The scaling step is isotropic in (cid:126)y⊥ and
+therefore its Jacobian acts equally to all components in (cid:126)y⊥ scaling them by σ. The remaining (cid:126)y
+component must be suppressed (4)  resulting in:
+
+J =
+
+1
+σ
+
+P(cid:126)1⊥ P(cid:126)y⊥ =⇒ (cid:126)x (cid:48) =
+
+1
+
+σ(cid:0)I − P(cid:126)1(cid:1) (I − P(cid:126)y) (cid:126)y (cid:48) .
+
+(5)
+
+This is the exact expression for backpropagation through the normalization operator. It is also possible
+to reach the same conclusion algebraically [5] (Appendix B).
+The input (cid:126)x is a continuous function of the neural network’s weights and dataset distribution. During
+training  the incremental weight updates cause (cid:126)x to drift. Meanwhile  normalization is only presented
+with a single scalar component of (cid:126)x while the other components remain unknown. Online Normaliza-
+tion handles this with an online control process that examines a single sample per step while ensuring
+(5) is always approximately satisﬁed throughout training.
+
+3.2 Bias in gradient estimates
+
+Although normalization applies an afﬁne transformation  it has a nonlinear dependence on the input
+distribution X. Therefore  sampling the gradient of a normalized network with mini-batches results
+in biased estimates. This effect becomes more pronounced for smaller mini-batch sizes. Consider
+the extreme case of normalizing a fully connected layer with batch size two (Figure 2). Each pair
+of samples is transformed to either (−1  +1) or (+1 −1)  resulting in a piecewise constant surface.
+Since the output is discrete  the corresponding gradient is zero almost everywhere. Of course  the
+true gradient is nonzero almost everywhere and therefore cannot be recovered from any number of
+batch-two evaluations.
+The same effect can be seen in more realistic cases. Figure 3 shows gradient bias as a function of
+batch size measured for a convolutional network with the CIFAR-10 dataset [15]. Ground truth for
+this plot used all 50 000 images in the dataset with weights randomly initialized and ﬁxed. Even in
+this simple scenario  moderate batch sizes exhibit bias exceeding an angle of 10 degrees.
+
+3.3 Exploding and vanishing activations
+
+All normalizers are presented with the task of calculating speciﬁc values of the afﬁne coefﬁcients
+µ[x] and σ[x] for the forward pass (1). Exact computation of these coefﬁcients is impossible without
+processing the entire dataset. Therefore  SGD-based optimizers must admit errors in normalization
+statistics. These errors are problematic for networks that have unbounded activation functions  such
+as ReLU. It is possible for the errors to amplify through the depth of the network causing exponential
+growth of activation magnitudes.
+Figure 4 shows exponential behavior for a 100-layer fully connected network with a synthetic dataset.
+In each layer we compute exact afﬁne coefﬁcients using the entire dataset. We randomly perturb
+
+4
+
+SN1<latexit sha1_base64="vp9995EwnReuivXTRX9isVZuLLk=">AAAB73icbVBNSwMxEJ2tX7V+VT16CRbBi2W3CnosevEkFe0HtGvJptk2NJusSVYoS/+EFw+KePXvePPfmLZ70NYHA4/3ZpiZF8ScaeO6305uaXlldS2/XtjY3NreKe7uNbRMFKF1IrlUrQBrypmgdcMMp61YURwFnDaD4dXEbz5RpZkU92YUUz/CfcFCRrCxUuvuIb058caoWyy5ZXcKtEi8jJQgQ61b/Or0JEkiKgzhWOu258bGT7EyjHA6LnQSTWNMhrhP25YKHFHtp9N7x+jIKj0USmVLGDRVf0+kONJ6FAW2M8JmoOe9ifif105MeOGnTMSJoYLMFoUJR0aiyfOoxxQlho8swUQxeysiA6wwMTaigg3Bm395kTQqZe+0XLk9K1UvszjycACHcAwenEMVrqEGdSDA4Rle4c15dF6cd+dj1ppzspl9+APn8wf3G49D</latexit>✓1+1◆<latexit sha1_base64="nniqwIWH1QEvOJOk2JlxCLAbRM0=">AAACEHicbVDLSsNAFJ3UV42vqks3g0UUxJJUQZdFNy4r2Ac0oUwmt+3QySTMTMQS+glu/BU3LhRx69Kdf+P0gWjrgQuHc+7l3nuChDOlHefLyi0sLi2v5FfttfWNza3C9k5dxamkUKMxj2UzIAo4E1DTTHNoJhJIFHBoBP2rkd+4A6lYLG71IAE/Il3BOowSbaR24dALoMtElkRES3Y/xPaJ63n2sYttD0T4o7cLRafkjIHniTslRTRFtV349MKYphEITTlRquU6ifYzIjWjHIa2lypICO2TLrQMFSQC5Wfjh4b4wCgh7sTSlNB4rP6eyEik1CAKTKe5r6dmvZH4n9dKdefCz5hIUg2CThZ1Uo51jEfp4JBJoJoPDCFUMnMrpj0iCdUmQ9uE4M6+PE/q5ZJ7WirfnBUrl9M48mgP7aMj5KJzVEHXqIpqiKIH9IRe0Kv1aD1bb9b7pDVnTWd20R9YH98GPpvz</latexit>✓+11◆<latexit sha1_base64="IukPC9/22ocHmerMcn8O6LWcaAE=">AAACEHicbVDLSsNAFJ3UV42vqks3g0UUxJJUQZdFNy4r2Ac0oUwmt+3QySTMTMQS+glu/BU3LhRx69Kdf+P0gWjrgQuHc+7l3nuChDOlHefLyi0sLi2v5FfttfWNza3C9k5dxamkUKMxj2UzIAo4E1DTTHNoJhJIFHBoBP2rkd+4A6lYLG71IAE/Il3BOowSbaR24dALoMtElkRES3Y/xPax63n2iYttD0T4o7cLRafkjIHniTslRTRFtV349MKYphEITTlRquU6ifYzIjWjHIa2lypICO2TLrQMFSQC5Wfjh4b4wCgh7sTSlNB4rP6eyEik1CAKTKe5r6dmvZH4n9dKdefCz5hIUg2CThZ1Uo51jEfp4JBJoJoPDCFUMnMrpj0iCdUmQ9uE4M6+PE/q5ZJ7WirfnBUrl9M48mgP7aMj5KJzVEHXqIpqiKIH9IRe0Kv1aD1bb9b7pDVnTWd20R9YH98GNJvz</latexit>P~1?<latexit sha1_base64="sTSlkZP9N8/+rYxhV68MWRKgYUw=">AAAB/HicbVBNS8NAEN34WetXtEcvwSJ4KkkV9Fj04rGC/YAmhs120i7dbMLuphBC/CtePCji1R/izX/jts1BWx8MPN6bYWZekDAqlW1/G2vrG5tb25Wd6u7e/sGheXTclXEqCHRIzGLRD7AERjl0FFUM+okAHAUMesHkdub3piAkjfmDyhLwIjziNKQEKy35Zq3t5+4USO4Uj7mbgEiKwjfrdsOew1olTknqqETbN7/cYUzSCLgiDEs5cOxEeTkWihIGRdVNJSSYTPAIBppyHIH08vnxhXWmlaEVxkIXV9Zc/T2R40jKLAp0Z4TVWC57M/E/b5Cq8NrLKU9SBZwsFoUps1RszZKwhlQAUSzTBBNB9a0WGWOBidJ5VXUIzvLLq6TbbDgXjeb9Zb11U8ZRQSfoFJ0jB12hFrpDbdRBBGXoGb2iN+PJeDHejY9F65pRztTQHxifP2N/lUA=</latexit>x1<latexit sha1_base64="MWSDWkw1NdOauHNwPQkLknLX4o4=">AAAB6nicbVBNS8NAEJ34WetX1aOXxSJ4KkkV9Fj04rGi/YA2lM120y7dbMLuRCyhP8GLB0W8+ou8+W/ctjlo64OBx3szzMwLEikMuu63s7K6tr6xWdgqbu/s7u2XDg6bJk414w0Wy1i3A2q4FIo3UKDk7URzGgWSt4LRzdRvPXJtRKwecJxwP6IDJULBKFrp/qnn9Uplt+LOQJaJl5My5Kj3Sl/dfszSiCtkkhrT8dwE/YxqFEzySbGbGp5QNqID3rFU0YgbP5udOiGnVumTMNa2FJKZ+nsio5Ex4yiwnRHFoVn0puJ/XifF8MrPhEpS5IrNF4WpJBiT6d+kLzRnKMeWUKaFvZWwIdWUoU2naEPwFl9eJs1qxTuvVO8uyrXrPI4CHMMJnIEHl1CDW6hDAxgM4Ble4c2Rzovz7nzMW1ecfOYI/sD5/AEM/o2k</latexit>x0<latexit sha1_base64="pJX5d/KVD2TALrkO//cbwYf0jxQ=">AAAB6nicbVBNS8NAEJ34WetX1aOXxSJ4KkkV9Fj04rGi/YA2lM120y7dbMLuRCyhP8GLB0W8+ou8+W/ctjlo64OBx3szzMwLEikMuu63s7K6tr6xWdgqbu/s7u2XDg6bJk414w0Wy1i3A2q4FIo3UKDk7URzGgWSt4LRzdRvPXJtRKwecJxwP6IDJULBKFrp/qnn9kplt+LOQJaJl5My5Kj3Sl/dfszSiCtkkhrT8dwE/YxqFEzySbGbGp5QNqID3rFU0YgbP5udOiGnVumTMNa2FJKZ+nsio5Ex4yiwnRHFoVn0puJ/XifF8MrPhEpS5IrNF4WpJBiT6d+kLzRnKMeWUKaFvZWwIdWUoU2naEPwFl9eJs1qxTuvVO8uyrXrPI4CHMMJnIEHl1CDW6hDAxgM4Ble4c2Rzovz7nzMW1ecfOYI/sD5/AELeo2j</latexit>SN2=⇢✓1+1◆ ✓+11◆<latexit sha1_base64="Z8ilMjCOlmkB/LOZJq6nKTfRRJ0=">AAACVXicbVHRShtBFJ3damrXqtE++jIYBCEm7EahvgjSvvRJLDUmkEnD7ORuMmR2dpm5K4YlP+mL+Cd9KXQSg9jEAwOHc8+9c+dMnCtpMQyfPf/Dxmbl49anYPvzzu5edf/gzmaFEdAWmcpMN+YWlNTQRokKurkBnsYKOvHk+7zeuQdjZaZvcZpDP+UjLRMpODppUFW/fpfXjdaMXlKmIEFWBiyGkdRlnnI08mFGg0bEWFCPaMBAD1/1U7rurM+djVVnwIwcjZHNBtVa2AwXoOskWpIaWeJmUH1kw0wUKWgUilvbi8Ic+yU3KIUCN7iwkHMx4SPoOap5CrZfLlKZ0WOnDGmSGXc00oX6tqPkqbXTNHZOt+jYrtbm4nu1XoHJRb+UOi8QtHi5KCkUxYzOI6ZDaUCgmjrChZFuVyrG3HCB7iMCF0K0+uR1ctdqRmfN1s/z2tW3ZRxb5JAckRMSka/kivwgN6RNBHkkfzzP870n76+/4VderL637PlC/oO/9w8+FrDW</latexit>y=✓1+1◆<latexit sha1_base64="Jwb0PsNm0c5+q8GwmHGivqmxyDM=">AAACEXicbVBNS8NAEN34WeNX1aOXYBEKYkmqoBeh6MVjBfsBTSib7aRdutmE3Y0YQv+CF/+KFw+KePXmzX/jpi2orQ8GHu/NMDPPjxmVyra/jIXFpeWV1cKaub6xubVd3NltyigRBBokYpFo+1gCoxwaiioG7VgADn0GLX94lfutOxCSRvxWpTF4Ie5zGlCClZa6xXJ64frQpzyLQ6wEvR+Zx47rmkeO6QLv/ajdYsmu2GNY88SZkhKaot4tfrq9iCQhcEUYlrLj2LHyMiwUJQxGpptIiDEZ4j50NOU4BOll449G1qFWelYQCV1cWWP190SGQynT0Ned+sCBnPVy8T+vk6jg3MsojxMFnEwWBQmzVGTl8Vg9KoAolmqCiaD6VosMsMBE6RDzEJzZl+dJs1pxTirVm9NS7XIaRwHtowNURg46QzV0jeqogQh6QE/oBb0aj8az8Wa8T1oXjOnMHvoD4+MbA7WcfQ==</latexit>y=✓+11◆<latexit sha1_base64="lytZilw4SZOZOrysQuXtJs0qc6s=">AAACEXicbVBNS8NAEN34WeNX1aOXYBEKYkmqoBeh6MVjBfsBTSib7aRdutmE3Y0YQv+CF/+KFw+KePXmzX/jpi2orQ8GHu/NMDPPjxmVyra/jIXFpeWV1cKaub6xubVd3NltyigRBBokYpFo+1gCoxwaiioG7VgADn0GLX94lfutOxCSRvxWpTF4Ie5zGlCClZa6xXJ64frQpzyLQ6wEvR+ZR47rmseO6QLv/ajdYsmu2GNY88SZkhKaot4tfrq9iCQhcEUYlrLj2LHyMiwUJQxGpptIiDEZ4j50NOU4BOll449G1qFWelYQCV1cWWP190SGQynT0Ned+sCBnPVy8T+vk6jg3MsojxMFnEwWBQmzVGTl8Vg9KoAolmqCiaD6VosMsMBE6RDzEJzZl+dJs1pxTirVm9NS7XIaRwHtowNURg46QzV0jeqogQh6QE/oBb0aj8az8Wa8T1oXjOnMHvoD4+MbA6ucfQ==</latexit>248163264128Batch size2°4°8°16°32°Biasη E|w(cid:48)|
+
+|w|
+
+ηλ|w|
+
+Figure 4: Activation growth.
+
+Figure 5: Weight equilibrium.
+
+the coefﬁcients before applying inference to assess the sensitivity to errors. Exponential behavior is
+easy to observe even with mild noise. This effect is particularly pronounced when variances σ2 are
+systematically underestimated  in which case each layer ampliﬁes the signal in expectation.
+Batch Normalization does not exhibit exponential behavior. Although its estimates contain error 
+exact normalization of a batch of inputs imposes (2) as strict constraints on normalized output. For
+each layer  the largest possible output component is bounded by the square root of the batch size.
+Exponential behavior is precluded because this bound does not depend on the depth of the network.
+This property is also enjoyed by Layer Normalization and Group Normalization.
+Any successful online procedure will also need a mechanism to avoid exponential growth of activa-
+tions. With a bounded activation function  such as tanh  this is achieved automatically. Layer scaling
+(Figure 4) that enforces the second equality of (2) across all features in a layer is another possible
+mechanism that prevents both growth and decay of activations.
+
+3.4
+
+Invariance to gradient scale
+
+When a normalizer follows a linear layer  the normalized output is invariant to the scale of the weights
+|w| [5  6]. Scaling the weights by any constant is immediately absorbed by the normalizer. Therefore 
+∂y/∂|w| is zero and gradient descent makes steps orthogonal to the weight vector (Figure 5). With
+a ﬁxed learning rate η  a sequence of steps of size O(η) leads to unbounded growth of |w|. Each
+successive step will have decreasing relative effect on the weight change reducing the effective
+learning rate.
+Others have observed that the L2 weight decay [16] commonly used in normalized networks coun-
+teracts the growth of |w|. In particular  [17] analyzes this phenomenon  although under a faulty
+assumption that gradients are not backpropagated through the mean and variance calculations. In-
+stead  we observe that weight growth and decay are balanced when weights reach an equilibrium
+scale (Figure 5). We denote the gradient with respect to weights w(cid:48) and the increment in weights
+∆w ≡ ηw(cid:48). When η and decay factor λ are small  solving for equilibrium yields (Appendix C):
+
+(6)
+
+|w| =(cid:114) η
+
+2λ
+
+E|w(cid:48)| .
+
+The equilibrium weight magnitude depends on η. When the weights are away from their equilibrium
+magnitude  such as at initialization and after each learning rate drop  the weights tend to either grow
+or diminish network-wide. This tendency can create a biased error in statistical estimates that can
+lead to exponential behavior (Section 3.3).
+Scale invariance with respect to the weights means that the learning trajectory depends only on the
+ratio ∆w/|w| and the problem can be arbitrarily reparametrized as long as this ratio is kept constant.
+This shows that L2 weight decay does not have a regularizing effect; it only corrects for the radial
+growth artifact introduced by the ﬁnite step size of SGD.
+When weights are in the equilibrium described by (6) 
+
+This equation shows that learning dynamics are invariant to the scale of the distribution of gradients
+
+E|w(cid:48)|. We also observe that the effective learning rate is √2ηλ. This correspondence was indepen-
+
+.
+
+(7)
+
+∆w
+|w|
+
+=(cid:112)2ηλ
+
+w(cid:48)
+E|w(cid:48)|
+
+5
+
+-10%-5%0%5%10%Perturbation magnitude -10%-5%0%5%10%Growth rate per layer= without Layer Scaling~(0 ) without Layer ScalingWith Layer ScalingFigure 6: Online Normalization.
+
+dently observed by Page [18]. Practitioners tend to use linear scaling of the learning rate with batch
+size [19] while keeping the L2 regularization constant λ ﬁxed. Equation (7) shows that this amounts
+to the square root scaling suggested earlier by Krizhevsky [20].
+
+4 Online Normalization
+
+To deﬁne Online Normalization (Figure 6)  we replace arithmetic averages over the full dataset in
+(2) with exponentially decaying averages of online samples. Similarly  projections in (4) and (5) are
+computed over online data using exponentially decaying inner products. The decay factors αf and αb
+for forward and backward passes respectively are hyperparameters for the technique.
+We allow incoming samples xt  such as images  to have multiple scalar components and denote
+feature-wide mean and variance by µ(xt) and σ2 (xt). The algorithm also applies to outputs of fully
+connected layers with only one scalar output per feature. In fact  this case simpliﬁes to µ(xt) = xt
+and σ (xt) = 0. We use scalars µt and σt to denote running estimates of mean and variance across
+all samples. The subscript t denotes time steps corresponding to processing new incoming samples.
+Online Normalization uses an ongoing process during the forward pass to estimate activation means
+and variances.
+It implements the standard online computation of mean and variance [21  22]
+generalized to processing multi-value samples and exponential averaging of sample statistics. The
+resulting estimates directly lead to an afﬁne normalization transform.
+
+yt =
+
+xt − µt−1
+
+σt−1
+
+µt = αf µt−1 + (1 − αf )µ(xt)
+σ2
+t = αf σ2
+
+t−1 + (1 − αf )σ2 (xt) + αf (1 − αf ) (µ(xt) − µt−1)2
+
+(8a)
+
+(8b)
+(8c)
+
+This process removes two degrees of freedom for each feature that may be restored adding another
+afﬁne transform with adaptive bias and gain. Corresponding equations are standard in normalization
+literature [4] and are not reproduced here. The forward pass concludes with a layer-scaling stage that
+uses data from all features to prevent exponential growth (Section 3.3):
+
+where {·} includes all features.
+The backward pass proceeds in reverse order  starting with the exact gradient of layer scaling:
+
+zt =
+
+yt
+ζt
+
+with ζt =(cid:113)µ({y2
+
+t })  
+
+y(cid:48)t =
+
+z(cid:48)t − ztµ({ztz(cid:48)t})
+
+ζt
+
+.
+
+6
+
+(9)
+
+(10)
+
+Aﬃnenorm (8a)Meantracker (8b)Variancetracker (8c)Aﬃnetrain y-projection (11a)y-error accu- mulator (11b)Scaling +-projection (12a)-error accu-mulator (12b)Forward estimator processBackward control processScalingfeaturesfeatures~1<latexit sha1_base64="d6trNbuGPS5YXsxngHPoEGCpSdc=">AAAB7nicbVBNS8NAEJ3Ur1q/qh69LBbBU0lqQY8FLx4r2A9oQ9lsJ+3SzSbsbgol9Ed48aCIV3+PN/+N2zYHbX0w8Hhvhpl5QSK4Nq777RS2tnd294r7pYPDo+OT8ulZW8epYthisYhVN6AaBZfYMtwI7CYKaRQI7AST+4XfmaLSPJZPZpagH9GR5CFn1Fip058iy7z5oFxxq+4SZJN4OalAjuag/NUfxiyNUBomqNY9z02Mn1FlOBM4L/VTjQllEzrCnqWSRqj9bHnunFxZZUjCWNmShizV3xMZjbSeRYHtjKgZ63VvIf7n9VIT3vkZl0lqULLVojAVxMRk8TsZcoXMiJkllClubyVsTBVlxiZUsiF46y9vknat6t1Ua4/1SoPkcRThAi7hGjy4hQY8QBNawGACz/AKb07ivDjvzseqteDkM+fwB87nDz0Uj2U=</latexit>~1<latexit sha1_base64="d6trNbuGPS5YXsxngHPoEGCpSdc=">AAAB7nicbVBNS8NAEJ3Ur1q/qh69LBbBU0lqQY8FLx4r2A9oQ9lsJ+3SzSbsbgol9Ed48aCIV3+PN/+N2zYHbX0w8Hhvhpl5QSK4Nq777RS2tnd294r7pYPDo+OT8ulZW8epYthisYhVN6AaBZfYMtwI7CYKaRQI7AST+4XfmaLSPJZPZpagH9GR5CFn1Fip058iy7z5oFxxq+4SZJN4OalAjuag/NUfxiyNUBomqNY9z02Mn1FlOBM4L/VTjQllEzrCnqWSRqj9bHnunFxZZUjCWNmShizV3xMZjbSeRYHtjKgZ63VvIf7n9VIT3vkZl0lqULLVojAVxMRk8TsZcoXMiJkllClubyVsTBVlxiZUsiF46y9vknat6t1Ua4/1SoPkcRThAi7hGjy4hQY8QBNawGACz/AKb07ivDjvzseqteDkM+fwB87nDz0Uj2U=</latexit>Layer scaling (9)z-projection + scaling (10)x<latexit sha1_base64="N5aUhsRteo9PQj6sQrm/p3x5vME=">AAAB6HicbVDLTgJBEOzFF+IL9ehlItF4IrtookcSLx4hkUcCGzI79MLI7OxmZtZICF/gxYPGePWTvPk3DrAHBSvppFLVne6uIBFcG9f9dnJr6xubW/ntws7u3v5B8fCoqeNUMWywWMSqHVCNgktsGG4EthOFNAoEtoLR7cxvPaLSPJb3ZpygH9GB5CFn1Fip/tQrltyyOwdZJV5GSpCh1it+dfsxSyOUhgmqdcdzE+NPqDKcCZwWuqnGhLIRHWDHUkkj1P5kfuiUnFmlT8JY2ZKGzNXfExMaaT2OAtsZUTPUy95M/M/rpCa88SdcJqlByRaLwlQQE5PZ16TPFTIjxpZQpri9lbAhVZQZm03BhuAtv7xKmpWyd1mu1K9K1fMsjjycwClcgAfXUIU7qEEDGCA8wyu8OQ/Oi/PufCxac042cwx/4Hz+AN8bjOQ=</latexit><latexit sha1_base64="fWzq/07No41FRMnlojP6K0WetOU=">AAAB7HicbVBNS8NAEN34WetX1aOXxaJ4KkkV9Fjw4rGCaQttKJvtpF262YTdiVBCf4MXD4p49Qd589+4bXPQ1gcDj/dmmJkXplIYdN1vZ219Y3Nru7RT3t3bPzisHB23TJJpDj5PZKI7ITMghQIfBUropBpYHEpoh+O7md9+Am1Eoh5xkkIQs6ESkeAMreT3QkDWr1TdmjsHXSVeQaqkQLNf+eoNEp7FoJBLZkzXc1MMcqZRcAnTci8zkDI+ZkPoWqpYDCbI58dO6blVBjRKtC2FdK7+nshZbMwkDm1nzHBklr2Z+J/XzTC6DXKh0gxB8cWiKJMUEzr7nA6EBo5yYgnjWthbKR8xzTjafMo2BG/55VXSqte8q1r94brauCjiKJFTckYuiUduSIPckybxCSeCPJNX8uYo58V5dz4WrWtOMXNC/sD5/AG8uI6M</latexit><latexit sha1_base64="mO5eww+r/9rWQFpLn56avRK1vBM=">AAAB7XicbVDLSgNBEJyNrxhfUY9eBoPiKexGQY8BLx4jmAckS+idzCZj5rHMzAphyT948aCIV//Hm3/jJNmDJhY0FFXddHdFCWfG+v63V1hb39jcKm6Xdnb39g/Kh0cto1JNaJMornQnAkM5k7RpmeW0k2gKIuK0HY1vZ377iWrDlHywk4SGAoaSxYyAdVKrNwQhoF+u+FV/DrxKgpxUUI5Gv/zVGyiSCiot4WBMN/ATG2agLSOcTku91NAEyBiGtOuoBEFNmM2vneIzpwxwrLQrafFc/T2RgTBmIiLXKcCOzLI3E//zuqmNb8KMySS1VJLFojjl2Co8ex0PmKbE8okjQDRzt2IyAg3EuoBKLoRg+eVV0qpVg8tq7f6qUj/P4yiiE3SKLlCArlEd3aEGaiKCHtEzekVvnvJevHfvY9Fa8PKZY/QH3ucPf82O/Q==</latexit>{x}<latexit sha1_base64="E2ZPOnwm9MHuIumY0WxCAMz9FOc=">AAAB7HicbVBNS8NAEJ3Ur1q/qh69LBbFU0mqoMeCF48VTFtoQtlsN+3SzW7Y3Ygl9Dd48aCIV3+QN/+N2zYHbX0w8Hhvhpl5UcqZNq777ZTW1jc2t8rblZ3dvf2D6uFRW8tMEeoTyaXqRlhTzgT1DTOcdlNFcRJx2onGtzO/80iVZlI8mElKwwQPBYsZwcZKfpA/BdN+tebW3TnQKvEKUoMCrX71KxhIkiVUGMKx1j3PTU2YY2UY4XRaCTJNU0zGeEh7lgqcUB3m82On6MwqAxRLZUsYNFd/T+Q40XqSRLYzwWakl72Z+J/Xy0x8E+ZMpJmhgiwWxRlHRqLZ52jAFCWGTyzBRDF7KyIjrDAxNp+KDcFbfnmVtBt177LeuL+qNc+LOMpwAqdwAR5cQxPuoAU+EGDwDK/w5gjnxXl3PhatJaeYOYY/cD5/AAXgjrw=</latexit>{x0}<latexit sha1_base64="FD61B7Pcf8Ab6syZGrPPotG33fs=">AAAB7XicbVDLSgNBEOyNrxhfUY9eBoOPU9iNgh4DXjxGMA/ILmF2MpuMmZ1ZZmbFsOQfvHhQxKv/482/cZLsQRMLGoqqbrq7woQzbVz32ymsrK6tbxQ3S1vbO7t75f2DlpapIrRJJJeqE2JNORO0aZjhtJMoiuOQ03Y4upn67UeqNJPi3owTGsR4IFjECDZWavnZ05k/6ZUrbtWdAS0TLycVyNHolb/8viRpTIUhHGvd9dzEBBlWhhFOJyU/1TTBZIQHtGupwDHVQTa7doJOrNJHkVS2hEEz9fdEhmOtx3FoO2NshnrRm4r/ed3URNdBxkSSGirIfFGUcmQkmr6O+kxRYvjYEkwUs7ciMsQKE2MDKtkQvMWXl0mrVvUuqrW7y0r9NI+jCEdwDOfgwRXU4RYa0AQCD/AMr/DmSOfFeXc+5q0FJ585hD9wPn8AZ4WO7Q==</latexit>{y0}<latexit sha1_base64="o15jC6Hfcnf3/WoBTWddkTmYxNk=">AAAB7XicbVDLSsNAFL3xWeur6tLNYPGxKkkVdFlw47KCfUATymQ6acdOZsLMRAih/+DGhSJu/R93/o3TNgttPXDhcM693HtPmHCmjet+Oyura+sbm6Wt8vbO7t5+5eCwrWWqCG0RyaXqhlhTzgRtGWY47SaK4jjktBOOb6d+54kqzaR4MFlCgxgPBYsYwcZKbT/Pzv1Jv1J1a+4MaJl4BalCgWa/8uUPJEljKgzhWOue5yYmyLEyjHA6KfuppgkmYzykPUsFjqkO8tm1E3RqlQGKpLIlDJqpvydyHGudxaHtjLEZ6UVvKv7n9VIT3QQ5E0lqqCDzRVHKkZFo+joaMEWJ4ZklmChmb0VkhBUmxgZUtiF4iy8vk3a95l3W6vdX1cZZEUcJjuEELsCDa2jAHTShBQQe4Rle4c2Rzovz7nzMW1ecYuYI/sD5/AFpDI7u</latexit>{z0}<latexit sha1_base64="ypSjnjQxQbiXdbXgEVkJJCGJDIA=">AAAB7XicbVDLSgNBEOyNrxhfUY9eBoOPU9iNgh4DXjxGMA/ILmF2MpuMmZ1ZZmaFuOQfvHhQxKv/482/cZLsQRMLGoqqbrq7woQzbVz32ymsrK6tbxQ3S1vbO7t75f2DlpapIrRJJJeqE2JNORO0aZjhtJMoiuOQ03Y4upn67UeqNJPi3owTGsR4IFjECDZWavnZ05k/6ZUrbtWdAS0TLycVyNHolb/8viRpTIUhHGvd9dzEBBlWhhFOJyU/1TTBZIQHtGupwDHVQTa7doJOrNJHkVS2hEEz9fdEhmOtx3FoO2NshnrRm4r/ed3URNdBxkSSGirIfFGUcmQkmr6O+kxRYvjYEkwUs7ciMsQKE2MDKtkQvMWXl0mrVvUuqrW7y0r9NI+jCEdwDOfgwRXU4RYa0AQCD/AMr/DmSOfFeXc+5q0FJ585hD9wPn8AapOO7w==</latexit>{z}<latexit sha1_base64="/Kct0Lwu19HrxOxHtKQ7uxPc5ds=">AAAB7HicbVBNS8NAEJ3Ur1q/qh69LBbFU0mqoMeCF48VTFtoQtlsN+3SzW7Y3Qg19Dd48aCIV3+QN/+N2zYHbX0w8Hhvhpl5UcqZNq777ZTW1jc2t8rblZ3dvf2D6uFRW8tMEeoTyaXqRlhTzgT1DTOcdlNFcRJx2onGtzO/80iVZlI8mElKwwQPBYsZwcZKfpA/BdN+tebW3TnQKvEKUoMCrX71KxhIkiVUGMKx1j3PTU2YY2UY4XRaCTJNU0zGeEh7lgqcUB3m82On6MwqAxRLZUsYNFd/T+Q40XqSRLYzwWakl72Z+J/Xy0x8E+ZMpJmhgiwWxRlHRqLZ52jAFCWGTyzBRDF7KyIjrDAxNp+KDcFbfnmVtBt177LeuL+qNc+LOMpwAqdwAR5cQxPuoAU+EGDwDK/w5gjnxXl3PhatJaeYOYY/cD5/AAjsjr4=</latexit>{y}<latexit sha1_base64="tHdYlMo2Iq1nDnNVjTVXzh0ou4w=">AAAB7HicbVBNS8NAEJ34WetX1aOXxaJ4KkkV9Fjw4rGCaQtNKJvtpl262Q27GyGE/gYvHhTx6g/y5r9x2+agrQ8GHu/NMDMvSjnTxnW/nbX1jc2t7cpOdXdv/+CwdnTc0TJThPpEcql6EdaUM0F9wwynvVRRnEScdqPJ3czvPlGlmRSPJk9pmOCRYDEj2FjJD4o8mA5qdbfhzoFWiVeSOpRoD2pfwVCSLKHCEI617ntuasICK8MIp9NqkGmaYjLBI9q3VOCE6rCYHztF51YZolgqW8Kgufp7osCJ1nkS2c4Em7Fe9mbif14/M/FtWDCRZoYKslgUZxwZiWafoyFTlBieW4KJYvZWRMZYYWJsPlUbgrf88irpNBveVaP5cF1vXZRxVOAUzuASPLiBFtxDG3wgwOAZXuHNEc6L8+58LFrXnHLmBP7A+fwBB2aOvQ==</latexit>y0<latexit sha1_base64="b8N6HBBhP1FdAybEnSmN6sHStqo=">AAAB6XicbVDLSgNBEOz1GeMr6tHLYPBxCrtR0GPAi8co5gHJEmYns8mQ2dllpldYQv7AiwdFvPpH3vwbJ8keNLGgoajqprsrSKQw6Lrfzsrq2vrGZmGruL2zu7dfOjhsmjjVjDdYLGPdDqjhUijeQIGStxPNaRRI3gpGt1O/9cS1EbF6xCzhfkQHSoSCUbTSQ3beK5XdijsDWSZeTsqQo94rfXX7MUsjrpBJakzHcxP0x1SjYJJPit3U8ISyER3wjqWKRtz449mlE3JqlT4JY21LIZmpvyfGNDImiwLbGVEcmkVvKv7ndVIMb/yxUEmKXLH5ojCVBGMyfZv0heYMZWYJZVrYWwkbUk0Z2nCKNgRv8eVl0qxWvMtK9f6qXDvL4yjAMZzABXhwDTW4gzo0gEEIz/AKb87IeXHenY9564qTzxzBHzifP0EnjRY=</latexit>x0<latexit sha1_base64="0QVjfDnz5aTBEcWoDuJtc08mq3I=">AAAB6XicbVDLTgJBEOzFF+IL9ehlIvFxIrtookcSLx7RyCMBQmaHWZgwO7uZ6TWSDX/gxYPGePWPvPk3DrAHBSvppFLVne4uP5bCoOt+O7mV1bX1jfxmYWt7Z3evuH/QMFGiGa+zSEa65VPDpVC8jgIlb8Wa09CXvOmPbqZ+85FrIyL1gOOYd0M6UCIQjKKV7p/OesWSW3ZnIMvEy0gJMtR6xa9OP2JJyBUySY1pe26M3ZRqFEzySaGTGB5TNqID3rZU0ZCbbjq7dEJOrNInQaRtKSQz9fdESkNjxqFvO0OKQ7PoTcX/vHaCwXU3FSpOkCs2XxQkkmBEpm+TvtCcoRxbQpkW9lbChlRThjacgg3BW3x5mTQqZe+iXLm7LFVPszjycATHcA4eXEEVbqEGdWAQwDO8wpszcl6cd+dj3ppzsplD+APn8wc/oo0V</latexit>µ<latexit sha1_base64="C4wPglBV5XMXA3Wzh+oBtfS571c=">AAAB6nicbVBNSwMxEJ3Ur1q/qh69BIviqexWQY8FLx4r2g9ol5JNs21okl2SrFCW/gQvHhTx6i/y5r8xbfegrQ8GHu/NMDMvTAQ31vO+UWFtfWNzq7hd2tnd2z8oHx61TJxqypo0FrHuhMQwwRVrWm4F6ySaERkK1g7HtzO//cS04bF6tJOEBZIMFY84JdZJDz2Z9ssVr+rNgVeJn5MK5Gj0y1+9QUxTyZSlghjT9b3EBhnRllPBpqVealhC6JgMWddRRSQzQTY/dYrPnDLAUaxdKYvn6u+JjEhjJjJ0nZLYkVn2ZuJ/Xje10U2QcZWklim6WBSlAtsYz/7GA64ZtWLiCKGau1sxHRFNqHXplFwI/vLLq6RVq/qX1dr9VaV+nsdRhBM4hQvw4RrqcAcNaAKFITzDK7whgV7QO/pYtBZQPnMMf4A+fwBWQI2+</latexit><latexit sha1_base64="eSMc7R1L2/eHCgXJ5TMH1X8mRLk=">AAAB7XicbVDLSgNBEOyNrxhfUY9eBoPiKexGQY8BLx4jmAckS5idzCZj5rHMzAphyT948aCIV//Hm3/jJNmDJhY0FFXddHdFCWfG+v63V1hb39jcKm6Xdnb39g/Kh0cto1JNaJMornQnwoZyJmnTMstpJ9EUi4jTdjS+nfntJ6oNU/LBThIaCjyULGYEWye1eoYNBe6XK37VnwOtkiAnFcjR6Je/egNFUkGlJRwb0w38xIYZ1pYRTqelXmpogskYD2nXUYkFNWE2v3aKzpwyQLHSrqRFc/X3RIaFMRMRuU6B7cgsezPxP6+b2vgmzJhMUkslWSyKU46sQrPX0YBpSiyfOIKJZu5WREZYY2JdQCUXQrD88ipp1arBZbV2f1Wpn+dxFOEETuECAriGOtxBA5pA4BGe4RXePOW9eO/ex6K14OUzx/AH3ucPlUGPCw==</latexit>˜x0<latexit sha1_base64="Gh+mWwowv320kX/AqeFnf8R/lLs=">AAAB8XicbVBNS8NAEJ3Ur1q/qh69BIsfp5JUQY8FLx4r2A9sQ9lsJu3SzSbsbsQS+i+8eFDEq//Gm//GbZuDtj4YeLw3w8w8P+FMacf5tgorq2vrG8XN0tb2zu5eef+gpeJUUmzSmMey4xOFnAlsaqY5dhKJJPI5tv3RzdRvP6JULBb3epygF5GBYCGjRBvpoacZDzB7mpz1yxWn6sxgLxM3JxXI0eiXv3pBTNMIhaacKNV1nUR7GZGaUY6TUi9VmBA6IgPsGipIhMrLZhdP7BOjBHYYS1NC2zP190RGIqXGkW86I6KHatGbiv953VSH117GRJJqFHS+KEy5rWN7+r4dMIlU87EhhEpmbrXpkEhCtQmpZEJwF19eJq1a1b2o1u4uK/XTPI4iHMExnIMLV1CHW2hAEygIeIZXeLOU9WK9Wx/z1oKVzxzCH1ifP6AtkMs=</latexit>y<latexit sha1_base64="ChChKkFbE6oMN+GPiIg0E02AztA=">AAAB6HicbVBNS8NAEJ3Ur1q/qh69LBbFU0mqoMeCF48t2FpoQ9lsJ+3azSbsboQS+gu8eFDEqz/Jm//GbZuDtj4YeLw3w8y8IBFcG9f9dgpr6xubW8Xt0s7u3v5B+fCoreNUMWyxWMSqE1CNgktsGW4EdhKFNAoEPgTj25n/8IRK81jem0mCfkSHkoecUWOl5qRfrrhVdw6ySrycVCBHo1/+6g1ilkYoDRNU667nJsbPqDKcCZyWeqnGhLIxHWLXUkkj1H42P3RKzqwyIGGsbElD5urviYxGWk+iwHZG1Iz0sjcT//O6qQlv/IzLJDUo2WJRmApiYjL7mgy4QmbExBLKFLe3EjaiijJjsynZELzll1dJu1b1Lqu15lWlfp7HUYQTOIUL8OAa6nAHDWgBA4RneIU359F5cd6dj0VrwclnjuEPnM8f4J+M5Q==</latexit>Optional⇣"(1)<latexit sha1_base64="PyCRDO58RTI9tUPnBPSoFjIZK0A=">AAAB+nicbVBNT8JAEJ3iF+JX0aOXjUSDF9KiiR5JvHjERD4SqGS7bGHDdtvsbjGk8lO8eNAYr/4Sb/4bF+hBwZdM8vLeTGbm+TFnSjvOt5VbW9/Y3MpvF3Z29/YP7OJhU0WJJLRBIh7Jto8V5UzQhmaa03YsKQ59Tlv+6Gbmt8ZUKhaJez2JqRfigWABI1gbqWcXu2MsaawYj8RDWnbPpz275FScOdAqcTNSggz1nv3V7UckCanQhGOlOq4Tay/FUjPC6bTQTRSNMRnhAe0YKnBIlZfOT5+iU6P0URBJU0Kjufp7IsWhUpPQN50h1kO17M3E/7xOooNrL2UiTjQVZLEoSDjSEZrlgPpMUqL5xBBMJDO3IjLEEhNt0iqYENzll1dJs1pxLyrVu8tS7SyLIw/HcAJlcOEKanALdWgAgUd4hld4s56sF+vd+li05qxs5gj+wPr8AfStk7Q=</latexit>"(y)<latexit sha1_base64="H2GAaUQE7XgtbJTvEeQO1oOnkds=">AAAB+nicbVBNT8JAEJ3iF+JX0aOXjUSDF9KiiR5JvHjERD4SqGS7bGHDdtvsbjGk8lO8eNAYr/4Sb/4bF+hBwZdM8vLeTGbm+TFnSjvOt5VbW9/Y3MpvF3Z29/YP7OJhU0WJJLRBIh7Jto8V5UzQhmaa03YsKQ59Tlv+6Gbmt8ZUKhaJez2JqRfigWABI1gbqWcXu2MsaawYj8RDWp6cT3t2yak4c6BV4makBBnqPfur249IElKhCcdKdVwn1l6KpWaE02mhmygaYzLCA9oxVOCQKi+dnz5Fp0bpoyCSpoRGc/X3RIpDpSahbzpDrIdq2ZuJ/3mdRAfXXspEnGgqyGJRkHCkIzTLAfWZpETziSGYSGZuRWSIJSbapFUwIbjLL6+SZrXiXlSqd5el2lkWRx6O4QTK4MIV1OAW6tAAAo/wDK/wZj1ZL9a79bFozVnZzBH8gfX5A2Jsk/w=</latexit>Required for unbounded activation functions  e.g. ReLU.Network
+
+Table 1: Memory for training (GB).
+Batch
+32
+2
+5
+29
+195
+31
+137
+
+ResNet-50  ImageNet
+ResNet-50  PyTorcha
+U-Net  1503 voxels
+U-Net  2503 voxels
+U-Net  10242 pixels
+U-Net  20482 pixels
+a PyTorch stores multiple copies of
+activations for improved performance.
+
+Online
+Norm
+1
+2
+1
+6
+2
+5
+
+128
+4
+15
+115
+785
+123
+546
+
+CIFAR-100
+ResNet-20
+
+Table 2: Best validation: loss (accuracy%).
+ImageNet
+Normalizer CIFAR-10
+ResNet-20
+ResNet-50
+0.26 (92.3) 1.12 (68.6) 0.94 (76.3)
+0.26 (92.2) 1.14 (68.6) 0.97 (76.4)
+(75.9)b
+0.32 (90.3) 1.35 (63.3)
+(71.6)b
+0.31 (90.4) 1.32 (63.1)
+(74.7)b
+0.39 (87.4) 1.47 (59.2)
+(67 )b
+(71.9)b
+
+Online
+Batcha
+Group
+Instance
+Layer
+Weight
+Propagation
+a Batch size 128 for CIFAR and 32 for ImageNet.
+b Data from [7  23  24].
+
+-
+-
+
+-
+-
+
+The backward pass continues through per-feature normalization (8) using a control mechanism to
+back out projections deﬁned by (5). We do it in two steps  controlling for orthogonality to (cid:126)y ﬁrst
+
+˜x(cid:48)t = y(cid:48)t − (1 − αb)ε(y)
+t = ε(y)
+ε(y)
+
+t−1 + µ(˜x(cid:48)tyt)
+
+t−1yt
+
+˜x(cid:48)t
+σt−1 − (1 − αb)ε(1)
+t−1 + µ(x(cid:48)t) .
+
+t−1
+
+(11a)
+(11b)
+
+(12a)
+
+and then for the mean-zero condition
+
+x(cid:48)t =
+
+(12b)
+Gradient scale invariance (Section 3.4) shows that scaling with the running estimate of input variance
+σt in (12a) is optional and can be replaced by rescaling the output x(cid:48)t with a running average to force
+it to the unit norm in expectation.
+
+ε(1)
+t = ε(1)
+
+Formal Properties Online Normalization provides arbitrarily good approximations of ideal nor-
+malization and its gradient. The quality of approximation is controlled by the hyperparameters αf 
+αb  and the learning rate η. Parameters αf and αb determine the extent of temporal averaging and η
+controls the rate of change of the input distribution. Online Normalization also satisﬁes the gradient’s
+orthogonality requirements. In the course of training  the accumulated errors ε(y)
+and ε(1)
+that track
+deviation from orthogonality (5) remain bounded. Formal derivations are in Appendix D.
+
+t
+
+t
+
+Memory Requirements Networks that use Batch Normalization tend to train poorly with small
+batches. Larger batches are required for accurate estimates of parameter gradients  but activation
+memory usage increases linearly with batch size. This limits the size of models that can be trained on
+a given system. Online Normalization achieves same accuracy without requiring batches (Section 5).
+Table 1 shows that using batches for classiﬁcation of 2D images leads to a considerable increase
+in the memory footprint; for 3D volumes  batching becomes prohibitive even with modestly sized
+images.
+
+5 Experiments
+
+We demonstrate Online Normalization in a variety of settings. In our experience it has ported easily to
+new networks and tasks. Details for replicating experiments as well as statistical characterization of
+experiment reproducibility are in Appendix A. Scripts to reproduce our results are in the companion
+repository [3].
+CIFAR image classiﬁcation (Figures 7-8  Table 2). Our experiments start with the best-published
+hyperparameter settings for ResNet-20 [2] for use with Batch Normalization on a single GPU. We ac-
+cept these hyperparameters as ﬁxed values for use with Online Normalization. Online Normalization
+introduces two hyperparameters  decay rates αf and αb. We used a logarithmic grid sweep to deter-
+mine good settings. Then we ran ﬁve independent trials for each normalizer. Online Normalization
+had the best validation performance of all compared methods.
+
+7
+
+Figure 7: CIFAR-10 / ResNet-20.
+
+Figure 8: CIFAR-100 / ResNet-20.
+
+Figure 9: ImageNet / ResNet-50.
+
+Figure 10: Image Segmentation with U-Net.
+
+ImageNet image classiﬁcation (Figure 9  Table 2). For the ResNet-50 [2] experiment  we are reporting
+the single experimental run that we conducted. This trial used decay factors chosen based on the
+CIFAR experiments. Even better results should be possible with a sweep. Our training procedure is
+based on a protocol tuned for Batch Normalization [25]. Even without tuning  Online Normalization
+achieves the best validation loss of all methods. At validation time it is nearly as accurate as Batch
+Normalization and both methods are better than other compared methods.
+U-Net image segmentation (Figure 10). The U-Net [26] architecture has applications in segmenting
+2D and 3D images. It has been applied to volumetric segmentation in 3D scans [27]. Volumetric con-
+volutions require large memories for activations (Table 1)  making Batch Normalization impractical.
+Our small-scale experiment performs image segmentation on a synthetic shape dataset [28]. Online
+Normalization achieves the best Jaccard similarity coefﬁcient among compared methods.
+
+Figure 11: FMNIST with MLP.
+
+Figure 12: RNN (dashed) and LSTM (solid).
+
+Fully-connected network (Figure 11). Online Normalization also works when normalizer inputs are
+single scalars. We used a three-layer fully connected network  500+300 HU [29]  for the Fashion
+MNIST [30] classiﬁcation task. Fashion MNIST is a harder task than MNIST digit recognition 
+and therefore provides more discrimination power in our comparison. The initial learning trajectory
+shows Online Normalization outperforms the other normalizers.
+Recurrent language modeling (Figure 12). Online Normalization works without modiﬁcation in
+recurrent networks. It maintains statistics using information from all previous samples and time
+steps. This information is representative of the distribution of all recurrent activations  allowing
+Online Normalization to work in the presence of circular dependencies (Section 2). We train word
+based language models of PTB [31] using single layer RNN and LSTM. The LSTM network uses
+normalization on the four gate activation functions  but not the memory cell. This allows the memory
+cell to encode a persistent state for unbounded time without normalization forcing it to zero mean. In
+both the RNN and LSTM  Online Normalization performs better than the other methods. Remarkably 
+the RNN using Online Normalization performs nearly as well as the unnormalized LSTM.
+
+8
+
+050100150200250Epoch0.30.40.50.60.70.80.9Validation lossONBN (128)GNLNIN050100150200250Epoch1.001.251.501.752.002.252.502.75Validation lossONBN (128)GNLNIN020406080100Epoch1.01.21.41.61.82.0Validation lossONBN (32)05101520253035Epoch0.940.950.960.970.98Jaccard similarityONBN (25)None0246810Epoch8586878889Validation accuracy (%)ONBN (32)LNNone510152025Epoch125150175200225250PerplexityONLNNone6 Conclusion
+
+Online Normalization is a robust normalizer that performs competitively with the best normalizers
+for large-scale networks and works for cases where other normalizers do not apply. The technique
+is formally derived and straightforward to implement. The gradient of normalization is remarkably
+simple: it is only a linear projection and scaling.
+There have been concerns in the ﬁeld that normalization violates the paradigm of SGD [5  8  9]. A
+main tenet of SGD is that noisy measurements can be averaged to the true value of the gradient. Batch
+normalization has a fundamental gradient bias dependent on the batch size that cannot be eliminated
+by additional averaging or reduction in the learning rate. Because Batch Normalization requires
+batches  it leaves the value of the gradient for any individual input undeﬁned. This within-batch
+computation has been seen as biologically implausible [11].
+In contrast  we have shown that the normalization operator and its gradient can be implemented
+locally within individual neurons. The computation does not require keeping track of speciﬁc prior
+activations. Additionally  normalization allows neurons to locally maintain input weights at any scale
+of choice–without coordinating with other neurons. Finally any gradient signal generated by the
+neuron is also scale-free and independent of gradient scale employed by other neurons. In aggregate
+ideal normalization (1) provides stability and localized computation for all three phases of gradient
+descent: forward propagation  backward propagation  and weight update. Other methods do not
+have this property. For instance  Layer Normalization requires layer-wide communication and Batch
+Normalization is implemented by computing within-batch dependencies.
+We expect normalization to remain important as the community continues to explore larger and
+deeper networks. Memory will become even more precious in this scenario. Online Normalization
+enables batch-free training resulting in over an order of magnitude reduction of activation memory.
+
+Acknowledgments
+
+We thank Rob Schreiber  Gary Lauterbach  Natalia Vassilieva  Andy Hock  Scott James and Xin
+Wang for their help and comments that greatly improved the manuscript. We thank Devansh Arpit
+for insightful discussions. We also thank Natalia Vassilieva for modeling memory requirements for
+U-Net and Michael Kural for work on this project during his internship.
+
+References
+[1] Olga Russakovsky  Jia Deng  Hao Su  Jonathan Krause  Sanjeev Satheesh  Sean Ma  Zhiheng
+Huang  Andrej Karpathy  Aditya Khosla  Michael Bernstein  Alexander C. Berg  and Li Fei-Fei.
+ImageNet large scale visual recognition challenge. International Journal of Computer Vision
+(IJCV)  115(3):211–252  2015.
+
+[2] Kaiming He  Xiangyu Zhang  Shaoqing Ren  and Jian Sun. Deep residual learning for image
+recognition. In 2016 IEEE Conference on Computer Vision and Pattern Recognition  CVPR
+2016  Las Vegas  NV  USA  June 27-30  2016  pages 770–778  2016.
+
+[3] Vitaliy Chiley  Michael James  and Ilya Sharapov. Online Normalization reference implementa-
+
+tion. https://github.com/cerebras/online-normalization  2019.
+
+[4] Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training
+
+by reducing internal covariate shift. CoRR  abs/1502.03167  2015.
+
+[5] Sergey Ioffe. Batch renormalization: Towards reducing minibatch dependence in batch-
+
+normalized models. CoRR  abs/1702.03275  2017.
+
+[6] Lei Jimmy Ba  Ryan Kiros  and Geoffrey E. Hinton.
+
+abs/1607.06450  2016.
+
+Layer normalization. CoRR 
+
+[7] Yuxin Wu and Kaiming He. Group normalization. CoRR  abs/1803.08494  2018.
+
+[8] Tim Salimans and Diederik P. Kingma. Weight normalization: A simple reparameterization to
+
+accelerate training of deep neural networks. CoRR  abs/1602.07868  2016.
+
+9
+
+[9] Devansh Arpit  Yingbo Zhou  Bhargava Urala Kota  and Venu Govindaraju. Normalization
+propagation: A parametric technique for removing internal covariate shift in deep networks. In
+Proceedings of the 33nd International Conference on Machine Learning  ICML 2016  New York
+City  NY  USA  June 19-24  2016  pages 1168–1176  2016.
+
+[10] Dmitry Ulyanov  Andrea Vedaldi  and Victor Lempitsky. Instance normalization: The missing
+
+ingredient for fast stylization. arXiv preprint arXiv:1607.08022  2016.
+
+[11] Qianli Liao  Kenji Kawaguchi  and Tomaso A. Poggio. Streaming normalization: Towards
+simpler and more biologically-plausible normalizations for online and recurrent learning. CoRR 
+abs/1610.06160  2016.
+
+[12] Tim Cooijmans  Nicolas Ballas  César Laurent  and Aaron C. Courville. Recurrent batch
+
+normalization. CoRR  abs/1603.09025  2016.
+
+[13] C. Laurent  G. Pereyra  P. Brakel  Y. Zhang  and Y. Bengio. Batch normalized recurrent neural
+networks. In 2016 IEEE International Conference on Acoustics  Speech and Signal Processing
+(ICASSP)  pages 2657–2661  March 2016.
+
+[14] Dario Amodei  Rishita Anubhai  Eric Battenberg  Carl Case  Jared Casper  Bryan Catanzaro 
+Jingdong Chen  Mike Chrzanowski  Adam Coates  Greg Diamos  Erich Elsen  Jesse Engel 
+Linxi Fan  Christopher Fougner  Tony Han  Awni Y. Hannun  Billy Jun  Patrick LeGresley 
+Libby Lin  Sharan Narang  Andrew Y. Ng  Sherjil Ozair  Ryan Prenger  Jonathan Raiman 
+Sanjeev Satheesh  David Seetapun  Shubho Sengupta  Yi Wang  Zhiqian Wang  Chong Wang 
+Bo Xiao  Dani Yogatama  Jun Zhan  and Zhenyao Zhu. Deep speech 2: End-to-end speech
+recognition in english and mandarin. CoRR  abs/1512.02595  2015.
+
+[15] Alex Krizhevsky  Vinod Nair  and Geoffrey Hinton. CIFAR-10 (Canadian Institute for Advanced
+
+Research). http://www.cs.toronto.edu/ kriz/cifar.html.
+
+[16] Anders Krogh and John A. Hertz. A simple weight decay can improve generalization. In
+Proceedings of the 4th International Conference on Neural Information Processing Systems 
+NIPS’91  pages 950–957  San Francisco  CA  USA  1991. Morgan Kaufmann Publishers Inc.
+
+[17] Twan van Laarhoven. L2 regularization versus batch and weight normalization. CoRR 
+
+abs/1706.05350  2017.
+
+[18] David Page. How to train your ResNet. https://www.myrtle.ai/2018/09/24/how_to_
+
+train_your_resnet/  2018.
+
+[19] Priya Goyal  Piotr Dollár  Ross B. Girshick  Pieter Noordhuis  Lukasz Wesolowski  Aapo
+Kyrola  Andrew Tulloch  Yangqing Jia  and Kaiming He. Accurate  large minibatch SGD:
+training imagenet in 1 hour. CoRR  abs/1706.02677  2017.
+
+[20] Alex Krizhevsky. One weird trick for parallelizing convolutional neural networks. CoRR 
+
+abs/1404.5997  2014.
+
+[21] Tony Finch. Incremental calculation of weighted mean and variance. http://people.ds.
+
+cam.ac.uk/fanf2/hermes/doc/antiforgery/stats.pdf  2009.
+
+[22] Tony F. Chan  Gene H. Golub  and Randall J. LeVeque. Algorithms for computing the sample
+
+variance: Analysis and recommendations. The American Statistician  37:242–247  1983.
+
+[23] Igor Gitman and Boris Ginsburg. Comparison of batch normalization and weight normalization
+
+algorithms for the large-scale image classiﬁcation. CoRR  abs/1709.08145  2017.
+
+[24] Wenling Shang  Justin Chiu  and Kihyuk Sohn. Exploring normalization in deep residual
+networks with concatenated rectiﬁed linear units. In Proceedings of the Thirty-First AAAI
+Conference on Artiﬁcial Intelligence  AAAI’17  pages 1509–1516. AAAI Press  2017.
+
+[25] ResNet
+
+in TensorFlow.
+official/resnet  2018.
+
+https://github.com/tensorflow/models/tree/r1.9.0/
+
+[26] Olaf Ronneberger  Philipp Fischer  and Thomas Brox. U-net: Convolutional networks for
+
+biomedical image segmentation. CoRR  abs/1505.04597  2015.
+
+10
+
+[27] Özgün Çiçek  Ahmed Abdulkadir  Soeren S. Lienkamp  Thomas Brox  and Olaf Ronneberger. 3d
+u-net: Learning dense volumetric segmentation from sparse annotation. CoRR  abs/1606.06650 
+2016.
+
+[28] Naoto Usuyama. Simple PyTorch implementations of U-Net/FullyConvNet for image segmen-
+
+tation. https://github.com/usuyama/pytorch-unet  2018.
+
+[29] Yann LeCun and Corinna Cortes. MNIST handwritten digit database. 2010.
+
+[30] Han Xiao  Kashif Rasul  and Roland Vollgraf. Fashion-MNIST: a novel image dataset for
+
+benchmarking machine learning algorithms. CoRR  abs/1708.07747  2017.
+
+[31] Mitchell Marcus  Grace Kim  Mary Ann Marcinkiewicz  Robert MacIntyre  Ann Bies  Mark
+Ferguson  Karen Katz  and Britta Schasberger. The Penn Treebank: Annotating predicate
+argument structure. In Proceedings of the Workshop on Human Language Technology  HLT ’94 
+pages 114–119  Stroudsburg  PA  USA  1994. Association for Computational Linguistics.
+
+[32] The MNIST Database. http://yann.lecun.com/exdb/mnist/.
+
+[33] Oﬁr Press and Lior Wolf. Using the output embedding to improve language models. CoRR 
+
+abs/1608.05859  2016.
+
+[34] Ilya Sutskever  James Martens  George Dahl  and Geoffrey Hinton. On the importance of
+initialization and momentum in deep learning. In Proceedings of the 30th International Con-
+ference on International Conference on Machine Learning - Volume 28  ICML’13  pages
+III–1139–III–1147. JMLR.org  2013.
+
+11
+
+,Vitaliy Chiley
+Ilya Sharapov
+Atli Kosson
+Urs Koster
+Ryan Reece
+Sofia Samaniego de la Fuente
+Vishal Subbiah
+Michael James

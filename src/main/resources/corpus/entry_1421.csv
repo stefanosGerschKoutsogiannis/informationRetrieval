@@ -1,0 +1,892 @@
+2014,Delay-Tolerant Algorithms for Asynchronous Distributed Online Learning,We analyze new online gradient descent algorithms for distributed systems with large delays between gradient computations and the corresponding updates. Using insights from adaptive gradient methods  we develop algorithms that adapt not only to the sequence of gradients  but also to the precise update delays that occur. We first give an impractical algorithm that achieves a regret bound that precisely quantifies the impact of the delays. We then analyze AdaptiveRevision  an algorithm that is efficiently implementable and achieves comparable guarantees. The key algorithmic technique is appropriately and efficiently revising the learning rate used for previous gradient steps. Experimental results show when the delays grow large (1000 updates or more)  our new algorithms perform significantly better than standard adaptive gradient methods.,Delay-Tolerant Algorithms for
+
+Asynchronous Distributed Online Learning
+
+H. Brendan McMahan
+
+Google  Inc.
+Seattle  WA
+
+mcmahan@google.com
+
+Matthew Streeter
+Duolingo  Inc.∗
+Pittsburgh  PA
+
+matt@duolingo.com
+
+Abstract
+
+We analyze new online gradient descent algorithms for distributed systems with
+large delays between gradient computations and the corresponding updates. Us-
+ing insights from adaptive gradient methods  we develop algorithms that adapt not
+only to the sequence of gradients  but also to the precise update delays that occur.
+We ﬁrst give an impractical algorithm that achieves a regret bound that precisely
+quantiﬁes the impact of the delays. We then analyze AdaptiveRevision  an
+algorithm that is efﬁciently implementable and achieves comparable guarantees.
+The key algorithmic technique is appropriately and efﬁciently revising the learn-
+ing rate used for previous gradient steps. Experimental results show when the
+delays grow large (1000 updates or more)  our new algorithms perform signiﬁ-
+cantly better than standard adaptive gradient methods.
+
+1
+
+Introduction
+
+Stochastic and online gradient descent methods have proved to be extremely useful for solving large-
+scale machine learning problems [1  2  3  4]. Recently  there has been much work on extending these
+algorithms to parallel and distributed systems [5  6  7  8  9]. In particular  Recht et al. [10] and Duchi
+et al. [11] have shown that standard stochastic algorithms essentially “work” even when updates are
+applied asynchronously by many threads. Our experiments conﬁrm this for moderate amounts of
+parallelism (say 100 threads)  but show that for large amounts of parallelism (as in a distributed
+system  with say 1000 threads spread over many machines)  performance can degrade signiﬁcantly.
+To address this  we develop new algorithms that adapt to both the data and the amount of parallelism.
+Adaptive gradient (AdaGrad) methods [12  13] have proved remarkably effective for real-world
+problems  particularly on sparse data (for example  text classiﬁcation with bag-of-words features).
+The key idea behind these algorithms is to prove a general regret bound in terms of an arbi-
+trary sequence of non-increasing learning rates and the full sequence of gradients  and then to
+deﬁne an adaptive method for choosing the learning rates as a function of the gradients seen so
+far  so as to minimize the ﬁnal bound when the learning rates are plugged in. We extend this
+idea to the parallel setting  by developing a general regret bound that depends on both the gradi-
+ents and the exact update delays that occur (rather than say an upper bound on delays). We then
+present AdaptiveRevision  an algorithm for choosing learning rates and efﬁciently revising
+past learning-rate choices that strives to minimize this bound. In addition to providing an adaptive
+regret bound (which recovers the standard AdaGrad bound in the case of no delays)  we demonstrate
+excellent empirical performance.
+
+Problem Setting and Notation We consider a computation model where one or more computation
+units (a thread in a parallel implementation or a full machine in a distributed system) store and
+
+∗Work performed while at Google  Inc.
+
+1
+
+update the model x ∈ Rn  and another larger set of computation units perform feature extraction
+and prediction. We call the ﬁrst type the Updaters (since they apply the gradient updates) and
+the second type the Readers (since they read coefﬁcients stored by the Updaters). Because
+the Readers and Updaters may reside on different machines  perhaps located in different parts
+of the world  communication between them is not instantaneous. Thus  when making a prediction 
+a Reader will generally be using a coefﬁcient vector that is somewhat stale relative to the most
+recent version being served by the Updaters.
+As one application of this model  consider the problem of predicting click-through rates for spon-
+sored search ads using a generalized linear model [14  15]. While the coefﬁcient vector may be
+stored and updated centrally  predictions must be available in milliseconds in any part of the world.
+This leads naturally to an architecture in which a large number of Readers maintain local copies
+of the coefﬁcient vector  sending updates to the Updaters and periodically requesting fresh coef-
+ﬁcients from them. As another application  this model encompasses the Parameter Server/ Model
+Replica split of Downpour SGD [16].
+Our bounds apply to general online convex optimization [4]  which encompasses the problem of
+predicting with a generalized linear model (models where the prediction is a function of at · xt 
+where at is a feature vector and xt are model coefﬁcients). We analyze the algorithm on a sequence
+of τ = 1  ...  T rounds; for the moment  we index rounds based on when each prediction is made. On
+each round  a convex loss function fτ arrives at a Reader  the Reader predicts with xτ ∈ Rn and
+incurs loss fτ (xτ ). The Reader then computes a subgradient gτ ∈ ∂fτ (xτ ). For each coordinate
+i where gτ i is nonzero  the Reader sends an update to the Updater(s) for those coefﬁcients. We
+are particularly concerned with sparse data  where n is very large  say 106 − 109  but any particular
+training example has only a small fraction of the features at i that take non-zero values.
+The regret against a comparator x∗ ∈ Rn is
+
+Regret(x∗) ≡ T(cid:88)
+
+τ =1
+
+fτ (xτ ) − fτ (x∗).
+
+(1)
+
+Regret(x∗) ≡ n(cid:88)
+
+T(cid:88)
+
+Our primary theoretical contributions are upper bounds on the regret of our algorithms.
+We assume a fully asynchronous model  where the delays in the read requests and update requests
+can be different for different coefﬁcients even for the same training event. This leads to a combina-
+torial explosion in potential interleavings of these operations  making ﬁne-grained adaptive analysis
+quite difﬁcult. Our primary technique for addressing this will be the linearization of loss functions 
+a standard tool in online convex optimization which takes on increased importance in the parallel
+setting. An immediate consequence of convexity is that given a general convex loss function fτ  
+with gτ ∈ ∂fτ (xτ )  for any x∗  we have fτ (xτ ) − fτ (x∗) ≤ gτ · (xτ − x∗). One of the key obser-
+vations of Zinkevich [1] is that by plugging this inequality into (1)  we see that if we can guarantee
+low regret against linear functions  we can provide the same guarantees against arbitrary convex
+functions. Further  expanding the dot products and re-arranging the sum  we can write
+
+Regreti(x∗
+i )
+
+where
+
+Regreti(x∗
+
+i ) =
+
+gτ i(xτ i − x∗
+i ).
+
+(2)
+
+i=1
+
+τ =1
+
+If we consider algorithms where the updates are also coordinate decomposable (that is  the update
+to coordinate i can be applied independently of the update of coordinate j)  then we can bound
+Regret(x∗) by proving a per-coordinate bound for linear functions and then summing across coor-
+dinates. In fact  our computation architecture already assumes a coordinate decomposable algorithm
+since this lets us avoid synchronizing the Updates  and so in addition to leading to more efﬁcient
+algorithms  this approach will greatly simplify the analysis. The proofs of Duchi et al. [11] take a
+similar approach.
+
+Bounding per-coordinate regret Given the above  we will design and analyze asynchronous one-
+dimensional algorithms which can be run independently on each coordinate of the true learning
+problem.
+For each coordinate  each Read and Update is assumed to be an atomic operation.
+It will be critical to adopt an indexing scheme different than the prediction-based indexing τ used
+above. The net result will be bounding the sum of (2)  but we will actually re-order the sum to
+make the analysis easier. Critically  this ordering could be different for different coordinates  and
+
+2
+
+so considering one coordinate at a time simpliﬁes the analysis considerably.1 We index time by the
+order of the Updates  so the index t is such that gt is the gradient associated with the tth update
+applied and xt is the value of the coefﬁcient immediately before the update for gt is applied. Then 
+the Online Gradient Descent (OGD) update consists of exactly the assumed-atomic operation
+
+xt+1 = xt − ηtgt 
+
+(3)
+where ηt is a learning-rate. Let r(t) ∈ {1  . . .   t} be the index such that xr(t) was the value of the
+coefﬁcient used by the Reader to compute gt (and to predict on the corresponding example). That
+is  update r(t) − 1 completed before the Read for gt  but update r(t) completed after. Thus  our
+loss (for coordinate i) is gtxr(t)  and we desire a bound on
+
+Regreti(x∗) =
+
+gt(xr(t) − x∗).
+
+T(cid:88)
+
+t=1
+
+(cid:118)(cid:117)(cid:117)(cid:116) T(cid:88)
+
+Regret ≤
+
+Main result and related work We say an update s is outstanding at time t if the Read for
+Update s occurs before update t  but the Update occurs after: precisely  s is outstanding at t
+if r(s) ≤ t < s. We let Ft ≡ {s | r(s) ≤ t < s} be the set of updates outstanding at time t. We
+call the sum of these gradients the forward gradient sum  gfwd
+gs. Then  ignoring con-
+stant factors and terms independent of T   we show that AdaptiveRevision has a per-coordinate
+bound of the form
+
+t ≡ (cid:80)
+
+s∈Ft
+
+g2
+t + gtgfwd
+
+t
+
+.
+
+(4)
+
+t=1
+
+Theorem 3 gives the precise result as well as the n-dimensional version. Observe that without any
+t = 0  and we arrive at the standard AdaGrad-style bound. To prove the bound for
+delays  gfwd
+AdaptiveRevision  we require an additional InOrder assumption on the delays  namely that
+for any indexes s1 and s2  if r(s1) < r(s2) then s1 < s2. This assumption should be approximately
+satisﬁed most of the time for realistic delay distributions  and even under a more pathological delay
+distributions (delays uniform on {0  . . .   m} rather than more tightly grouped around a mean delay) 
+our experiments show excellent performance for AdaptiveRevision.
+The key challenge is that unlike in the AdaGrad case  conceptually we need to know gradients that
+have not yet been computed in order to calculate the optimal learning rate. We surmount this by
+using an algorithm that not only chooses learning rates adaptively  but also revises previous gradient
+steps. Critically  these revisions require only moderate additional storage and network cost: we store
+a sum of gradients along with each coefﬁcient  and for each Read  we remember the value of this
+gradient sum at the time of the Read until the corresponding Update occurs. This later storage
+can essentially be implemented on the network  if the gradient sum is sent from the Updater to the
+Reader and back again  ensuring it is available exactly when needed. This is the approach taken
+in the pseudocode of Algorithm 1.
+Against a true adversary and a maximum delay of m  in general we cannot do better than just
+training synchronously on a single machine using a 1/m fraction of the data. Our results sur-
+mount this issue by producing strongly data-dependent bounds: we do not expect fully adversarial
+gradients and delays in practice  and so on real data the bound we prove still gives interesting re-
+sults. In fact  we can essentially recover the guarantees for AsyncAdaGrad from Duchi et al. [11] 
+which rely on stochastic assumptions on the sparsity of the data  by applying the same assumptions
+to our bound. To simplify the comparison  WLOG we consider a 1-dimensional problem where
+(cid:107)x∗(cid:107)2 = 1  (cid:107)gt(cid:107)2 ≤ 1  and we have the stochastic assumption that each gt is exactly 0 indepen-
+dently with probability p (implying Mj = 1  M = 1  and M2 = p in their notation). Then  simple
+calculations (given in Appendix B) show our bound for AdaptiveRevision implies a bound on
+
+expected regret of O(cid:0)(cid:112)(1 + mp)pT(cid:1) without knowledge of p or m  ignoring terms independent of
+
+T .2 AsyncAdaGrad achieves the same bound  but critically this requires knowledge of both p and
+
+1Our analysis could be extended to non-coordinate-decomposable algorithms  but then the full gradient
+update across all coordinates would need to be atomic. This case is less interesting due to the computational
+overhead.
+
+2In the analysis  we choose the parameter G0 based on an upper bound m on the delay  but this only impacts
+
+an additive term independent of T .
+
+3
+
+m in advance in order to tune the learning rate appropriately (in the general n-dimensional case  this
+would mean knowing not just one parameter p  but a separate sparsity parameter pj for each coor-
+dinate  and then using an appropriate per-coordinate scaling of the learning rate depending on this);
+
+without such knowledge  AsyncAdaGrad only obtains the much worse bound O(cid:0)(1 + mp)
+
+pT(cid:1).
+
+AdaptiveRevision will also provide signiﬁcantly better guarantees if most of the delays are
+much less than the maximum  or if the data is only approximately sparse (e.g.  many gt = 10−6
+rather than exactly 0). The above analysis also makes a worst-case assumption on the gtgfwd
+terms 
+but in practice many gradients in gfwd
+are likely to have opposite signs and cancel out  a fact our
+algorithm and bounds can exploit.
+
+√
+
+t
+
+t
+
+2 Algorithms and Analysis
+We ﬁrst introduce some additional deﬁnitions. Let o(t) ≡ maxFt ∪ {t}  the index of the highest
+update outstanding at time t  or t itself if nothing is outstanding. The sets Ft fully specify the
+. We also deﬁne Bt  the set
+delay pattern. In light of (4)  we further deﬁne Gfwd
+of updates applied while update t was outstanding. Under our notation  this set is easily deﬁned
+as Bt = {r(t)  . . .   t − 1} (or the empty set if r(t) = t  so in particular B1 = ∅). We will also
+frequently use the backward gradient sum  gbck
+s=r(t) gs. These vectors most often appear in
+. Figure 3 in Appendix A shows a variety of delay patterns and
+the products Gbck
+gives a visual representation of the sums Gfwd and Gbck. We say the delay is (upper) bounded by m
+if t − r(t) ≤ m for all t  which implies |Ft| ≤ m and |Bt| ≤ m. Note that if m = 0 then r(t) = t.
+
+t ≡(cid:80)t−1
+We use the compressed summation notation c1:t ≡(cid:80)t
+
+s=1 cs for vectors  scalars  and functions.
+
+t ≡ g2
+
+t ≡ g2
+
+t + 2gtgfwd
+
+t + 2gtgbck
+
+t
+
+t
+
+Our analysis builds on the following simple but fundamental result (Appendix C contains all proofs
+and lemmas omitted here).
+Lemma 1. Given any non-increasing learning-rate schedule ηt  deﬁne σt where σ1 = 1/η1 and
+σt = 1/ηt − 1/ηt−1 for t > 1  so ηt = 1/σ1:t. Then  for any delay schedule  unprojected online
+gradient descent achieves  for any x∗ ∈ R 
+
+Regret(x∗) ≤ (2RT )2
+2ηT
+
++
+
+1
+2
+
+ηtGfwd
+
+t
+
+where
+
+t=1
+
+t=1
+
+|x∗ − xt|2.
+
+σt
+σ1:T
+
+T(cid:88)
+
+(2RT )2 ≡ T(cid:88)
+
+Proof. Given how we have indexed time  we can consider the regret of a hypothetical online gradient
+descent algorithm that plays xt and then observes gt  since this corresponds exactly to the update
+(3). We can then bound regret for this hypothetical setting using a simple modiﬁcation to standard
+bound for OGD [1] 
+
+|x∗ − xt|2 +
+
+σt
+2
+
+1
+2
+
+ηtg2
+t .
+
+T(cid:88)
+
+t=1
+
+T(cid:88)
+
+t=1
+
+gt · xt − g1:T · x∗ ≤ T(cid:88)
+T(cid:88)
+
+t=1
+
+The actual algorithm used xr(t) to predict on gt  not xt  so we can bound its Regret by
+
+T(cid:88)
+s=r(t) ηsgs  =(cid:80)
+Recalling xt+1 = xt − ηtgt  observe that xr(t) − xt =(cid:80)t−1
+(cid:88)
+T(cid:88)
+T(cid:88)
+
+Regret ≤ (2RT )2
+2ηT
+
+gt(xr(t) − xt).
+
+(cid:88)
+
+T(cid:88)
+
+T(cid:88)
+
+ηtg2
+
+s∈Bt
+
+t +
+
+1
+2
+
+t=1
+
+t=1
+
++
+
+ηsgs =
+
+ηsgs
+
+gt =
+
+ηsgsgfwd
+
+s
+
+ 
+
+gt(xr(t) − xt) =
+
+t=1
+
+t=1
+
+s=1
+
+t∈Fs
+
+s=1
+
+gt
+
+s∈Bt
+
+(5)
+
+ηsgs and so
+
+using Lemma 4(E) from the Appendix to re-order the sum. Plugging into (5) completes the proof.
+
+For projected online gradient descent  by projecting onto a feasible set of radius R and assuming
+x∗ is in this set  we immediately get |x∗ − xt| ≤ 2R. Without projecting  we get a more adaptive
+bound which depends on the weighted quadratic mean 2RT . Though less standard  we choose to
+
+4
+
+analyze the unprojected variant of the algorithm for two reasons. First  our analysis rests heavily on
+the ability to represent points played by our algorithms exactly as weighted sums of past gradients  a
+property not preserved when projection is invoked. More importantly  we know of no experiments on
+real-world prediction problems (where any x ∈ Rn is a valid model) where the projected algorithm
+actually performs better. In our experience  once the learning-rate schedule is tuned appropriately 
+the resulting RT values will not be more than a constant factor of (cid:107)x∗(cid:107). This makes intuitive sense
+in the stochastic case  where it is known that averages of the xt should in fact converge to x∗.3
+For learning rate tuning we assume we know in advance a constant ˜R such that RT ≤ ˜R; again 
+in practice this is roughly equivalent to assuming we know (cid:107)x∗(cid:107) in advance in order to choose the
+feasible set.
+Our ﬁrst algorithm  HypFwd (for Hypothetical-Forward)  assumes it has knowledge of all the gra-
+dients  so it can optimize its learning rates to minimize the above bound. If there are no delays  that
+is  gfwd
+t = 0 for all t  then this immediately gives rise to a standard AdaGrad-style online gradient
+terms could be large  implying the optimal learning
+descent method. If there are delays  the Gfwd
+rates should be smaller. Unfortunately  it is impossible for a real algorithm to know gfwd
+t when ηt is
+chosen. To work toward a practical algorithm  we introduce HypBack  which achieves similar guar-
+antees (but is still impractical). Finally  we introduce AdaptiveRevision  which plays points
+very similar to HypBack  but can be implemented efﬁciently. Since we will need non-increasing
+1:t ≡ maxs≤t Gfwd
+learning rates  it will be useful to deﬁne ˜Gbck
+1:s . In prac-
+tice  we expect ˜Gbck
+1:T to be close to Gbck
+1 > 0  which at worst adds a
+negligible additive constant to our regret.
+
+1:s and ˜Gfwd
+1:T . We assume WLOG that Gfwd
+
+1:t ≡ maxs≤t Gbck
+
+t
+
+Algorithm HypFwd This algorithm “cheats” by using the forward sum gfwd
+
+t
+
+α(cid:113)
+
+˜Gfwd
+1:t
+
+ηt =
+
+to choose ηt 
+
+(6)
+
+for an appropriate scaling parameter α > 0. Then  Lemma 1 combined with the technical inequality
+of Corollary 10 (given in Appendix D) gives
+
+˜Gfwd
+1:T .
+
+√
+
+(cid:113)(cid:80)T
+
+(7)
+2 ˜R (recalling ˜R ≥ RT ). If there are no delays  this bound reduces to the
+when we take α =
+√
+standard bound 2
+t . With delays  however  this is a hypothetical algorithm  because
+it is generally not possible to know gfwd
+t when update t is applied. However  we can implement
+this algorithm efﬁciently in a single-machine simulation  and it performs very well (see Section 3).
+Thus  our goal is to ﬁnd an efﬁciently implementable algorithm that achieves comparable results in
+practice and also matches this regret bound.
+
+t=1 g2
+
+2 ˜R
+
+Algorithm HypBack The next step in the analysis is to show that a second hypothetical algorithm 
+HypBack  approximates the regret bound of (7). This algorithm plays
+
+(cid:113)
+
+√
+Regret ≤ 2
+
+2 ˜R
+
+ˆxt+1 = − t(cid:88)
+
+s=1
+
+ˆηsgs
+
+where
+
+ˆηt =
+
+(8)
+
+α(cid:113) ˜Gbck
+
+1:o(t) + G0
+
+is a learning rate with parameters α and G0. This is a hypothetical algorithm  since we also can’t
+(efﬁciently) know Gbck
+1:o(t) on round t. We prove the following guarantee:
+Lemma 2. Suppose delays bounded by m and |gt| ≤ L. Then when the InOrder property holds 
+√
+HypBack with α =
+
+2 ˜R and G0 = m2L2 has
+√
+Regret ≤ 2
+
+2 ˜R
+
+(cid:113)
+
+˜Gfwd
+
+1:T + 2 ˜RmL.
+
+3For example  the arguments of Nemirovski et al. [17  Sec 2.2] hold for unprojected gradient descent.
+
+5
+
+Algorithm 1 Algorithm AdaptiveRevision
+Procedure Read(loss function f):
+Read (xi  ¯gi) from the Updaters for all necessary coordinates
+Calculate a subgradient g ∈ ∂f (x)
+for each coordinate i with a non-zero gradient do
+
+Send an update tuple (g ← gi  ¯gold ← ¯gi) to the Updater for coordinate i
+
+Procedure Update(g  ¯gold): The Updater initializes state (¯g ← 0  z ← 1  z(cid:48) ← 1  x ← 0) per coordinate.
+
+Do the following atomically:
+gbck ← ¯g − ¯gold
+ηold ← α√
+z(cid:48)
+z ← z + g2 + 2g · gbck; z(cid:48) ← max(z  z(cid:48)) Maintain z = Gbck
+η ← α√
+New learning rate.
+z(cid:48)
+x ← x − ηg
+The main gradient-descent update.
+x ← x + (ηold − η)gbck
+Apply adaptive revision of some previous steps.
+¯g ← ¯g + g
+Maintain ¯g = g1:t.
+
+For analysis  assign index t to the current update.
+Invariant: effective η for all gbck.
+1:t and z(cid:48) = ˜Gbck
+
+1:t   to enforce non-increasing η.
+
+t(cid:88)
+
+s=1
+
+Algorithm AdaptiveRevision Now that we have shown that HypBack is effective  we can
+describe AdaptiveRevision  which efﬁciently approximates HypBack. We then analyze this
+new algorithm by showing its loss is close to the loss of HypBack. Pseudo-code for the algorithm
+as implemented for the experiments is given in Algorithm 1; we now give an equivalent expression
+for the algorithm under the InOrder assumption. Let βt be the learning rate based on ˜Gbck
+1:t  
+βt = α/
+
+1:t + G0. Then  AdaptiveRevision plays the points
+
+(cid:113)
+
+˜Gbck
+
+xt+1 =
+
+ηt
+sgs
+
+where
+
+ηt
+s = βmin(t o(s)).
+
+(9)
+
+When s << t then we will usually have min(t  o(s)) = o(s)  and so we see that ηt
+s = βo(s) = ˆηs 
+and so the effective learning rate applied to gradient gs is the same one HypBack would have used
+(namely ˆηs); thus  the only difference between AdaptiveRevision and HypBack is on the
+leading edge  where o(s) > t. See Figure 4 in Appendix A for an example. When InOrder holds 
+Lemma 6 (in Appendix C) shows Algorithm 1 plays the points speciﬁed by (9).
+Given Lemma 2  it is sufﬁcient to show that the difference between the loss of HypBack and the
+loss of AdaptiveRevision is small. Lemma 8 (in the appendix) accomplishes this  showing
+that under the InOrder assumption and with G0 = m2L2 the difference in loss is at most 2αLm
+(a quantity independent of T ). Our main theorem is then a direct consequence of Lemma 2 and
+Lemma 8:
+Theorem 3. Under an InOrder delay pattern with a maximum delay of at most m 
+√
+AdaptiveRevision algorithm guarantees Regret ≤ 2
+we take G0 = m2L2 and α =
+problem  we have
+
+the
+2 + 2) ˜RmL when
+2 ˜R. Applied on a per-coordinate basis to an n-dimensional
+
+√
+1:T + (2
+
+(cid:113)
+
+˜Gfwd
+
+2 ˜R
+
+√
+
+(cid:118)(cid:117)(cid:117)(cid:116) T(cid:88)
+
+n(cid:88)
+
+√
+Regret ≤ 2
+
+(cid:88)
+We note the n-dimensional guarantee is at most O(cid:0)n ˜RL
+
+g2
+t i + 2
+
+s∈Ft i
+
+2 ˜R
+
+t=1
+
+i=1
+
+(cid:16)
+
+√
+
+gs igs i
+
+√
++ n(2
+
+(cid:17)
+T m(cid:1)  which matches the lower bound
+
+2 + 2) ˜RmL.
+
+for the feasible set [−R  R]n and gt ∈ [−L  L]n up to the difference between ˜R and R (see  for
+example  Langford et al. [18]).4 Our point  of course  is that for real data our bound will often be
+much much better.
+gt ∈ [−L  L]n we have (cid:107)gt(cid:107)2 ≤ √
+
+4To compare to regret bounds stated in terms of L2 bounds on the feasible set and the gradients  note for
+nR  so the
+dependence on n is a necessary consequence of using these norms  which are quite natural for sparse problems.
+
+nL  and similarly for x ∈ [−R  R]n we have (cid:107)x(cid:107)2 ≤ √
+
+6
+
+Figure 1: Accuracy as a function of update delays  with learning rate scale factors optimized for each
+algorithm and dataset for the zero delay case. The x-axis is non-linear. The results are qualitatively
+similar across the plots  but note the differences in the y-axis ranges. In particular  the random delay
+pattern appears to hurt performance signiﬁcantly less than either the minibatch or constant delay
+patterns.
+
+Figure 2: Accuracy as a function of update delays  with learning rate scale factors optimized as
+a function of the delay. The lower plot in each group shows the best learning rate scale α on a
+log-scale.
+
+3 Experiments
+
+We study the performance of both hypothetical algorithms and AdaptiveRevision on two real-
+world medium-sized datasets. We simulate the update delays using an update queue  which allows
+us to implement the hypothetical algorithms and also lets us precisely control both the exact de-
+lays as well as the delay pattern. We compare to the dual-averaging AsyncAdaGrad algorithm of
+Duchi et al. [11] (AsyncAda-DA in the ﬁgures)  as well as asynchronous AdaGrad gradient descent
+(AsyncAda-GD)  which can be thought of as AdaptiveRevision with all gbck set to zero and
+no revision step. As analyzed  AdaptiveRevision stores an extra variable (z(cid:48)) in order to en-
+force a non-increasing learning rate. In practice  we found this had a negligible impact; in the plots
+above  AdaptiveRevision∗ denotes the algorithm without this check. With this improvement
+AdaptiveRevision stores three numbers per coefﬁcient  versus the two stored by AsyncAda-
+grad DA or GD.
+We consider three different delay patterns  which we parameterize by D  the average delay; this
+yields a more fair comparison across the delay patterns than using the the maximum delay m. We
+consider: 1) constant delays  where all updates (except at the beginning and the end of the dataset)
+have a delay of exactly D (e.g.  rows (B) and (C) in Figure 3 in the Appendix); 2) A minibatch delay
+pattern5  where 2D + 1 Reads occur  followed by 2D + 1 Updates; and 3) a random delay pattern 
+where the delays are chosen uniformly from the set {0  . . .   2D}  so again the mean delay is D. The
+ﬁrst two patterns satisfy InOrder  but the third does not.
+
+5It is straightforward to show that under this delay pattern  when we do not enforcing non-increasing learn-
+ing rates  AdaptiveRevision and HypBack are in fact equivalent to standard AdaGrad run on the mini-
+batches (that is  with one update per minibatch using the combined minibatch gradient sum).
+
+7
+
+s=1 g2
+
+(cid:80)t
+
+We evaluate on two datasets. The ﬁrst is a web search advertising dataset from a large search engine.
+The dataset consists of about 3.1×106 training examples with a large number of sparse anonymized
+features based on the ad and query text. Each example is labeled {−1  1} based on whether or not
+the person doing the query clicked on the ad. The second is a shufﬂed version of the malicious URL
+dataset as described by Ma et al. [19] (2.4×106 examples  3.2×106 features).6 For each of these
+datasets we trained a logistic regression model  and evaluated using the logistic loss (LogLoss).
+That is  for an example with feature vector a ∈ Rn and label y ∈ {−1  1}  the loss is given by
+(cid:96)(x  (a  y)) = log(1 + exp(−y a · x)). Following the spirit of our regret bounds  we evaluate the
+models online  making a single pass over the data and computing accuracy metrics on the predictions
+made by the model immediately before it trained on each example (i.e.  progressive validation). To
+avoid possible transient behavior  we only report metrics for the predictions on the second half of
+each dataset  though this choice does not change the results signiﬁcantly.
+√
+The exact parametrization of the learning rate schedule is particularly important with delayed up-
+dates. We follow the common practice of taking learning rates of the form ηt = α/
+St + 1  where
+St is the appropriate learning rate statistic for the given algorithm  e.g.  ˜Gbck
+1:o(t) for HypBack or
+s for vanilla AdaGrad. In the analysis  we use G0 = m2L2 rather than G0 = 1; we believe
+G0 = 1 will generally be a better choice in practice  though we did not optimize this choice.7 When
+we optimize α  we choose the best setting from a grid {α0(1.25)i | i ∈ N}  where α0 is an initial
+guess for each dataset.
+All ﬁgures give the average delay D on the x-axis. For Figure 1  for each dataset and algorithm  we
+optimized α in the zero delay (D = m = 0) case  and ﬁxed this parameter as the average delay D
+increases. This leads to very bad performance for standard AdaGrad DA and GD as D gets large.
+In Figure 2  we optimized α individually for each delay level; we plot the accuracy as before  with
+the lower plot showing the optimal learning rate scaling α on a log-scale. The optimal learning rate
+scaling for GD and DA decrease by two orders of magnitude as the delays increase. However  even
+with this tuning they do not obtain the performance of AdaptiveRevision. The performance of
+AdaptiveRevision (and HypBack and HypFwd) is slightly improved by lowering the learning
+rate as delays increase  but the effect is comparatively very minor. As anticipated  the performance
+for AdaptiveRevision  HypBack  and HypFwd are closely grouped.
+AdaptiveRevision’s delay tolerance can lead to enormous speedups in practice. For example 
+the leftmost plot of Figure 2 shows that AdaptiveRevision achieves better accuracy with an
+update delay of 10 000 than AsyncAda-DA achieves with a delay of 1000. Because update delays
+are proportional to the number of Readers  this means that AdaptiveRevision can be used to
+train a model an order of magnitude faster than AsyncAda-DA  with no reduction in accuracy. This
+allows for much faster iteration when data sets are large and parallelism is cheap  which is the case
+in important real-world problems such as ad click-through rate prediction [14].
+
+4 Conclusions and Future Work
+
+We have demonstrated that adaptive tuning and revision of per-coordinate learning rates for dis-
+tributed gradient descent can signiﬁcantly improve accuracy as the update delays become large.
+The key algorithmic technique is maintaining a sum of gradients  which allows the adjustment of
+all learning rates for gradient updates that occurred between the current Update and its Read.
+The analysis method is novel  but is also somewhat indirect; an interesting open question is ﬁnd-
+ing a general analysis framework for algorithms of this style.
+Ideally such an analysis would
+also remove the technical need for the InOrder assumption  and also allow for the analysis of
+AdaptiveRevision variants of OGD with Projection and Dual Averaging.
+
+6We also ran experiments on the rcv1.binary training dataset (0.6×106 examples  0.05×106 features)
+
+from Chang and Lin [20]; results were qualitatively very similar to those for the URL dataset.
+
+7The main purpose of choosing a larger G0 in the theorems was to make the performance of HypBack
+and AdaptiveRevision provably close to that of HypFwd  even in the worst case. On real data  the
+performance of the algorithms will typically be close even with G0 = 1.
+
+8
+
+References
+[1] Martin Zinkevich. Online convex programming and generalized inﬁnitesimal gradient ascent. In ICML 
+
+2003.
+
+[2] Tong Zhang. Solving large scale linear prediction problems using stochastic gradient descent algorithms.
+
+In ICML 2004  2004.
+
+[3] L´eon Bottou and Olivier Bousquet. The tradeoffs of large scale learning. In Advances in Neural Informa-
+
+tion Processing Systems. 2008.
+
+[4] Shai Shalev-Shwartz. Online learning and online convex optimization. Foundations and Trends in Ma-
+
+chine Learning  2012.
+
+[5] Ofer Dekel  Ran Gilad-Bachrach  Ohad Shamir  and Lin Xiao. Optimal distributed online prediction using
+
+mini-batches. J. Mach. Learn. Res.  13(1)  January 2012.
+
+[6] Peter Richt´arik and Martin Tak´aˇc. Parallel coordinate descent methods for big data optimization.
+
+arXiv:1212.0873 [math.OC]  2012. URL http://arxiv.org/abs/1212.0873.
+
+[7] Martin Tak´aˇc  Avleen Bijral  Peter Richt´arik  and Nati Srebro. Mini-batch primal and dual methods for
+
+SVMs. In Proceedings of the 30th International Conference on Machine Learning  2013.
+
+[8] Daniel Hsu  Nikos Karampatziakis  John Langford  and Alexander J. Smola. Scaling Up Machine Learn-
+
+ing  chapter Parallel Online Learning. Cambridge University Press  2011.
+
+[9] John C. Duchi  Alekh Agarwal  and Martin J. Wainwright. Dual averaging for distributed optimization:
+
+Convergence analysis and network scaling. IEEE Trans. Automat. Contr.  57(3):592–606  2012.
+
+[10] Benjamin Recht  Christopher Re  Stephen Wright  and Feng Niu. Hogwild: a lock-free approach to
+
+parallelizing stochastic gradient descent. In NIPS  2011.
+
+[11] John C. Duchi  Michael I. Jordan  and H. Brendan McMahan. Estimation  optimization  and parallelism
+
+when data is sparse. In NIPS  2013.
+
+[12] John Duchi  Elad Hazan  and Yoram Singer. Adaptive subgradient methods for online learning and
+
+stochastic optimization. In COLT  2010.
+
+[13] H. Brendan McMahan and Matthew Streeter. Adaptive bound optimization for online convex optimiza-
+
+tion. In COLT  2010.
+
+[14] H. Brendan McMahan  Gary Holt  David Sculley  Michael Young  Dietmar Ebner  Julian Grady  Lan
+Nie  Todd Phillips  Eugene Davydov  Daniel Golovin  Sharat Chikkerur  Dan Liu  Martin Wattenberg 
+Arnar Mar Hrafnkelsson  Tom Boulos  and Jeremy Kubica. Ad click prediction: a view from the trenches.
+In KDD  2013.
+
+[15] Thore Graepel  Joaquin Qui˜nonero Candela  Thomas Borchert  and Ralf Herbrich. Web-scale bayesian
+click-through rate prediction for sponsored search advertising in microsoft’s bing search engine. In ICML 
+2010.
+
+[16] Jeffrey Dean  Greg S. Corrado  Rajat Monga  Kai Chen  Matthieu Devin  Quoc V. Le  Mark Z. Mao 
+Marc’Aurelio Ranzato  Andrew Senior  Paul Tucker  Ke Yang  and Andrew Y. Ng. Large scale distributed
+deep networks. In NIPS  2012.
+
+[17] A. Nemirovski  A. Juditsky  G. Lan  and A. Shapiro. Robust stochastic approximation approach to
+stochastic programming. SIAM J. on Optimization  19(4):1574–1609  January 2009. ISSN 1052-6234.
+doi: 10.1137/070704277.
+
+[18] John Langford  Alex Smola  and Martin Zinkevich. Slow Learners are Fast.
+
+Information Processing Systems 22. 2009.
+
+In Advances in Neural
+
+[19] Justin Ma  Lawrence K. Saul  Stefan Savage  and Geoffrey M. Voelker. Identifying suspicious urls: An
+application of large-scale online learning. In Proceedings of the 26th Annual International Conference on
+Machine Learning  ICML ’09  2009.
+
+[20] Chih-Chung Chang and Chih-Jen Lin. LIBSVM data sets. http://www.csie.ntu.edu.tw/˜cjlin/libsvmtools/
+
+datasets/  2010.
+
+[21] Peter Auer  Nicol`o Cesa-Bianchi  and Claudio Gentile. Adaptive and self-conﬁdent on-line learning
+
+algorithms. Journal of Computer and System Sciences  2002.
+
+9
+
+,Brendan McMahan
+Matthew Streeter
+Bhaswar Bhattacharya
+Gregory Valiant

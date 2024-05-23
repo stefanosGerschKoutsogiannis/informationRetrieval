@@ -1,0 +1,614 @@
+2018,Efficient inference for time-varying behavior during learning,The process of learning new behaviors over time is a problem of great interest in both neuroscience and artificial intelligence. However  most standard analyses of animal training data either treat behavior as fixed or track only coarse performance statistics (e.g.  accuracy  bias)  providing limited insight into the evolution of the policies governing behavior. To overcome these limitations  we propose a dynamic psychophysical model that efficiently tracks trial-to-trial changes in behavior over the course of training. Our model consists of a dynamic logistic regression model  parametrized by a set of time-varying weights that express dependence on sensory stimuli as well as task-irrelevant covariates  such as stimulus  choice  and answer history. Our implementation scales to large behavioral datasets  allowing us to infer 500K parameters (e.g. 10 weights over 50K trials) in minutes on a desktop computer. We optimize hyperparameters governing how rapidly each weight evolves over time using the decoupled Laplace approximation  an efficient method for maximizing marginal likelihood in non-conjugate models. To illustrate performance  we apply our method to psychophysical data from both rats and human subjects learning a delayed sensory discrimination task. The model successfully tracks the psychophysical weights of rats over the course of training  capturing day-to-day and trial-to-trial fluctuations that underlie changes in performance  choice bias  and dependencies on task history. Finally  we investigate why rats frequently make mistakes on easy trials  and suggest that apparent lapses can be explained by sub-optimal weighting of known task covariates.,Efﬁcient inference for time-varying behavior
+
+during learning
+
+Nicholas A. Roy1 Ji Hyun Bak2 Athena Akrami1 3 ∗
+
+Carlos D. Brody1 3 4 Jonathan W. Pillow1 5
+
+1Princeton Neuroscience Institute  Princeton University
+
+2Korea Institute for Advanced Study 3Howard Hughes Medical Institute
+4Dept. of Molecular Biology  5Dept. of Psychology  Princeton University
+
+∗current address at Sainsbury Wellcome Centre  UCL
+
+{nroy brody pillow}@princeton.edu 
+
+jhbak@kias.re.kr  athena.akrami@ucl.ac.uk
+
+Abstract
+
+The process of learning new behaviors over time is a problem of great interest in
+both neuroscience and artiﬁcial intelligence. However  most standard analyses of
+animal training data either treat behavior as ﬁxed or track only coarse performance
+statistics (e.g.  accuracy  bias)  providing limited insight into the evolution of the
+policies governing behavior. To overcome these limitations  we propose a dynamic
+psychophysical model that efﬁciently tracks trial-to-trial changes in behavior over
+the course of training. Our model consists of a dynamic logistic regression model 
+parametrized by a set of time-varying weights that express dependence on sensory
+stimuli as well as task-irrelevant covariates  such as stimulus  choice  and answer
+history. Our implementation scales to large behavioral datasets  allowing us to infer
+500K parameters (e.g.  10 weights over 50K trials) in minutes on a desktop com-
+puter. We optimize hyperparameters governing how rapidly each weight evolves
+over time using the decoupled Laplace approximation  an efﬁcient method for max-
+imizing marginal likelihood in non-conjugate models. To illustrate performance 
+we apply our method to psychophysical data from both rats and human subjects
+learning a delayed sensory discrimination task. The model successfully tracks the
+psychophysical weights of rats over the course of training  capturing day-to-day
+and trial-to-trial ﬂuctuations that underlie changes in performance  choice bias 
+and dependencies on task history. Finally  we investigate why rats frequently
+make mistakes on easy trials  and suggest that apparent lapses can be explained by
+sub-optimal weighting of known task covariates.
+
+1
+
+Introduction
+
+A vast swath of modern neuroscience research requires training animals to perform speciﬁc tasks. This
+training is expensive and time-consuming  yet the data collected during the training period are often
+discarded from analysis. Moreover  animals can learn at vastly different rates  and may learn different
+strategies to achieve a criterion level of performance in a given task. Most neuroscience studies ignore
+such variability  and commonly track only coarse statistics like accuracy and bias during training.
+These statistics are not sufﬁcient to reveal subtle differences in strategy  such as unequal weighting of
+task variables or reliance on particular aspects of trial history. However  behavior collected during
+training may provide valuable insights into an animal’s mental arsenal of problem solving strategies 
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+Figure 1: Model schematic. (a) On each trial  a variety of both task-related and task-irrelevant
+variables may affect an animal’s choice behavior. We call the carrier vector of all K input variables
+on a particular trial gt. (b) As the animal trains on the task  psychophysical weights wt evolve with
+independent Gaussian noise  altering how strongly each variable affects behavior. (c) The probability
+of “right” given the input is described by a logistic function of gt · wt.
+
+and uncover how those strategies evolve with experience. Understanding detailed differences in
+behavior may shed light on differences in neural activity across animals or task conditions  reveal
+general aspects of behavior  or inspire the development of new learning algorithms [1].
+One reason training data are frequently ignored is a lack of good methods for tracking behavior during
+training  or for tracking continued learning after the dedicated training phase has ended. Of the few
+approaches to characterizing time-varying psychophysical behavior  perhaps the simplest is to apply
+standard logistic regression to separate blocks of trials. While useful in certain speciﬁc situations 
+there are numerous drawback to such a blocking approach  including: the need to choose a block
+size  the removal of dependencies between adjacent blocks  and the inability to track ﬁner time-scale
+changes within a block. Such an approach also assumes that there is a single timescale at which all
+psychophysical weights vary. Smith and Brown introduced an assumed density ﬁltering method for
+tracking psychophysical performance on a trial-by-trial basis [2]. This approach of explicitly tracking
+a parameter to determine the earliest time at which statistically signiﬁcant learning had occurred
+during training has been extended in various contexts [3  4]. Here we propose an alternate approach
+based on exact MAP estimation of time-varying psychophysical weights  with efﬁcient and scalable
+methods for inferring hyperparameters governing the timescale of changes for different weights.
+In this paper  we present a dynamic logistic regression model for time-varying psychophysical
+behavior. Our model quantiﬁes animal behavior at single-trial resolution  allowing for intuitive
+visualization of learning dynamics and direct analysis of psychophysical weight trajectories. We
+develop efﬁcient inference methods that exploit sparse structure in order to scale to large datasets with
+high-dimensional  time-varying psychophysical weights. Moreover  we use the decoupled Laplace
+approximation method [5] to perform highly efﬁcient approximate maximum marginal likelihood
+inference for a set of hyperparameters governing the rates of change for different psychophysical
+weights. We apply our method to a large behavioral data set of rats demonstrating a variety of
+constantly evolving complex behaviors over tens of thousands of trials  as well as human subjects with
+signiﬁcantly more stable behavior. We compare the predictions of our model to conventional measures
+of behavior  and conclude with an analysis of lapses on perceptually easy trials to demonstrate the
+model’s explanatory power. We expect that our method will provide immediate practical beneﬁt
+to trainers  in addition to giving unprecedented insight into the development of new behaviors. An
+implementation of all methods are available as the Python package PsyTrack [6].
+
+2 Dynamic logistic regression model
+
+Here we describe our dynamic model for time-varying psychophysical behavior. We consider a
+general two-alternative forced choice (2AFC) sensory discrimination task in which the animal is
+presented with a stimulus xt ∈ Rd  and makes a choice yt ∈ {0  1} between two options that we will
+refer to as “left” and “right” (although the method can be extended to multi-choice tasks [7]).
+We model the animal’s behavior as depending on an internal model parametrized by a set of weights
+wt ∈ RK that govern how the animal’s choice depends on an input “carrier” vector gt ∈ RK for the
+current trial t (Fig. 1a b). This carrier gt contains the task stimuli xt for the current trial  as well as a
+
+2
+
+1dynamic weightsfeature vectorBiasStim AStim Bt-2t-1tt+1tTrial #BiasStim AStim B(a)(b)(c)variety of additional covariates (e.g.  stimulus  choice  or answer history over the preceding one or
+more trials)  and a constant “1” to capture bias towards one choice or the other (see Sec. S1 for more
+detail). Empirically  animal behavior in early training often exhibits dependencies on both stimulus
+and choice history [8–10]; including these features is therefore critical to building an accurate model
+of the animal’s evolving psychophysical strategy (we return to this with a study of lapses in Sec. 6).
+Given the weight and carrier vectors  the animal’s choice behavior on a given trial is described by a
+Bernoulli generalized linear model (GLM)  also known as the logistic regression model (Fig. 1c):
+
+p(yt | gt  wt) =
+
+exp(yt(gt · wt))
+1 + exp(gt · wt)
+
+.
+
+(1)
+
+Unlike standard psychophysical models  which assume weights are constant across trials and that
+behavior is therefore constant  we instead assume that the weights evolve gradually through time. We
+model this evolution with independent Gaussian innovations noise added to the weights after each
+trial [11  12]:
+
+wt = wt−1 + ηt  ηt ∼ N (0  diag(σ2
+
+(2)
+where wt denotes the weight vector on trial t  ηt is the noise added to the weights after the previous
+k denotes the variance of the noise for weight k  also known as the volatility hyperparameter.
+trial  and σ2
+Here diag(σ2
+K) denotes a diagonal matrix with the volatility hyperparameters for each weight
+along the main diagonal. We note that this choice of prior on w is largely agnostic  though more
+structured priors could be considered.
+
+1  . . .   σ2
+
+1  . . .   σ2
+
+K)) 
+
+3
+
+Inference
+
+Inference involves ﬁtting the entire trajectory of the weights from the noisy response data collected
+over the course of experiment. This amounts to a very high-dimensional optimization problem when
+we consider models with several weights and datasets with tens of thousands of trials. Moreover 
+we wish to learn the volatility hyperparameters σk in order to determine how quickly each weight
+evolves across trials.
+
+3.1 Efﬁcient global optimization for wMAP
+
+Let w denote the massive weight vector formed by concatenating all of the length-N trajectory
+vectors for each weight k = 1  . . .   K  where N is the total number of trials. We can then express the
+prior over the weights by noting that η = Dw  where D is a block-diagonal matrix of K identical
+N × N difference matrices (i.e.  1 on the diagonal and −1 on the lower off-diagonal). Because the
+prior on η is simply N (0  Σ)  where Σ has each of the σ2
+k stacked N times along the diagonal  the
+prior for w is N (0  C) with C−1 = D(cid:62)Σ−1D. The log-posterior is then given by
+
+2 (log |C−1| − w(cid:62)C−1w) +(cid:80)N
+
+log p(w|D) = 1
+
+t=1 log p(yt|gt  wt) + const 
+
+(3)
+where D = {(gt  yt)}N
+t=1 is the set of input carriers and responses  and const is independent of w.
+Our goal is to ﬁnd the w that maximizes this log-posterior. With N K total parameters (potentially
+100’s of thousands) in w  however  most procedures that perform a global optimization of all parame-
+ters at once are not feasible; for example  related work has calculated trajectories by maximizing the
+likelihood using local approximations [2]. Whereas the use of the Hessian matrix for second-order
+methods often provides dramatic speed-ups  a Hessian of (N K)2 parameters is usually too large to
+ﬁt in memory (let alone invert) for N > 1000 trials. On the other hand  we observe that the Hessian
+of our log-posterior is sparse:
+
+∂2
+
+H =
+
+∂w2 log p(w|D) = C−1 +
+
+(4)
+where C−1 is a sparse (banded) matrix  and ∂2L/∂w2 is a block-diagonal matrix. The block diagonal
+structure arises because the log-likelihood is additive over trials  and weights at one trial t do not
+affect the log-likelihood component from another trial t(cid:48). We take advantage of this sparsity  using a
+variant of conjugate gradient optimization that only requires a function for computing the product of
+the Hessian matrix with an arbitrary vector [13]. Since we can compute such a product using only
+sparse terms and sparse operations  we can utilize quasi-Newton optimization methods in SciPy to
+ﬁnd a global optimum for our weights  even for very large N [14].
+
+∂2L
+∂w2
+
+3
+
+Algorithm 1 Optimizing hyperparameters with the decoupled Laplace approximation
+Require: input carriers g  choices y
+Require: initial hyperparameters θ0  subset of hyperparameters to be optimized θOPT
+1: repeat
+2:
+3:
+4:
+
+Optimize for w given current θ −→ wMAP  Hessian of log-posterior Hθ  log-evidence E
+Determine Gaussian prior N (0  Cθ) and Laplace appx. posterior N (wMAP −H−1
+θ )
+Calculate Gaussian approximation to likelihood N (wL  Γ) using product identity  where
+Γ−1 = −(Hθ + C−1
+Optimize E w.r.t. θOPT using closed form update (with sparse operations)
+wMAP = −H−1
+Update best θ and corresponding best E
+
+θ ) and wL = −ΓHθwMAP
+
+5:
+
+θ Γ−1wL
+
+6:
+7: until θ converges
+8: return wMAP and θ with best E
+
+3.2 Hyperparameter ﬁtting with the decoupled Laplace approximation
+
+So far we have addressed the problem of ﬁnding a global optimum for w given a speciﬁc hyperpa-
+rameter setting θ = {σk}; now we must also ﬁnd the optimal hyperparameters. Cross-validation
+is not easily applied given the number of different volatility parameters  and so we turn instead to
+approximate marginal likelihood. To select between models with different θ  we use a Laplace ap-
+proximation to the posterior  p(w|D  θ) ≈ N (w|wMAP −H−1)  to estimate the marginal likelihood
+(or evidence) as [15]:
+
+p(y|g  θ) =
+
+p(y|g  w) p(w|θ)
+
+p(w|D  θ)
+
+≈ exp(L) · N (w|0  C)
+N (w|wMAP −H−1)
+
+.
+
+(5)
+
+Naive optimization of θ requires a re-optimization of wMAP for every change in θ  strongly restricting
+the dimensionality of tractable θ to whatever could be explored with grid search; the simplest approach
+is to reduce all σk to a single σ  as assumed in [16].
+Here we use the decoupled Laplace method [5] to avoid the need to re-optimize for our weight
+parameters after every update to our hyperparameters by making a Gaussian approximation to the
+likelihood of our model. The optimization is explained in Algorithm1. By circumventing nested
+optimization of θ and w  we can consider larger sets of hyperparameters and more complex priors
+over our weights  while still ﬁtting in minutes on a laptop (Fig. 2c). For example  letting each weight
+evolve with its own distinct σk often allows for both a more accurate ﬁt to data and additional insight
+into the dynamics (as in Fig. 3b). In practice  we also parametrize θ by ﬁxing σk t=0 = 16  an
+arbitrary large value that allows the likelihood to determine w0 rather than forcing the weights to
+initialize near some predetermined value.
+
+3.3 Overnight dynamics
+
+Another speciﬁc parametrization of θ made possible by the decoupled Laplace method is the inclusion
+of an additional type of hyperparameter  σday  to modulate the change in weights occurring between
+training sessions. Intuitively  one might expect that between the last trial of a session and the
+ﬁrst trial of the next session  change in behavior is greater than between trials that are consecutive
+within the same session. By indexing the ﬁrst trial of each session  we can introduce a new set of
+hyperparameters {σk day} which we can then optimize to account for the between-session changes
+within each weight.
+Whereas all 2·K hyperparameters in θ = {σ1  . . .   σK  σ1 day  . . .   σK day} can have distinct values
+in the most ﬂexible version of the model  there are certain optional constraints that may be more
+relevant to animal behavior. For example  when both the {σk} and {σk day} are ﬁxed to be very small 
+it means that weights effectively do not change  replicating the standard logistic regression model
+with constant weights. On the other hand  when ﬁxing {σk} to be very small and {σk day} to be very
+large  we would recover a different set of constant weights for each session  replicating a particular
+blocked approach to logistic regression discussed earlier. By only ﬁxing the {σk day} to be large
+while optimizing freely over each of {σk}  we essentially ﬁnd the best weight trajectory within each
+session  while allowing the weights to “reset” at the start of each new session. The decoupled Laplace
+
+4
+
+Figure 2: Recovering weights and hyperparameters from simulated data. (a) Generating 20 behavioral
+realizations (y’s) from one simulated set of K = 4 weights (in bold)  we recover 20 sets of weights
+(faded). Observe that the recovered weights closely track the real weights in all realizations. (b)
+The hyperparameters σk recovered for each weight over 20 distinct simulations  as a function of
+number of trials. Note that with more trials  the recovered σk converge to the true σk (dotted black
+line). (c) Average computation time for full optimization of weights and hyperparameters for a single
+realization. Even with tens of thousands of trials  this model can be ﬁt in minutes on a laptop.
+
+method makes it feasible to optimize over any subset of these hyperparameters at once  allowing
+exploration of many types of models and the localization of behavioral dynamics to speciﬁc weights
+or periods of training.
+
+4 Simulation results
+
+We ﬁrst demonstrate our method using simulated data. We generate K = 4 weight trajectories over
+N = 64  000 trials  simulating each as a Gaussian random walk with variance σ2
+k and a reﬂecting
+boundary at ±4. For each trial  we then drew the carrier vector gt from a standard normal  calculated
+P (Right)  and used this probability to sample a choice yt. Since our model is probabilistic (Eq. 1) 
+we can draw many behavioral realizations (y’s) from the same “true” weight trajectories. Our method
+not only accurately estimates the weight trajectories across realizations (Fig. 2a)  but also recovers
+the hyperparameter σk for each weight across many different simulations (Fig. 2b). We also tested
+the scalability of the method over increasing number of trials (Fig. 2c). We note that having more
+than 64K trials for a single animal is highly unusual  and so ﬁfteen minutes of computation time
+on a laptop is a rough upper bound for most practical use; behavioral datasets commonly have only
+a few thousand trials and can be ﬁt in seconds. In order to conﬁrm the efﬁcacy of our decoupled
+Laplace method in recovering the best setting of hyperparameters  we conﬁrm with grid search that
+the algorithm converges on the hyperparameters with the highest evidence and highest cross-validated
+log-likelihood on simulated data (see Fig. S1).
+
+5 Behavioral dynamics in rats & humans
+
+To further explore the advantages and insights provided by our model  we apply our method to
+behavioral data from both rats and humans performing a 2AFC delayed response task  as reported in
+[17]. The task involves the presentation of two auditory stimuli of different amplitude  separated by
+a delay. If the ﬁrst stimulus (Tone A) is louder than the second (Tone B)  then the subject must go
+right to receive a reward  and vice-versa (Fig. 3a; for more detail see [17]). In our model  the “correct”
+set of weights for performing this task with high accuracy are a large  positive weight for Tone A 
+an equal and opposite weight for Tone B (the two sensitivities to stimuli)  and zeros for all other
+(task-irrelevant) weights. We applied our method to early training data from 20 rats and 9 human
+
+5
+
+(a)(b)(c)Figure 3: Application to rat and human data. (a) For this data from [17]  a 2AFC delayed response
+task was used in which the subject experiences an auditory stimulus (Tone A) of a particular amplitude 
+a delay period  a second auditory stimulus (Tone B) of a different amplitude  and ﬁnally the choice
+to go either left or right. If Tone A was louder than Tone B  then a rightward choice receives a
+reward  and vice-versa. (b) The psychometric weights recovered from the ﬁrst 20 000 trials of a rat.
+Weights in the legend labeled with a “-1” superscript indicate that the weight carries information
+from the previous trial. The faded vertical gray lines indicate session boundaries. In addition to being
+ﬁt with its own trial-to-trial volatility hyperparameter σk  each weight is also ﬁt with an additional
+hyperparameter σk day for volatility between sessions. This results in “steps” at the session boundaries
+for some weights (see Sec. 3.3). Each weight also has a 95% posterior credible interval  indicated by
+the shaded region of matching color (for derivation refer to Sec. S2). (c) The psychometric weights
+recovered from a human subject.
+
+subjects to uncover how behavior evolved in this particular task. Here we show examples from one
+rat and one human subject (Figs. 3b c); see Figs. S2 & S3 for analysis of additional rats and human
+subjects.
+
+5.1 Rat data
+
+Behavior is highly dynamic in the case of a rat (Fig. 3b)  reﬂective of the animal’s initial uncertainty
+about the task structure and gradual honing of its behavioral strategy. First  we notice that the animal
+starts naive: the initial strategy does not depend upon the two auditory stimuli at all  as both the Tone
+A & B weights (red & yellow) begin near 0. Instead  behavior is clearly inﬂuenced by the previous
+trial: the weights on answer history (purple; preference to choose the side that was correct on the
+previous trial  or “win-stay/lose-switch”) and on choice history (green; preference to choose the same
+side as on the previous trial  or “perseverance”) both dominate initially. There is also an overall
+tendency to choose left  as indicated by the negative bias weight (blue). As training progresses  both
+the bias and dependencies on task history steadily decrease  suggesting that the rat is learning the
+task structure.
+Second  we can compare the evolution of the weights on Tone A vs. Tone B. The sensitivity to the
+value of Tone B is developed very early in training  and quickly grows to a large negative value
+(preference to go left when Tone B is loud). In contrast  the sensitivity to Tone A stays close to zero
+for many thousands of trials before growing to have a large positive value (preference to go right
+
+6
+
+Tone ATone BRightLeftTrial StartTone ADelayTone BChoice(a)(b)(c)BiasAvg. Tone -1Tone BTone AAnswer -1Choice -1025005000750010000125001500017500−101Weight02505007501000125015001750Trial #−3−2−10123WeightFigure 4: Comparing to empirical metrics. (a) The empirical accuracy of the rat in red  with a 95%
+conﬁdence interval indicated by the shaded region. We overlay the predicted accuracy from model
+weights in maroon  using P (Correct) for each trial instead of the empirical {0  1}. (b) The empirical
+bias of the rat  represented as the correct side minus the animal’s choice for each trial  where {Left 
+Right} = {0 1}. We plot a 95% conﬁdence interval indicated by the shaded region  as well as the
+predicted bias from model weights  substituting P (Right) for the animal’s choice. All lines are
+smoothed with a Gaussian kernel of σ = 50. Predicted performance and bias are calculated using
+cross-validated weights (calculations and cross-validation procedure detailed in Secs. S3 & S4).
+
+when Tone A is loud). Again  this observation is consistent with the intuition that associative learning
+is stronger for the most recent stimulus. The temporal separation of Tone A from the choice not
+only makes it more difﬁcult to learn the association  but also makes leveraging knowledge of that
+association more difﬁcult since the rat must work to maintain information about Tone A in working
+memory [18  17]. Despite this  we see that the animal ultimately develops weights of equal magnitude
+and opposite signs for the two stimuli  again demonstrating successful learning.
+Finally  we observe a small but signiﬁcant sensitivity to the previous trial’s stimuli (pink); the positive
+value indicates a preference to go right when the average of Tones A & B on the previous trial was
+higher. This reconﬁrms the dependence of choice behavior on sensory history found in [17].
+
+5.2 Human subjects
+
+In contrast to the rat  the weight trajectories for the human subject are largely stable and reﬂect
+accurate behavioral performance (Fig. 3c); not much learning is happening. This is expected  as a
+human subject can understand the task structure and execute the correct behavioral strategy from
+the very ﬁrst trial. We emphasize that the strength of our model is not only its ﬂexibility to ﬁt the
+dynamic behavior of the rat  but also to automatically detect and conﬁrm the stable behavior of the
+human. While the human dataset is stable enough to be ﬁtted using standard logistic regression  it
+would require starting from the assumption that behavior was indeed stable.
+Our method also allows several interesting observations regarding the types of decision-making
+biases a human subject might possess. For example  there is a non-zero choice bias (blue) with a
+slow ﬂuctuation  that tends leftward over most of the session. Also  while the weights for Tones A &
+B are clearly the two largest  the magnitude of the Tone B weight is consistently larger  indicating
+a higher sensitivity to the more recent stimulus. Furthermore  the weight on sensory history (pink)
+is non-vanishing  once again corroborating the ﬁndings of [17]; whereas behavior was even better
+explained without the weights on answer and choice history (see Sec. S1 for more detail).
+
+5.3 Comparison to conventional measures
+
+Finally  we ask how well our model actually describes the animal’s choice behavior. To this end 
+we relate our model back to more conventional measures of behavior  considering two important
+measures most commonly used by a trainer: the empirical accuracy (Fig. 4a) and the empirical
+bias (Fig. 4b). The empirical accuracy tracks the local fraction of trials with a correct response 
+whereas the empirical bias captures the tendency to prefer one side on error trials (see Sec. S3 for
+details). The two measures were then compared with the corresponding quantities predicted by our
+
+7
+
+(a)(b)−101WeightRat W080Tone ATone BBiasAvg. Tone−1Answer−1Choice−10.40.60.81.0AccuracyEmpiricalPredicted025005000750010000125001500017500Trial #−0.250.000.25BiasEmpiricalPredictedFigure 5: Psychometric curve and model predictions. (a) A conventional psychometric curve for a
+rat  generated from a subset of trials at the end of training where Tone B is held constant. (b) The
+same rat during early training  with two models: the basic model with stimuli and bias weights only
+(red)  and the history-aware model (black). The histograms (with right-side axis) show the number
+of trials within each g · w bin. The dots (with left-side axis) plot the fraction of trials  within each
+bin  in which the rat went right (yt = 1). (c) For all 20 rats in the population  we plot the predicted
+accuracy vs. empirical accuracy for the top 1  5  & 10% of most strongly predicted trials in the basic
+model (red). (d) Same as (c) but for the history-aware model (black).
+
+model. The close match between empirical and predicted performance validates the model’s ability
+to capture the animal’s true dynamic strategy  in addition to the already-demonstrated success of our
+inference method to ﬁnd the best weights and hyperparameters given the model. It also emphasizes
+that our analysis provides highly interpretable measures that could successfully replace (and extend)
+conventional training evaluators.
+
+6 Exploring lapse
+
+Looking at the psychometric curve of a single rat from its end-of-training data (Fig. 5a)  it is clear that
+the rat does not achieve perfect performance even on the easiest trials (left/right ends of the stimulus
+axis). This gap in performance is particularly common in rodent data and there is much speculation
+as to its cause [19]. One possible hypothesis is that the trials are not easy enough  and that perfect
+performance would be achieved on sufﬁciently easy trials; in other words  this is to explain the gap
+as a result of insufﬁcient sensitivity to task stimuli [20–22]. An alternative hypothesis is that there
+exists a so-called "lapse rate" inherent in the animal’s behavior  for example as an effect from an
+-greedy strategy where the animal makes a completely random choice on a certain fraction of trials 
+perhaps for exploratory purposes. Our analysis of the rat data can provide an answer to the debate  as
+it captures the behavior of the animal precisely enough to predict  not just describe.
+To explore the predictive power of our method further  we look at two distinct models in Fig. 5b: the
+basic model (in red) has dynamic weights only on the task stimuli (Tones A & B) and choice bias 
+while the history-aware model (in black) has additional weights for various history dependencies. On
+the x-axis of Fig. 5b  we have binned all trials of our rat according to their gt · wt values. Recall that
+in our model  larger magnitudes of g · w result in more conﬁdent predictions  with predicted choice
+probabilities closer to 0 or 1. We see that the empirical probability of choosing right within each bin
+of g · w (plotted in dots) matches the predicted probability according to the logistic function of Eq. 1
+(plotted as faded gray curve). We then plotted the number of trials in each g · w bin in the histograms
+
+8
+
+(c)(d)(b)(a)(with right-side axis). We see that for our basic model  the trial predictions are never more conﬁdent
+than 90% (no tails on the red histogram)  whereas our history-aware model has a substantial portion
+of trials predicted with almost 100% conﬁdence (longer tails on the black histogram). In terms of the
+cross-validated log-likelihood  the history-aware model provides a 20% boost over the basic model.
+All model predictions are calculated on held-out data; see Sec. S4 for details.
+Finally  we directly compare the model-predicted accuracy to the empirical accuracy  across all 20
+rats  for both the basic model (Fig. 5c) and the history-aware model (Fig. 5d). Sorting trials by their
+predicted accuracy  we plot the top 1  5  & 10% of trials in each rat and ﬁnd that almost all rats have
+a signiﬁcant proportion of their trials being predicted with >95% accuracy in the history-aware model
+(Fig. 5d).
+We thus demonstrated that our method can predict the rats’ choice behavior with near-perfect accuracy
+on a signiﬁcant subset of trials. This ﬁnding contradicts the hypothesis postulating an inherent lapse
+rate  where the animal is making random choices on a subset of trials (where such randomness would
+prevent prediction above a certain accuracy). While random choice is a well-established behavioral
+strategy seen in many experimental settings  our method allows for critical disambiguation between
+true randomness and deterministic strategies that may appear random [23]. Our method  with the full
+history-aware model  is able to quantify and explain gaps in performance typically left unexplained
+by conventional analyses.
+
+7 Discussion
+
+We presented a method for efﬁciently and ﬂexibly characterizing the dynamics of psychophysical
+behavior  allowing for unprecedented insight into how animals learn new tasks. We have made key
+advancements with regard to both efﬁciency and scalability  allowing us to quickly ﬁt a complex 
+trial-to-trial description of behavior for even the largest of datasets. We demonstrated on a real dataset
+(of unusually large size) the explanatory as well as predictive power of our method  as compared
+to two conventional measures of behavior. In particular  the ﬂexibility of the model allowed us to
+address an important open question in behavioral psychology  known as lapse.
+Our approach is developed under a simple generic model of psychometric behavior  which worked
+nicely for the datasets we analyzed in this paper. Here we brieﬂy discuss two aspects of the model
+that may be extended in a future study  potentially to address speciﬁc features of different tasks. First 
+while the weight trajectories are allowed to evolve over time  the volatility hyperparameter σ is a
+single value optimized over the entire dataset. When analyzing a long trajectory  it may be necessary
+to also allow σ to slowly vary over time  so that the dynamics of early training and the stability of late
+training can be explained separately. Including more complex parameterizations of the prior  such as
+the overnight σday described in Sec. 3.3  may also provide a practical solution in modeling sudden 
+step-like changes in behavior. Second  the success of our method is fundamentally dependent on the
+ability of the psychometric model to correctly describe the animal’s behavior. Different tasks may
+require more careful modeling of certain aspects of the choice behavior. In particular  our model only
+applies to 2-alternative forced choice tasks in its current form  though there is a clear extension to
+multi-alternative choice [7]. Despite these limitations  we expect the agnostic ﬂexibility  explanatory
+power  and computational efﬁciency of our method to make it a useful tool for exploring behavioral
+dynamics. Our Python package PsyTrack should make the analysis easily accessible [6].
+Our method can be easily applied to the vast troves of largely unanalyzed animal training data
+to provide both scientiﬁc insight and practical utility. The immediate applicability  as a potential
+everyday tool for scientists-trainers  places our method a signiﬁcant step forward from previous works
+that offered theoretical paths [16]. At the lowest level  this method allows trainers to stay aware
+of the behavioral strategies developed by their animals  useful for identifying common pitfalls and
+disentangling distinct strategies that may appear similar on the surface. Furthermore  while many
+trainers are already using various automated heuristics during training  the output of our method can
+be used as a more speciﬁc and accurate input to such heuristics. By enabling a quantitative feedback
+loop where the trainer can (i) diagnose a problem  (ii) prescribe an adaptively optimized training
+program to correct it  and (iii) monitor the consequence of that correction  we feel that our method
+will set a new standard for systematic animal training.
+
+9
+
+Acknowledgements
+
+This work was supported by grants from the Simons Foundation (SCGB AWD1004351 and
+AWD543027)  the NIH (R01EY017366  R01NS104899) and a U19 NIH-NINDS BRAIN Initiative
+Award (NS104648-01).
+
+References
+[1] John W Krakauer  Asif A Ghazanfar  Alex Gomez-Marin  Malcolm A MacIver  and David
+Poeppel. Neuroscience needs behavior: correcting a reductionist bias. Neuron  93(3):480–490 
+2017.
+
+[2] Anne C Smith  Loren M Frank  Sylvia Wirth  Marianna Yanike  Dan Hu  Yasuo Kubota  Ann M
+Graybiel  Wendy A Suzuki  and Emery N Brown. Dynamic analysis of learning in behavioral
+experiments. Journal of Neuroscience  24(2):447–461  2004.
+
+[3] Wendy A Suzuki and Emery N Brown. Behavioral and neurophysiological analyses of dynamic
+
+learning processes. Behavioral and cognitive neuroscience reviews  4(2):67–95  2005.
+
+[4] Michael J Prerau  Anne C Smith  Uri T Eden  Yasuo Kubota  Marianna Yanike  Wendy Suzuki 
+Ann M Graybiel  and Emery N Brown. Characterizing learning by simultaneous analysis of
+continuous and binary measures of performance. Journal of neurophysiology  102(5):3060–
+3072  2009.
+
+[5] Anqi Wu  Nicholas A Roy  Stephen Keeley  and Jonathan W Pillow. Gaussian process based
+nonlinear latent structure discovery in multivariate spike train data. In Advances in Neural
+Information Processing Systems  pages 3499–3508  2017.
+
+[6] Nicholas A Roy  Ji Hyun Bak  and Jonathan W Pillow. PsyTrack: Open source dynamic
+
+behavioral ﬁtting tool for Python  2018–.
+
+[7] Ji Hyun Bak and Jonathan W. Pillow. Adaptive stimulus selection for multi-alternative psycho-
+
+metric functions with lapses. Journal of Vision  18(12):4  2018.
+
+[8] Arman Abrahamyan  Laura Luz Silva  Steven C. Dakin  Matteo Carandini  and Justin L. Gardner.
+Adaptable history biases in human perceptual decisions. Proceedings of the National Academy
+of Sciences  113(25):E3548–E3557  2016.
+
+[9] Laura Busse  Asli Ayaz  Neel T. Dhruv  Steffen Katzner  Aman B. Saleem  Marieke L.
+Schölvinck  Andrew D. Zaharia  and Matteo Carandini. The detection of visual contrast
+in the behaving mouse. Journal of Neuroscience  31(31):11351–11361  2011.
+
+[10] Eun Jung Hwang  Jeffrey E Dahlen  Madan Mukundan  and Takaki Komiyama. History-based
+
+action selection bias in posterior parietal cortex. Nature Communications  8(1):1242  2017.
+
+[11] Yashar Ahmadian  Jonathan W Pillow  and Liam Paninski. Efﬁcient markov chain monte carlo
+
+methods for decoding neural spike trains. Neural Computation  23(1):46–96  2011.
+
+[12] Liam Paninski  Yashar Ahmadian  Daniel Gil Ferreira  Shinsuke Koyama  Kamiar Rahnama
+Rad  Michael Vidne  Joshua Vogelstein  and Wei Wu. A new look at state-space models for
+neural data. Journal of computational neuroscience  29(1-2):107–126  2010.
+
+[13] Jorge Nocedal and Stephen J Wright. Quasi-newton methods. Numerical optimization  pages
+
+135–163  2006.
+
+[14] Eric Jones  Travis Oliphant  Pearu Peterson  et al. SciPy: Open source scientiﬁc tools for
+
+Python  2001–.
+
+[15] Maneesh Sahani and Jennifer F Linden. Evidence optimization techniques for estimating
+stimulus-response functions. In Advances in neural information processing systems  pages
+317–324  2003.
+
+10
+
+[16] Ji Hyun Bak  Jung Yoon Choi  Athena Akrami  Ilana Witten  and Jonathan W Pillow. Adaptive
+optimal training of animal behavior. In Advances in Neural Information Processing Systems 
+pages 1947–1955  2016.
+
+[17] Athena Akrami  Charles D Kopec  Mathew E Diamond  and Carlos D Brody. Posterior parietal
+cortex represents sensory history and mediates its effects on behaviour. Nature  554(7692):368 
+2018.
+
+[18] Ranulfo Romo and Emilio Salinas. Cognitive neuroscience: ﬂutter discrimination: neural codes 
+
+perception  memory and decision making. Nature Reviews Neuroscience  4(3):203  2003.
+
+[19] Joshua I Gold and Long Ding. How mechanisms of perceptual decision-making affect the
+
+psychometric function. Progress in neurobiology  103:98–114  2013.
+
+[20] Nicolaas Prins. The psychometric function: The lapse rate revisited. Journal of Vision  12(6):25–
+
+25  2012.
+
+[21] Jeffrey C Erlich  Bingni W Brunton  Chunyu A Duan  Timothy D Hanks  and Carlos D Brody.
+Distinct effects of prefrontal and parietal cortex inactivations on an accumulation of evidence
+task in the rat. Elife  4:e05457  2015.
+
+[22] Benjamin B Scott  Christine M Constantinople  Jeffrey C Erlich  David W Tank  and Carlos D
+Brody. Sources of noise during accumulation of evidence in unrestrained and voluntarily
+head-restrained rats. Elife  4:e11308  2015.
+
+[23] Samuel J Gershman. Uncertainty and exploration. bioRxiv  page 265504  2018.
+
+11
+
+,Nicholas Roy
+Ji Hyun Bak
+Athena Akrami
+Carlos Brody
+Jonathan Pillow

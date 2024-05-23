@@ -1,0 +1,705 @@
+2019,Practical Two-Step Lookahead Bayesian Optimization,Expected improvement and other acquisition functions widely used in Bayesian optimization use a "one-step" assumption: they value objective function evaluations assuming no future evaluations will be performed. Because we usually evaluate over multiple steps  this assumption may leave substantial room for improvement. Existing theory gives acquisition functions looking multiple steps in the future but calculating them requires solving a high-dimensional continuous-state continuous-action Markov decision process (MDP). Fast exact solutions of this MDP remain out of reach of today's methods. As a result  previous two- and multi-step lookahead Bayesian optimization algorithms are either too expensive to implement in most practical settings or resort to heuristics that may fail to fully realize the promise of two-step lookahead. This paper proposes a computationally efficient algorithm that provides an accurate solution to the two-step lookahead Bayesian optimization problem in seconds to at most several minutes of computation per batch of evaluations. The resulting acquisition function provides increased query efficiency and robustness compared with previous two- and multi-step lookahead methods in both single-threaded and batch experiments. This unlocks the value of two-step lookahead in practice. We demonstrate the value of our algorithm with extensive experiments on synthetic test functions and real-world problems.,Practical Two-Step Look-Ahead
+
+Bayesian Optimization
+
+Jian Wu
+
+wujian046@gmail.com
+
+School of Operations Research and Information Engineering
+
+Peter I. Frazier⇤
+
+Cornell University
+Ithaca  NY 14850
+pf98@cornell.edu
+
+Abstract
+
+Expected improvement and other acquisition functions widely used in Bayesian op-
+timization use a “one-step” assumption: they value objective function evaluations
+assuming no future evaluations will be performed. Because we usually evaluate
+over multiple steps  this assumption may leave substantial room for improvement.
+Existing theory gives acquisition functions looking multiple steps in the future but
+calculating them requires solving a high-dimensional continuous-state continuous-
+action Markov decision process (MDP). Fast exact solutions of this MDP remain
+out of reach of today’s methods. As a result  previous two- and multi-step looka-
+head Bayesian optimization algorithms are either too expensive to implement in
+most practical settings or resort to heuristics that may fail to fully realize the
+promise of two-step lookahead. This paper proposes a computationally efﬁcient
+algorithm that provides an accurate solution to the two-step lookahead Bayesian
+optimization problem in seconds to at most several minutes of computation per
+batch of evaluations. The resulting acquisition function provides increased query
+efﬁciency and robustness compared with previous two- and multi-step lookahead
+methods in both single-threaded and batch experiments. This unlocks the value of
+two-step lookahead in practice. We demonstrate the value of our algorithm with
+extensive experiments on synthetic test functions and real-world problems.
+
+1
+
+Introduction
+
+We consider minimization of a continuous black-box function f over a hyperrectangle A✓ Rd.
+We suppose evaluations f (x) are time-consuming to obtain  do not provide ﬁrst- or second-order
+derivative information and are noise-free. Such problems arise when tuning hyperparameters of
+complex machine learning models [Snoek et al.  2012] and optimizing engineering systems using
+physics-based simulators [Forrester et al.  2008].
+We consider this problem within a Bayesian optimization (BayesOpt) framework [Brochu et al.  2010 
+Frazier  2018]. BayesOpt methods contain two components: (1) a statistical model over f  typically a
+Gaussian process [Rasmussen and Williams  2006]; and (2) an acquisition function computed from
+the statistical model that quantiﬁes the value of evaluating f. After a ﬁrst stage of evaluations of f 
+often at points chosen uniformly at random from A  we behave iteratively: we ﬁt the statistical model
+to all available data; then optimize the resulting acquisition function (which can be evaluated quickly
+and often provides derivative information) to ﬁnd the best point(s) at which to evaluate f; perform
+these evaluations; and repeat until our evaluation budget is exhausted.
+
+⇤Peter Frazier is also a Staff Data Scientist at Uber
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+The most widely-used acquisition functions use a one-step lookahead approach. They consider the
+direct effect of the evaluation on an immediate measure of solution quality  and do not consider
+evaluations that will be performed later. This includes expected improvement (EI) [Jones et al.  1998] 
+probability of improvement (PI) Kushner [1964]  entropy search (ES) [Hernández-Lobato et al.  2014 
+Wang and Jegelka  2017]  and the knowledge gradient (KG) [Wu and Frazier  2016]. By myopically
+maximizing the immediate improvement in solution quality  they may sacriﬁce even greater gains in
+solution quality obtainable through coordinated action across multiple evaluations.
+Researchers have sought to address this shortcoming through non-myopic acquisition functions. The
+decision of where to sample next in BayesOpt can be formulated as a partially observable Markov
+decision process (POMDP) [Ginsbourger and Riche  2010]. The solution to this POMDP is given by
+the Bellman recursion [Lam et al.  2016] and provides a non-myopic acquisition function that provides
+the best possible average-case performance under the prior. However  the “curse of dimensionality"
+Powell [2007] prevents solving this POMDP for even small-scale problems.
+The past literature [Lam et al.  2016  Osborne et al.  2009  Ginsbourger and Riche  2010  González
+et al.  2016] instead approximates the solution to this POMDP to create non-myopic acquisition
+functions. Two-step lookahead is particularly attractive [Osborne et al.  2009  Ginsbourger and Riche 
+2010  González et al.  2016] because it is substantially easier to compute than looking ahead more than
+two steps  but still promises a performance improvement over the one-step acquisition functions used
+in practice. Indeed  Ginsbourger and Riche [2010] argue that using two-step lookahead encourages
+a particularly beneﬁcial form of exploration: evaluating a high uncertainty region beneﬁts future
+evaluations; if the evaluation reveals the region was better than expected  then future evaluations
+evaluate nearby to ﬁnd improvements in solution quality. This beneﬁt occurs even if the ﬁrst
+evaluation does not generate a direct improvement in solution quality. In numerical experiments 
+Osborne et al. [2009]  Ginsbourger and Riche [2010] show that two-step lookahead improves over
+one-step lookahead in a range of practical problems.
+At the same time  optimizing two-step acquisition functions is computationally challenging. Unlike
+common one-step acquisition functions like expected improvement  they cannot be computed in
+closed form and instead require a time-consuming simulation with nested optimization. Simulation
+creates noise and prevents straightforwand differentiation  which hampers optimizing these two-
+step acquisition functions precisely. Existing approaches [Osborne et al.  2009  Ginsbourger and
+Riche  2010  González et al.  2016] use derivative-free optimizers  which can require a large number
+of iterations to optimize precisely  particularly as the dimension d of the feasible space grows.
+(Numerical experiments in Osborne et al. [2009]  Ginsbourger and Riche [2010] are restricted to
+problems with d  3.) As a result  existing two- and multi-step methods require a prohibitive amount
+of computation (e.g.  Lam [2018] reports that the method in Lam et al. [2016] requires between 10
+minutes and 1 hour per evaluation even on low-dimensional problems). If sufﬁcient computation is
+not performed  then errors in the acquisition-function optimization overwhelm the beneﬁts provided
+by two-step lookahead and query efﬁciency degrades compared to a one-step acquisition function
+supporting precise optimization. Similar challenges arise for the multi-step method proposed in
+Lam et al. [2016]. This computational challenge has largely prevented the widespread adoption of
+non-myopic acquisition functions in practice.
+
+Contributions. This article makes two key innovations unlocking the power of two-step lookahead
+in practice. First  we provide an estimator based on the envelope theorem for the gradient of the two-
+step lookahead acquisition function. Second  we show how Monte Carlo variance reduction methods
+can further reduce the computational cost of estimating both the two-step lookahead acquisition
+function and its gradient. These techniques can be used within multistart stochastic gradient ascent to
+efﬁciently generate multiple approximate stationary points of the acquisition function  from which
+we can select the best to provide an efﬁcient approximate optimum. Together  these innovations
+support optimizing the acquisition function accurately with computation requiring between a few
+seconds and several minutes on a single core. Moreover  this computation can be easily parallelized
+across cores. It also scales better in the batch size and dimension of the black-box function compared
+with the common practice of using a derivative-free optimizer. An implementation is available
+in the Cornell-MOE codebase  https://github.com/wujian16/Cornell-MOE  and the code to
+replicate our experiments is available at https://github.com/wujian16/TwoStep-BayesOpt.
+Our approach leverages computational techniques developed in the literature. The ﬁrst is inﬁnitesimal
+perturbation analysis [Heidelberger et al.  1988] and the envelope theorem [Milgrom and Segal  2002] 
+
+2
+
+previously used in Bayesian optimization to optimize the knowledge gradient aquisition function
+(which is myopic  as noted above) by Wu et al. [2017]. This built on earlier work using inﬁnitesimal
+perturbation analysis without the envelope theorem to optimize the expected improvement acquisition
+function (also myopic) in the batch setting [Wang et al.  2016]. The second is a pair of variance
+reducton methods: Gauss-Hermite quadrature Liu and Pierce [1994] and importance sampling
+[Asmussen and Glynn  2007]. Our paper is the ﬁrst to demonstrate the power of these techniques for
+non-myopic Bayesian optimization.
+
+2 The Two-Step Optimal (2-OPT) Acquisition Function
+
+This section deﬁnes the two-step lookahead acquisition function. This acquisition function is optimal
+when there are two stages of measurements remaining  and so we call it 2-OPT. Before deﬁning
+2-OPT  we ﬁrst provide notation and brief background from Gaussian process regression in Sect. 2.1.
+We then deﬁne 2-OPT in Sect. 2.2 and show how to estimate it with Monte Carlo in Sect. 2.3. While
+2-OPT has been deﬁned implicitly in past work  we include a complete description to provide a
+framework and notation supporting our novel efﬁcient method for maximizing it in Sect. 3.
+
+2.1 Gaussian process model for the objective f
+We place a Gaussian process (GP) prior on the objective f. Although standard  here we brieﬂy
+describe inference under a GP to provide notation used later. Our GP prior is characterized by a mean
+function µ(·) and a kernel function K(· ·). The posterior distribution on f after observing f at data
+points D = (x(1)  . . .   x(m)) is a GP with mean function and kernel deﬁned respectively by
+
+µ(x) + K(x  D)K(D  D)1(f (D)  µ(D)) 
+K(x  x0)  K(x  D)K(D  D)1K(D  x0).
+
+(1)
+
+In (1)  f (D) = (f (x(1))  . . .   f (x(m)))  and similarly for µ(D). Expressions K(x  D)  K(D  x) 
+and K(D  D) similarly evaluate to a column vector  row vector  and square matrix respectively.
+
+2.2 Two-step lookahead acquisition function
+Here we deﬁne the 2-OPT acquisition function from a theoretical (but not yet computational)
+perspective. This formulation follows previous work on two-step and multi-step acquisition functions
+[Lam et al.  2016  Osborne et al.  2009  Ginsbourger and Riche  2010  González et al.  2016]. 2-OPT
+gives optimal average-case behavior when we have two stages of evaluations remaining  and the
+second stage of evaluated may be chosen based on the results from the ﬁrst.
+To support batch evaluations while maintaining computational tractability  our ﬁrst stage of evaluations
+uses a batch of q  1 simultaneous evaluations  while the second stage uses a single evaluation.
+Throughout  we assume that we have already observed a collection of data points D  so that the
+current posterior distribution is a GP with a mean function µ0 and kernel K0 given by (1)  and use
+E0 to indicate the expectation taken with respect to this distribution. We let f⇤0 = min f (D) be the
+best point observed thus far.
+We index quantities associated with the ﬁrst stage of evaluations by 1 and the second by 2. We let
+X1 indicate the set of q points to be evaluated in the ﬁrst stage. We let f (X1) = (f (x) : x 2 X1)
+indicate the corresponding vector of observed values and and let min f (X1) be the smallest value in
+this vector. We let x2 indicate the single point observed in the second stage.
+For each i = 1  2  we deﬁne f⇤i
+to be smallest value observed by the end of stage i  so f⇤1 =
+min(f⇤0   f (X1)) and f⇤2 = min(f⇤1   f (x2)). We let µi be the mean function and Ki the kernel for
+the posterior distribution given D and observations available at the end of stage i. We let Ei indicate
+the expectation taken with respect to the corresponding Gaussian process.
+The overall loss whose expected value we seek to minimize is f⇤2 .
+To ﬁnd the optimal sampling strategy  we follow the dynamic programming principle. We ﬁrst write
+the expected loss achievable at the end of the second stage  conditioned on the selection of points
+(X1) and results (f (X1)) from the ﬁrst stage. If we choose the ﬁnal evaluation optimally  then this
+expected loss is L1 = minx22A E1 [f⇤2 ]. This posterior and thus also L1 depends on X1 and f (X1).
+
+3
+
+Following the derivation of the expected improvement Jones et al. [1998]  we rewrite this as
+L1 = min
+x22A
+
+E1⇥f⇤1  (f⇤1  f (x2))+⇤ = f⇤1  max
+
+E1⇥(f⇤1  f (x2))+⇤ = f⇤1  max
+
+where y+ = max(y  0) is the positive part function and EI1(x) is the expected improvement under
+the GP after the ﬁrst evaluation has been performed:
+
+EI1(x2) 
+
+x22A
+
+x22A
+
+EI1(x) = EI(f⇤1  µ1(x2)  K1(x2  x2)).
+
+(2)
+Here EI(m  v) = m(m/pv) + pv'(m/pv) gives the expected improvement at a point where the
+difference between the best observed point and the mean is m and the variance is v.  is the standard
+normal cdf and ' is the standard normal pdf.
+With this expression for the value achievable at the start of the second stage  the expected value
+achieved at the start of the ﬁrst stage is:
+
+E0 [L1] = E0f⇤1  max
+
+x22A
+
+EI1(x2) = E0f⇤0  (f⇤0  min f (X1))+  max
+
+x22A
+
+EI1(x2)
+
+= f⇤0  EI0(X1)  E0max
+
+x22A
+
+EI1(x2)  
+
+(3)
+
+(4)
+
+where EI0(X1) = E0 [(f⇤0  min f (X1))+] is the multipoints expected improvement [Ginsbourger
+et al.  2010] under the GP with mean µ0 and kernel K0.
+We deﬁne our two-step acquistion function to be
+
+2-OPT(X1) = EI0(X1) + E0 max
+
+x22A()
+
+EI1(x2)  
+
+where A() is a set similar to A deﬁned below. Because f⇤0 does not depend on X1  ﬁnding the X1
+that minimizes (3) is equivalent to ﬁnding the value that maximizes (4) (when A = A()). In the
+deﬁnition of 2-OPT  we emphasize that E0⇥maxx22A() EI1(x2)⇤ depends on X1 through the fact
+that f (X1) inﬂuences the mean function µ1 and kernel K1 from which EI1 is computed.
+We deﬁne A() to be a compact set of points in A separated by at least  from all points in X1 and
+those with K0(x) = 0. 2-OPT(X1) means 2-OPT(X1) with  = 0  i.e.  with A = A(). The
+parameter   0 is introduced purely to overcome a technical hurdle in our theoretical result and we
+believe in practice it can be set to 0. Indeed  the theory allows setting  to an extremely small value 
+such as 105  and the maximum of EI1(x2) over x2 2A is seldom this close to a point in X1: the
+posterior variance vanishes at points in X1 and EI1(x2) increases as x2 moves away from them.
+Figure 1 illustrates 2-OPT’s behavior and shows how it explores more than EI.
+
+2.3 Monte Carlo estimation of 2-OPT(·)
+2-OPT(X1) cannot be computed in closed form. We can  however  estimate it using Monte Carlo.
+We ﬁrst use the reparameterization trick [Wilson et al.  2018] to write f (X1) as µ0(X1) + C0(X1)Z 
+where Z is a q-dimensional independent standard normal random variable and C0(X1) is the Cholesky
+decomposition of K0(X1  X1).
+We assume that K0(X1  X1) is positive deﬁnite so C0(X1) is of full rank.
+Then  under (1)  for generic x 
+
+µ1(x) = µ0(x) + K0(x  X1)K0(X1  X1)1(f (X1)  µ0(X1))
+
+= µ0(x) + K0(x  X1)(C0(X1)C0(X1)T )1C0(X1)Z
+= µ0(x) + 0(x  X1)Z
+
+K1(x  x) = K0(x)  K0(x  X1)K0(X1  X1)1K(X1  x)
+
+= K0(x)  K0(x  X1)(C0(X1)C0(X1)T )1K(X1  x)
+= K0(x)  0(x  X1)0(x  X1)T .
+
+4
+
+Figure 1: We demonstrate 2-OPT and EI minimizing a 1-d synthetic function sampled from a GP. Each row
+shows the posterior on f (mean +/ one standard deviation) and the corresponding acquisition function  for EI
+(left) and 2-OPT (right). We plot progress over three iterations. On the ﬁrst iteration  EI evaluates a point that
+reﬁnes an existing local optimum and could have provided a small one-step improvement  but provides little
+information of use in future evaluations. In contrast  2-OPT explores more aggressively  which helps it identify a
+new global minimum in the next iteration.
+
+where 0(x  X1) = K0(x  X1)C0(X1)1.
+With this notation  we can write EI1(x2) explicitly as
+EI1(x2) = EI1(X1  x2  Z) := EI(f⇤1  µ0(x2) 0(x2  X1)Z  K0(x2) 0(x2  X1)0(x2  X1)T )
+where we have introduced more explicitly in expanded notation EI1(X1  x2  Z) the quantities on
+which EI1(x2) depends  and written it explicitly in terms of the function EI(m  v).
+Thus  we can rewrite the 2-OPT acquisition function as 2-OPT(X1) = E0[\2-OPT(X1  Z)] where
+
+\2-OPT(X1  Z) = (f⇤0  min f (X1))+ + max
+x22A()
+
+EI1(x2)
+
+= max(f⇤0  µ0(X1)  C0(X1)Z)+ + max
+x22A()
+
+EI1(X1  x2  Z) 
+
+where max(y)+ is the largest non-negative component of y  or 0 if all components are negative.
+Then  to estimate 2-OPT(X1)  we sample Z and compute \2-OPT(X1  Z) using a nonlinear global
+optimization routine to calculate the inner maximization. Averaging many such replications provides
+a strongly consistent estimate of 2-OPT(X1).
+Previous approaches [Osborne et al.  2009  Ginsbourger and Riche  2010  González et al.  2016]
+use this or a similar simulation method to obtain an estimator of 2-OPT  and then use this estimator
+within a derivative-free optimization approach. This requires extensive computation because:
+
+1. The nested optimization over x2 is time-consuming and must be done for each simulation.
+2. Noise in the simulation requires either a noise-tolerant derivative-free optimization method
+that would typically require more iterations  or requires that the simulation be averaged over
+enough replications on each iteration to make noise negligible. This increases the number of
+simulations required to optimize accurately.
+
+3. It does not leverage derivative information  causing optimization to require more iterations 
+
+especially as the dimension d of the search space or the batch size q grows.
+
+3 Efﬁciently Optimizing 2-OPT
+
+Here we describe a novel computational approach to optimizing 2-OPT that is substantially more
+efﬁcient than previously proposed methods. Our approach includes two components: a novel
+simulation-based stochastic gradient estimator  which can be used within multistart stochastic gradient
+ascent; and variance reduction techniques that reduce the variance of this stochastic gradient estimator.
+
+5
+
+3.1 Estimation of the Gradient of 2-OPT
+
+We now show how to obtain an approximately unbiased estimator of the gradient of 2-OPT(X1).
+The main idea is to exchange the expectation and gradient operators when taking the gradient with
+respect to X1 
+
+r2-OPT(X1) = E0hr\2-OPT(X1  Z)i
+
+EI1(X1  x2  Z)
+= E0r max(f⇤0  µ0(X1)  C0(X1)Z)+ + r max
+= E0⇥r max(f⇤0  µ0(X1)  C0(X1)Z)+ + rEI1(X1  x⇤2  Z)⇤
+where x⇤2 2 arg maxx22A() EI1(X1  x2  Z) is ﬁxed and the last equation follows under some
+regularity conditions by the envelope theorem [Milgrom and Segal  2002]. The following theorem
+shows this estimator of r2-OPT(X1) is unbiased. Its proof is in the supplement.
+Theorem 1. We assume:
+
+x22A()
+
+• The domain A() is nonempty and compact and > 0.
+• The mean function µ0 and kernel K0 are continuously differentiable.
+• The kernel K0 is non-degenerate  in the sense that the posterior variance  K1(x  x)  at a
+point is non-zero if the prior variance  K0(x  x)  is strictly positive and that point has not
+been sampled (x is not in X1).
+
+Let x⇤2 be a global maximizer in A() of EI1(X1  x2  Z). Then 
+
+g(X1  Z) := r max(f⇤0  µ0(X1)  C0(X1)Z)+ + rEI1(X1  x⇤2  Z)
+
+(5)
+exists almost surely and is an unbiased estimator of r2-OPT(X1)  where the gradient is taken with
+respect to X1 while holding A() ﬁxed.
+
+We then use this stochastic gradient estimator within stochastic gradient ascent [Kushner and Yin 
+2003] with multiple restarts to ﬁnd a collection of stationary points X1 (each X1 is a single point in
+Rd if q = 1 or a collection of q points in Rd if q > 1). We use Monte Carlo to evaluate 2-OPT(X1)
+for each of these stationary points and select as our approximate maximizer of 2-OPT the point or
+batch of points with the largest estimated 2-OPT(X1). In practice we perform this procedure using
+ = 0  although Theorem 1 only guarantees an unbiased gradient estimator when > 0.
+
+3.2 Variance reduction
+
+We now describe variance reduction techniques that further improve computation time and accuracy.
+
+Gauss-Hermite Quadrature (fully sequential setting)
+In the fully sequential setting where we
+propose one point at each iteration (q = 1)  we use Gauss-Hermite quadrature [Liu and Pierce  1994]
+to estimate 2-OPT(X1) and its gradient. These quantities are both expectations over the 1-d standard
+Gaussian random variable Z. Gauss-Hermite quadrature estimates the expectation of a random
+i=1 wig(zi) with well-chosen weights wi and locations zi. In
+
+practice  we ﬁnd n = 20 accurately estimates 2-OPT(X1) and its gradient.
+
+variable g(Z) by a weighted sumPn
+
+Importance sampling (batch setting)
+In the batch setting  Gauss-Hermite quadrature scales poorly
+with batch size q since the number of weighted points required grows exponentially with the dimension
+over which we integrate  which is q. In the batch setting  we adopt another variance reduction
+technique: importance sampling [Asmussen and Glynn  2007].
+Recall that our Monte Carlo estimator of 2-OPT and its gradient involve a sampled multipoints EI
+term max(f⇤0  µ0(X1)  C0(X1)Z)+.
+For high-dimensional test functions or after we have many function evaluations  most draws of
+Z result in this multipoints EI term taking a value of 0. This occurs when all components of
+µ0(X1) + C0(X1)Z are larger than f⇤0 . For such Z  the derivative of this immediate improvement
+
+6
+
+term is also 0. Also  for such Z  the second term in our Monte Carlo estimator of 2-OPT and its
+gradient  maxx22A EI1(X1  x2  Z)  also tend to be small and have a small gradient.
+As a result  when calculating the expected value of these samples of 2-OPT or its gradient  we include
+many 0s. This can make the variance of estimators based on averaging these estimators large relative
+to their expected value. This in turn makes gradient-based optimization and comparison using Monte
+Carlo estimates challenging.
+To address this  we simulate Z from a multivariate Gaussian distribution with a larger standard
+deviation v > 1  calling it Zv. This substantially increases the chance that the at least one component
+of µ0(X1) + C0(X1)Z will exceed f⇤0 . We ﬁnd v = 3 works well in test problems.
+To compensate for sampling from a different distribution  we multiply by the likelihood ratio between
+the density for which we wish to calculate the expectation  which is the multivariate standard
+normal density  and the density from which Zv was sampled. Letting '(·; 0  v2I) indicate the q-
+dimensional normal multivariate density with mean 0 and covariance matrix v2I  this likelihood ratio
+is '(Zv; 0  I)/'(Zv; 0  v2I).
+The
+are 
+\2-OPT(X1  Zv)'(Zv; 0  I)/'(Zv; 0  v2I) and g(X1  Zv)'(Zv; 0  I)/'(Zv; 0  v2I).
+
+2-OPT and
+
+respectively 
+
+estimators
+
+of
+
+its
+
+gradients
+
+resulting
+
+unbiased
+
+4 Numerical experiments
+
+We test our algorithms on common synthetic functions and widely-benchmarked real-world problems.
+We compare with acquisition functions widely used in practice including GP-LCB [Srinivas et al. 
+2010]  PI  EI [Snoek et al.  2012] and KG [Wu and Frazier  2016] and multi-step lookahead methods
+from Lam et al. [2016] and González et al. [2016].
+2-OPT is substantially more robust than competing methods  providing performance that is best
+or close to best across essentially all problems  iterations and performance measures. In contrast 
+while other methods like EI and KG sometimes outperform 2-OPT  they also sometimes substantially
+underperform. For example  EI has simple regret two orders of magnitude worse than 2-OPT on
+Hartmann6 and KG is 3 times worse on 10d Rosenbrock.
+Moreover  the computation time of one iteration of 2-OPT is fast enough to be practical  varying from
+seconds to several minutes on a single core in all our experiments  and can be easily parallelized across
+cores. This is approximately an order of magnitude faster than the benchmark multi-step lookahead
+methods. 2-OPT’s strong empirical performance together with a supporting fast computational
+method unlocks the value of two-step lookahead in practice.
+
+Experimental details Following Snoek et al. [2012]  we use a constant mean prior and the ARD
+Mat´ern 5/2 kernel. We integrate over GP hyperparameters by sampling 16 sets of values using the
+emcee package [Foreman-Mackey et al.  2013]. We initiate our algorithms by randomly sampling 3
+points from a Latin hypercube design and then start the Bayesian optimization iterative process. We
+use 100 random initializations in the synthetic and real functions experiments  40 in the comparisons
+to multi-step lookahead methods (replicating the experiment setup of Lam et al. [2016])  and 10 for
+comparisons of computation time.
+Synthetic functions  compared with one-step methods. First  we test 2-OPT and benchmark
+methods on 6 well-known synthetic test functions chosen from Bingham [2015] ranging from 2d to
+10d: 2d Branin  2d Camel  5d Ackley5  6d Hartmann6  8d Cosine and 10d Levy. Figure 2 shows the
+90% quantile of the log immediate regret for 6 of these 8 benchmarks. Figure 5 in the supplement
+reports the mean of the base 10 logarithm of the immediate regret (plus or minus one standard error)
+on these functions along with two more added in the author response period: 2d Michalewicz and
+10d Rosenbrock.
+Synthetic functions  compared with multi-step methods. To compare with non-myopic algorithms
+proposed in González et al. [2016] and Lam et al. [2016]  we replicate the experimental settings in
+Lam et al. [2016] and add 2-OPT’s performance to their Table 2. We report the results in Table 1.
+GLASSES was proposed in González et al. [2016] and the four columns R-4-9  R-4-10  R-5-9  and
+R-5-10 are algorithm variants proposed in Lam et al. [2016].
+
+7
+
+Figure 2: Synthetic test functions  90% quantile of log10 immediate regret compared with common
+one-step heuristics. 2-OPT provides substantially more robust performance.
+
+Figure 3: Realistic benchmarks: HPOlib (top): 2-OPT is competitive with the best of the competitors
+in each benchmark. ATO (bottom left): 2-OPT outperforms EI slightly and clearly outperforms KG.
+All algorithms converge to nearly the same performance. Robot Pushing: 2-OPT slightly outperforms
+PES and clearly outperforms EI and KG.
+
+8
+
+020406080100120functiRn evals3456789SimSle Regret14d RRbRtEIKG3E62-237Function name
+Branin-Hoo
+
+PI
+Mean
+.847 .818 .848 .861 .846
+Median .922 .909 .910 .983 .909
+.873 .866 .733 .819 .782
+Median .983 .981 .899 .987 .919
+.827 .884 .913 .972 1.02
+Mean
+Median .904 .953 .970 .987 1.02
+.850 .887 .817 .664 .776
+Median .893 .970 .915 .801 .941
+
+EI UCB PES GLASSES R-4-9 R-4-10 R-5-9 R-5-10 2-OPT
+.9995
+.9994
+.9651
+.9911
+.9321
+.9801
+.9010
+.9651
+
+.904 .898
+.959 .943
+.895 .784
+.991 .985
+.882 .885
+.967 .962
+.860 .825
+.926 .900
+
+.887 .903
+.921 .950
+.861 .743
+.989 .928
+.930 .867
+.960 .954
+.793 .803
+.941 .907
+
+Goldstein-Price Mean
+
+Griewank
+
+6-hump Camel Mean
+
+Table 1: Performance of our two-step acquisition fuction (2-OPT) on test functions compared
+with non-myopic and other benchmark algorithms originally reported in Lam et al. [2016]. Each
+value reported is the “gap”: the ratio of the overall improvement obtained by the algorithm to the
+improvement possible by a globally optimal solution. A gap of 1 represents ﬁnding the optimal
+solution; 0 represents no improvement in solution quality. The best gap appears in boldface.
+
+Values reported are the “gap“ [Huang et al.  2006]  which is the ratio of the improvement obtained
+by an algorithm to the improvement possible by a globally optimal solution. Letting ˆxN be the
+best solution found by the algorithm and ˆx0 be the best solution found in the initial stage  the gap
+is G = (f (ˆx0)  f (ˆxN ))/(f (ˆx0)  minx f (x)). A gap of 1 indicates that the algorithm found a
+globally optimal solution  while 0 indicates no improvement.
+2-OPT is best in 5 out of 8 problems (tied for best on one of these problems)  and second-best in the
+remaining 3. It outperforms or ties the non-myopic competitiors on all problem instances.
+In the supplement Figure 4 shows the time required for acquisition function optimization on 1
+core from a AWS t2.2xlarge instance for 2-OPT  EI  KG  and GLASSES. Time for other problems
+is similar  with higher-dimensional problems requiring more time. 2-OPT’s computation time is
+comparable to KG  about 10 times slower than EI  and about 10 times faster than GLASSES. Code
+from Lam et al. [2016] was unavailable when these experiments were performed  but Lam [2018]
+reports that the time required is between 10 minutes and 1 hour  even on low-dimensional problems.
+
+Realistic benchmarks Figure 3 shows performance on a collection of more realistic benchmarks 
+HPOlib  ATO  and Robot Pushing.
+The HPOlib library was developed in Eggensperger et al. [2013] based on hyperparameter tuning
+benchmarks from Snoek et al. [2012]. We benchmark on the two most widely used test problems
+there: logistic regression and SVM. On both problems  2-OPT performs comparably to the best of
+the competitors  with 2-OPT and EI slightly outperforming KG on logistic regression.
+The assemble-to-order (ATO) benchmark [Hong and Nelson  2006  Poloczek et al.  2017] is a
+reinforcement learning problem with a parameterized control policy where the goal is to optimize
+an 8-dimensional inventory target vector to maximize proﬁt in a business setting. 2-OPT provides a
+substantial beneﬁt over competitors from the start and remains best over the whole process. After
+40 iterations  EI catches 2-OPT  while KG lags both EI and 2-OPT until iteration ˜100 where all the
+algorithms converge with comparable performance.
+The robot pushing problem is a 14-dimensional reinforcement learning problem considered in Wang
+and Jegelka [2017]. 2-OPT outperforms all the competitors on this benchmark.
+
+5 Conclusions
+
+In this article  we propose the ﬁrst computationally efﬁcient two-step lookahead BayesOpt algorithm.
+The algorithm comes in both sequential and batch forms  and reduces the computational time
+compared to previous proposals with increased performance. In experiments  we ﬁnd that two-step
+lookahead provides additional value compared to several one-step lookahead heuristics.
+
+2Lam et al. [2016] reports that GLASSES achieves gap=1 on Griewank because it arbitrarily evaluates at the
+
+origin  which happens to be a global minimizer. Following Lam et al. [2016]  we exclude these results.
+
+9
+
+References
+S. Asmussen and P. W. Glynn. Stochastic simulation: algorithms and analysis  volume 57. Springer
+
+Science & Business Media  2007.
+
+D. Bingham. Optimization test problems. http://www.sfu.ca/~ssurjano/optimization.
+
+html  2015.
+
+E. Brochu  V. M. Cora  and N. De Freitas. A tutorial on Bayesian optimization of expensive cost
+functions  with application to active user modeling and hierarchical reinforcement learning. arXiv
+preprint arXiv:1012.2599  2010.
+
+K. Eggensperger  M. Feurer  F. Hutter  J. Bergstra  J. Snoek  H. Hoos  and K. Leyton-Brown. Towards
+an empirical foundation for assessing bayesian optimization of hyperparameters. In NIPS workshop
+on Bayesian Optimization in Theory and Practice  volume 10  page 3  2013.
+
+D. Foreman-Mackey  D. W. Hogg  D. Lang  and J. Goodman. emcee: the mcmc hammer. Publications
+
+of the Astronomical Society of the Paciﬁc  125(925):306  2013.
+
+A. Forrester  A. Sobester  and A. Keane. Engineering design via surrogate modelling: a practical
+
+guide. John Wiley & Sons  2008.
+
+P. I. Frazier. A tutorial on Bayesian optimization. arXiv preprint arXiv:1807.02811  2018.
+
+D. Ginsbourger and R. Riche. Towards gaussian process-based optimization with ﬁnite time horizon.
+
+mODa 9–Advances in Model-Oriented Design and Analysis  pages 89–96  2010.
+
+D. Ginsbourger  R. Le Riche  and L. Carraro. Kriging is well-suited to parallelize optimization. In
+Computational Intelligence in Expensive Optimization Problems  pages 131–162. Springer  2010.
+
+J. González  M. Osborne  and N. Lawrence. Glasses: Relieving the myopia of Bayesian optimisation.
+
+In Artiﬁcial Intelligence and Statistics  pages 790–799  2016.
+
+P. Heidelberger  X.-R. Cao  M. A. Zazanis  and R. Suri. Convergence properties of inﬁnitesimal
+
+perturbation analysis estimates. Management Science  34(11):1281–1302  1988.
+
+J. M. Hernández-Lobato  M. W. Hoffman  and Z. Ghahramani. Predictive entropy search for efﬁcient
+global optimization of black-box functions. In Advances in Neural Information Processing Systems 
+pages 918–926  2014.
+
+L. J. Hong and B. L. Nelson. Discrete optimization via simulation using compass. Operations
+
+Research  54(1):115–129  2006.
+
+D. Huang  T. T. Allen  W. I. Notz  and N. Zeng. Global optimization of stochastic black-box systems
+
+via sequential kriging meta-models. Journal of global optimization  34(3):441–466  2006.
+
+D. R. Jones  M. Schonlau  and W. J. Welch. Efﬁcient global optimization of expensive black-box
+
+functions. Journal of Global optimization  13(4):455–492  1998.
+
+H. Kushner and G. G. Yin. Stochastic approximation and recursive algorithms and applications 
+
+volume 35. Springer Science & Business Media  2003.
+
+H. J. Kushner. A new method of locating the maximum point of an arbitrary multipeak curve in the
+
+presence of noise. Journal of Fluids Engineering  86(1):97–106  1964.
+
+R. Lam. Personal communication  2018.
+
+R. Lam  K. Willcox  and D. H. Wolpert. Bayesian optimization with a ﬁnite budget: An approximate
+dynamic programming approach. In Advances in Neural Information Processing Systems  pages
+883–891  2016.
+
+P. L’Ecuyer. A uniﬁed view of the IPA  SF  and LR gradient estimation techniques. Management
+
+Science  36(11):1364–1383  1990.
+
+Q. Liu and D. A. Pierce. A note on Gauss–Hermite quadrature. Biometrika  81(3):624–629  1994.
+
+10
+
+P. Milgrom and I. Segal. Envelope theorems for arbitrary choice sets. Econometrica  70(2):583–601 
+
+2002.
+
+M. A. Osborne  R. Garnett  and S. J. Roberts. Gaussian processes for global optimization. In 3rd
+international conference on learning and intelligent optimization (LION3)  pages 1–15. Citeseer 
+2009.
+
+M. Poloczek  J. Wang  and P. I. Frazier. Multi-information source optimization. In Advances in
+
+Neural Information Processing Systems  2017. ArXiv preprint 1603.00389.
+
+W. B. Powell. Approximate Dynamic Programming: Solving the curses of dimensionality  volume
+
+703. John Wiley & Sons  2007.
+
+C. E. Rasmussen and C. K. I. Williams. Gaussian Processes for Machine Learning. MIT Press  2006.
+
+ISBN ISBN 0-262-18253-X.
+
+S. P. Smith. Differentiation of the cholesky algorithm. Journal of Computational and Graphical
+
+Statistics  4(2):134 – 147  1995.
+
+J. Snoek  H. Larochelle  and R. P. Adams. Practical bayesian optimization of machine learning
+
+algorithms. In Advances in neural information processing systems  pages 2951–2959  2012.
+
+N. Srinivas  A. Krause  M. Seeger  and S. M. Kakade. Gaussian process optimization in the bandit
+
+setting: No regret and experimental design. In ICML  pages 1015–1022  2010.
+
+B. S. Thomson  J. B. Bruckner  and A. M. Bruckner. Elementary real analysis. ClassicalRealAnaly-
+
+sis.com  2008.
+
+J. Wang  S. C. Clark  E. Liu  and P. I. Frazier. Parallel Bayesian global optimization of expensive
+
+functions. arXiv preprint arXiv:1602.05149  to appear in Operations Research  2016.
+
+Z. Wang and S. Jegelka. Max-value entropy search for efﬁcient Bayesian optimization. In Proceedings
+of the 34th International Conference on Machine Learning-Volume 70  pages 3627–3635. JMLR.
+org  2017.
+
+J. Wilson  F. Hutter  and M. Deisenroth. Maximizing acquisition functions for Bayesian optimization.
+
+In Advances in Neural Information Processing Systems  pages 9884–9895  2018.
+
+J. Wu and P. Frazier. The parallel knowledge gradient method for batch bayesian optimization. In
+
+Advances in Neural Information Processing Systems  pages 3126–3134  2016.
+
+J. Wu  M. Poloczek  A. G. Wilson  and P. I. Frazier. Bayesian optimization with gradients. In
+
+Advances in Neural Information Processing Systems  2017. ArXiv preprint 1703.04389.
+
+11
+
+,Jian Wu
+Peter Frazier

@@ -1,0 +1,907 @@
+2019,DualDICE: Behavior-Agnostic Estimation of Discounted Stationary Distribution Corrections,In many real-world reinforcement learning applications  access to the environment is limited to a fixed dataset  instead of direct (online) interaction with the environment.  When using this data for either evaluation or training of a new policy  accurate estimates of discounted stationary distribution ratios -- correction terms which quantify the likelihood that the new policy will experience a certain state-action pair normalized by the probability with which the state-action pair appears in the dataset -- can improve accuracy and performance. In this work  we propose an algorithm  DualDICE  for estimating these quantities. In contrast to previous approaches  our algorithm is agnostic to knowledge of the behavior policy (or policies) used to generate the dataset. Furthermore  our algorithm eschews any direct use of importance weights  thus avoiding potential optimization instabilities endemic of previous methods. In addition to providing theoretical guarantees  we present an empirical study of our algorithm applied to off-policy policy evaluation and find that our algorithm significantly improves accuracy compared to existing techniques.,DualDICE: Behavior-Agnostic Estimation of
+Discounted Stationary Distribution Corrections
+
+Oﬁr Nachum∗
+
+Yinlam Chow∗
+
+Bo Dai
+
+Lihong Li
+
+{ofirnachum yinlamchow bodai lihong}@google.com
+
+Google Research
+
+Abstract
+
+In many real-world reinforcement learning applications  access to the environ-
+ment is limited to a ﬁxed dataset  instead of direct (online) interaction with the
+environment. When using this data for either evaluation or training of a new pol-
+icy  accurate estimates of discounted stationary distribution ratios — correction
+terms which quantify the likelihood that the new policy will experience a certain
+state-action pair normalized by the probability with which the state-action pair
+appears in the dataset — can improve accuracy and performance. In this work 
+we propose an algorithm  DualDICE  for estimating these quantities. In contrast
+to previous approaches  our algorithm is agnostic to knowledge of the behavior
+policy (or policies) used to generate the dataset. Furthermore  it eschews any
+direct use of importance weights  thus avoiding potential optimization instabilities
+endemic of previous methods. In addition to providing theoretical guarantees  we
+present an empirical study of our algorithm applied to off-policy policy evaluation
+and ﬁnd that our algorithm signiﬁcantly improves accuracy compared to existing
+techniques.1
+
+Introduction
+
+1
+Reinforcement learning (RL) has recently demonstrated a number of successes in various domains 
+such as games [25]  robotics [1]  and conversational systems [11  18]. These successes have often
+hinged on the use of simulators to provide large amounts of experience necessary for RL algorithms.
+While this is reasonable in game environments  where the game is often a simulator itself  and some
+simple real-world tasks can be simulated to an accurate enough degree  in general one does not have
+such direct or easy access to the environment. Furthermore  in many real-world domains such as
+medicine [26]  recommendation [19]  and education [24]  the deployment of a new policy  even just
+for the sake of performance evaluation  may be expensive and risky. In these applications  access
+to the environment is usually in the form of off-policy data [39]  logged experience collected by
+potentially multiple and possibly unknown behavior policies.
+State-of-the-art methods which consider this more realistic setting — either for policy evaluation
+or policy improvement — often rely on estimating (discounted) stationary distribution ratios or
+corrections. For each state and action in the environment  these quantities measure the likelihood
+that one’s current target policy will experience the state-action pair normalized by the probability
+with which the state-action pair appears in the off-policy data. Proper estimation of these ratios can
+improve the accuracy of policy evaluation [21] and the stability of policy learning [12  14  22  40]. In
+general  these ratios are difﬁcult to compute  let alone estimate  as they rely not only on the probability
+that the target policy will take the desired action at the relevant state  but also on the probability that
+the target policy’s interactions with the environment dynamics will lead it to the relevant state.
+
+∗Equal contribution.
+1Find code at https://github.com/google-research/google-research/tree/master/dual_dice.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+Several methods to estimate these ratios have been proposed recently [12  14  21]  all based on the
+steady-state property of stationary distributions of Markov processes [15]. This property may be
+expressed locally with respect to state-action-next-state tuples  and is therefore amenable to stochastic
+optimization algorithms. However  these methods possess several issues when applied in practice:
+First  these methods require knowledge of the probability distribution used for each sampled action
+appearing in the off-policy data. In practice  these probabilities are usually not known and difﬁcult
+to estimate  especially in the case of multiple  non-Markovian behavior policies. Second  the loss
+functions of these algorithms involve per-step importance ratios (the ratio of action sample probability
+with respect to the target policy versus the behavior policy). Depending on how far the behavior
+policy is from the target policy  these quantities may have large variance  and thus have a detrimental
+effect on stochastic optimization algorithms.
+In this work  we propose Dual stationary DIstribution Correction Estimation (DualDICE)  a new
+method for estimating discounted stationary distribution ratios. It is agnostic to the number or type
+of behavior policies used for collecting the off-policy data. Moreover  the objective function of
+our algorithm does not involve any per-step importance ratios  and so our solution is less likely to
+be affected by their high variance. We provide theoretical guarantees on the convergence of our
+algorithm and evaluate it on a number of off-policy policy evaluation benchmarks. We ﬁnd that
+DualDICE can consistently  and often signiﬁcantly  improve performance compared to previous
+algorithms for estimating stationary distribution ratios.
+2 Background
+We consider a Markov Decision Process (MDP) setting [32]  in which the environment is speciﬁed
+by a tuple M = (cid:104)S  A  R  T  β(cid:105)  consisting of a state space  an action space  a reward function 
+a transition probability function  and an initial state distribution. A policy π interacts with the
+environment iteratively  starting with an initial state s0 ∼ β. At step t = 0  1 ···   the policy produces
+a distribution π(·|st) over the actions A  from which an action at is sampled and applied to the
+environment. The environment stochastically produces a scalar reward rt ∼ R(st  at) and a next
+state st+1 ∼ T (st  at). In this work  we consider inﬁnite-horizon environments and the γ-discounted
+reward criterion for γ ∈ [0  1). It is clear that any ﬁnite-horizon environment may be interpreted
+as inﬁnite-horizon by considering an augmented state space with an extra terminal state which
+continually loops onto itself with zero reward.
+
+2.1 Off-Policy Policy Evaluation
+
+Given a target policy π  we are interested in estimating its value  deﬁned as the normalized expected
+per-step reward obtained by following the policy:
+
+t=0 γtrt | s0 ∼ β ∀t  at ∼ π(st)  rt ∼ R(st  at)  st+1 ∼ T (st  at)(cid:3).
+
+ρ(π) := (1 − γ) · E(cid:2)(cid:80)∞
+
+(1)
+
+The off-policy policy evaluation (OPE) problem studied here is to estimate ρ(π) using a ﬁxed set
+D of transitions (s  a  r  s(cid:48)) sampled in a certain way. This is a very general scenario: D can be
+collected by a single behavior policy (as in most previous work)  multiple behavior policies  or an
+oracle sampler  among others. In the special case where D contains entire trajectories collected by
+a known behavior policy µ  one may use importance sampling (IS) to estimate ρ(π). Speciﬁcally 
+given a ﬁnite-length trajectory τ = (s0  a0  r0  . . .   sH ) collected by µ  the IS estimate of ρ based
+on τ is estimated by [31]: (1 − γ)
+. Although many improvements
+exist [e.g.  9  16  31  43]  importance-weighting the entire trajectory can suffer from exponentially
+high variance  which is known as “the curse of horizon” [20  21].
+To avoid exponential dependence on trajectory length  one may weight the states by their long-term
+occupancy measure. First  observe that the policy value may be re-expressed as 
+
+(cid:17)(cid:16)(cid:80)H−1
+
+(cid:16)(cid:81)H−1
+
+π(at|st)
+µ(at|st)
+
+t=0 γtrt
+
+(cid:17)
+
+t=0
+
+ρ(π) = E(s a)∼dπ r∼R(s a)[r]  
+
+where
+
+dπ(s  a) := (1 − γ)(cid:80)∞
+
+t=0 γt Pr (st = s  at = a | s0 ∼ β ∀t  at ∼ π(st)  st+1 ∼ T (st  at))  
+
+(2)
+
+is the normalized discounted stationary distribution over state-actions with respect to π. One may
+deﬁne the discounted stationary distribution over states analogously  and we slightly abuse notation
+
+2
+
+by denoting it as dπ(s); note that dπ(s  a) = dπ(s)π(a|s). If D consists of trajectories collected by a
+behavior policy µ  then the policy value may be estimated as 
+
+ρ(π) = E(s a)∼dµ r∼R(s a)
+
+(cid:2)wπ/µ(s  a) · r(cid:3)  
+
+where wπ/µ(s  a) = dπ(s a)
+is in estimating these correction terms using data drawn from dµ.
+
+dµ(s a) is the discounted stationary distribution correction. The key challenge
+
+2.2 Learning Stationary Distribution Corrections
+
+We provide a brief summary of previous methods for estimating the stationary distribution corrections.
+(cid:80)
+The ones that are most relevant to our work are a suite of recent techniques [12  14  21]  which are all
+essentially based on the following steady-state property of stationary Markov processes:
+a∈A dπ(s)π(a|s)T (s(cid:48)|s  a)  ∀s(cid:48) ∈ S 
+
+dπ(s(cid:48)) = (1 − γ)β(s(cid:48)) + γ(cid:80)
+
+s∈S
+
+E(st at st+1)∼dµ
+
+(3)
+where we have simpliﬁed the identity by restricting to discrete state and action spaces. This identity
+simply reﬂects the conservation of ﬂow of the stationary distribution: At each timestep  the ﬂow out
+of s(cid:48) (the LHS) must equal the ﬂow into s(cid:48) (the RHS). Given a behavior policy µ  equation 3 can be
+equivalently rewritten in terms of the stationary distribution corrections  i.e.  for any given s(cid:48) ∈ S 
+(4)
+
+(cid:2)TD(st  at  st+1 | wπ/µ)(cid:12)(cid:12) st+1 = s(cid:48)(cid:3) = 0  
+TD(s  a  s(cid:48) | wπ/µ) := −wπ/µ(s(cid:48)) + (1 − γ)β(s(cid:48)) + γwπ/µ(s) · π(a|s)
+µ(a|s)
+
+provided that µ(a|s) > 0 whenever π(a|s) > 0. The quantity TD can be viewed as a temporal differ-
+ence associated with wπ/µ. Accordingly  previous works optimize loss functions which minimize
+this TD error using samples from dµ. We emphasize that although wπ/µ is associated with a temporal
+difference  it does not satisfy a Bellman recurrence in the usual sense [2]. Indeed  note that equation 3
+is written “backwards”: The occupancy measure of a state s(cid:48) is written as a (discounted) function of
+previous states  as opposed to vice-versa. This will serve as a key differentiator between our algorithm
+and these previous methods.
+
+where
+
+ 
+
+2.3 Off-Policy Estimation with Multiple Unknown Behavior Policies
+
+While the previous algorithms are promising  they have several limitations when applied in practice:
+• The off-policy experience distribution dµ is with respect to a single  Markovian behavior policy µ 
+and this policy must be known during optimization.2 In practice  off-policy data often comes from
+multiple  unknown behavior policies.
+• Computing the TD error in equation 4 requires the use of per-step importance ratios
+π(at|st)/µ(at|st) at every state-action sample (st  at). Depending on how far the behavior policy
+is from the target policy  these quantities may have high variance  which can have a detrimental
+effect on the convergence of any stochastic optimization algorithm that is used to estimate wπ/µ.
+The method we derive below will be free of the aforementioned issues  avoiding unnecessary
+requirements on the form of the off-policy data collection as well as explicit uses of importance
+ratios. Rather  we consider the general setting where D consists of transitions sampled in an unknown
+fashion. Since D contains rewards and next states  we will often slightly abuse notation and write not
+only (s  a) ∼ dD but also (s  a  r) ∼ dD and (s  a  s(cid:48)) ∼ dD  where the notation dD emphasizes that 
+unlike previously  D is not the result of a single  known behavior policy. The target policy’s value
+can be equivalently written as 
+
+ρ(π) = E(s a r)∼dD(cid:2)wπ/D(s  a) · r(cid:3)  
+
+(5)
+where the correction terms are given by wπ/D(s  a) := dπ(s a)
+dD(s a)  and our algorithm will focus on
+estimating these correction terms. Rather than relying on the assumption that D is the result of a
+single  known behavior policy  we instead make the following regularity assumption:
+Assumption 1 (Reference distribution property). For any (s  a)  dπ(s  a) > 0 implies dD(s  a) > 0.
+
+Furthermore  the correction terms are bounded by some ﬁnite constant C:(cid:13)(cid:13)wπ/D(cid:13)(cid:13)∞ ≤ C.
+
+2The Markovian requirement is necessary for TD methods. However  notably  IS methods do not depend on
+
+this assumption.
+
+3
+
+1
+2
+
+3 DualDICE
+We now develop our algorithm  DualDICE  for estimating the discounted stationary distribution
+corrections wπ/D(s  a) = dπ(s a)
+dD(s a). In the OPE setting  one does not have explicit knowledge of
+the distribution dD  but rather only access to samples D = {(s  a  r  s(cid:48))} ∼ dD. Similar to the TD
+methods described above  we also assume access to samples from the initial state distribution β. We
+begin by introducing a key result  which we will later derive and use as the crux for our algorithm.
+3.1 The Key Idea
+Consider optimizing a (bounded) function ν : S × A → R for the following objective:
+
+E(s a)∼dD(cid:2)(ν − Bπν) (s  a)2(cid:3) − (1 − γ) Es0∼β a0∼π(s0) [ν(s0  a0)]  
+
+(6)
+where we use Bπ to denote the expected Bellman operator with respect to policy π and zero reward:
+Bπν(s  a) = γEs(cid:48)∼T (s a) a(cid:48)∼π(s(cid:48))[ν(s(cid:48)  a(cid:48))]. The ﬁrst term in equation 6 is the expected squared
+Bellman error with zero reward. This term alone would lead to a trivial solution ν∗ ≡ 0  which can
+be avoided by the second term that encourages ν∗ > 0. Together  these two terms result in an optimal
+ν∗ that places some non-zero amount of Bellman residual at state-action pairs sampled from dD.
+Perhaps surprisingly  as we will show  the Bellman residuals of ν∗ are exactly the desired distribution
+corrections:
+
+ν:S×A→R J(ν) :=
+
+min
+
+(ν∗ − Bπν∗) (s  a) = wπ/D(s  a).
+
+(7)
+This key result provides the foundation for our algorithm  since it provides us with a simple objective
+(relying only on samples from dD  β  π) which we may optimize in order to obtain estimates of the
+distribution corrections. In the text below  we will show how we arrive at this result. We provide one
+additional step which allows us to efﬁciently learn a parameterized ν with respect to equation 6. We
+then generalize our results to a family of similar algorithms and lastly present theoretical guarantees.
+3.2 Derivation
+A Technical Observation We begin our derivation of the algorithm for estimating wπ/D by pre-
+senting the following simple technical observation: For arbitrary scalars m ∈ R>0  n ∈ R≥0  the
+optimizer of the convex problem minx J(x) := 1
+m. Using
+this observation  and letting C be some bounded subset of R which contains [0  C]  one immediately
+sees that the optimizer of the following problem 
+
+2 mx2 − nx is unique and given by x∗ = n
+
+E(s a)∼dD(cid:2)x(s  a)2(cid:3) − E(s a)∼dπ [x(s  a)]  
+
+1
+2
+
+min
+
+x:S×A→C J1(x) :=
+
+(8)
+is given by x∗(s  a) = wπ/D(s  a) for any (s  a) ∈ S × A. This result provides us with an objective
+that shares the same basic form as equation 6. The main distinction is that the second term relies on
+an expectation over dπ  which we do not have access to.
+
+Change of Variables
+In order to transform the second expectation in equation 8 to be over the
+initial state distribution β  we perform the following change of variables: Let ν : S × A → R be an
+arbitrary state-action value function that satisﬁes 
+
+ν(s  a) := x(s  a) + γEs(cid:48)∼T (s a) a(cid:48)∼π(s(cid:48))[ν(s(cid:48)  a(cid:48))]  ∀(s  a) ∈ S × A.
+
+(9)
+Since x(s  a) ∈ C is bounded and γ < 1  the variable ν(s  a) is well-deﬁned and bounded. By
+applying this change of variables  the objective function in 8 can be re-written in terms of ν  and this
+yields our previously presented objective from equation 6. Indeed  deﬁne 
+
+βt(s) := Pr (s = st | s0 ∼ β  ak ∼ π(sk)  sk+1 ∼ T (sk  ak) for 0 ≤ k < t)  
+to be the state visitation probability at step t when following π. Clearly  β0 = β. Then 
+
+(cid:2)ν(s  a) − γEs(cid:48)∼T (s a) a(cid:48)∼π(s(cid:48))[ν(s(cid:48)  a(cid:48))](cid:3)
+(cid:2)ν(s  a) − γEs(cid:48)∼T (s a) a(cid:48)∼π(s(cid:48))[ν(s(cid:48)  a(cid:48))](cid:3)
+
+γt+1Es∼βt+1 a∼π(s) [ν(s  a)]
+
+E(s a)∼dπ [x(s  a)] = E(s a)∼dπ
+
+= (1 − γ)
+
+γtEs∼βt a∼π(s)
+
+∞(cid:88)
+∞(cid:88)
+
+t=0
+
+γtEs∼βt a∼π(s) [ν(s  a)] − (1 − γ)
+
+= (1 − γ)
+= (1 − γ)Es∼β a∼π(s) [ν(s  a)] .
+
+t=0
+
+∞(cid:88)
+
+t=0
+
+4
+
+The Bellman residuals of the optimum of this objective give the desired off-policy corrections:
+
+(ν∗ − Bπν∗)(s  a) = x∗(s  a) = wπ/D(s  a).
+
+(10)
+Equation 6 provides a promising approach for estimating the stationary distribution corrections  since
+the ﬁrst expectation is over state-action pairs sampled from dD  while the second expectation is over
+β and actions sampled from π  both of which we have access to. Therefore  in principle we may
+solve this problem with respect to a parameterized value function ν  and then use the optimized ν∗ to
+deduce the corrections. In practice  however  the objective in its current form presents two difﬁculties:
+• The quantity (ν − Bπν)(s  a)2 involves a conditional expectation inside a square. In general 
+when environment dynamics are stochastic and the action space may be large or continuous  this
+quantity may not be readily optimized using standard stochastic techniques. (For example  when
+the environment is stochastic  its Monte-Carlo sample gradient is generally biased.)
+• Even if one has computed the optimal value ν∗  the corrections (ν∗ −Bπν∗)(s  a)  due to the same
+argument as above  may not be easily computed  especially when the environment is stochastic or
+the action space continuous.
+
+Exploiting Fenchel Duality We solve both difﬁculties listed above in one step by exploiting
+Fenchel duality [35]: Any convex function f (x) may be written as f (x) = maxζ x · ζ − f∗(ζ) 
+where f∗ is the Fenchel conjugate of f. In the case of f (x) = 1
+2 x2  the Fenchel conjugate is given
+by f∗(ζ) = 1
+min
+
+2 ζ 2. Thus  we may express our objective as 
+(ν − Bπν) (s  a)· ζ − 1
+2
+
+ν:S×A→R J(ν) := E(s a)∼dD(cid:2) max
+
+ζ
+
+By the interchangeability principle [6  34  36]  we may replace the inner max over scalar ζ to a max
+over functions ζ : S × A → R and obtain a min-max saddle-point optimization:
+
+ζ 2(cid:3)− (1− γ) Es0∼β a0∼π(s0) [ν(s0  a0)] .
+(cid:2)(ν(s  a) − γν(s(cid:48)  a(cid:48)))ζ(s  a) − ζ(s  a)2/2(cid:3)
+
+ν:S×A→R max
+
+ζ:S×A→R J(ν  ζ) := E(s a s(cid:48))∼dD a(cid:48)∼π(s(cid:48))
+
+min
+
+(11)
+Using the KKT condition of the inner optimization problem (which is convex and quadratic in ζ) 
+ν is equal to the Bellman residual  ν − Bπν. Therefore  the desired
+for any ν the optimal value ζ∗
+stationary distribution correction can then be found from the saddle-point solution (ν∗  ζ∗) of the
+minimax problem in equation 11 as follows:
+
+− (1 − γ) Es0∼β a0∼π(s0) [ν(s0  a0)] .
+
+ζ∗(s  a) = (ν∗ − Bπν∗)(s  a) = wπ/D(s  a).
+
+(12)
+Now we ﬁnally have an objective which is well-suited for practical computation. First  unbiased
+estimates of both the objective and its gradients are easy to compute using stochastic samples from
+dD  β  and π  all of which we have access to. Secondly  notice that the min-max objective function
+in equation 11 is linear in ν and concave in ζ. Therefore in certain settings  one can provide guarantees
+on the convergence of optimization algorithms applied to this objective (see Section 3.4). Thirdly 
+the optimizer of the objective in equation 11 immediately gives us the desired stationary distribution
+corrections through the values of ζ∗(s  a)  with no additional computation.
+3.3 Extension to General Convex Functions
+Besides a quadratic penalty function  one may extend the above derivations to a more general class of
+convex penalty functions. Consider a generic convex penalty function f : R → R. Recall that C is a
+bounded subset of R which contains the interval [0  C] of stationary distribution corrections. If C is
+contained in the range of f(cid:48)  then the optimizer of the convex problem  minx J(x) := m · f (x) − n
+m. Analogously  the optimizer x∗ of 
+for n
+(13)
+
+m ∈ C  satisﬁes the following KKT condition: f(cid:48)(x∗) = n
+
+x:S×A→C J1(x) := E(s a)∼dD [f (x(s  a))] − E(s a)∼dπ [x(s  a)]  
+
+min
+
+min
+
+satisﬁes the equality f(cid:48)(x∗(s  a)) = wπ/D(s  a).
+With change of variables ν := x + Bπν  the above problem becomes 
+ν:S×A→R J(ν) := E(s a)∼dD [f ((ν − Bπν) (s  a))] − (1 − γ) Es0∼β a0∼π(s0) [ν(s0  a0)] .
+Applying Fenchel duality to f in this objective further leads to the following saddle-point problem:
+ν:S×A→R max
+
+ζ:S×A→R J(ν  ζ) := E(s a s(cid:48))∼dD a(cid:48)∼π(s(cid:48)) [(ν(s  a) − γν(s(cid:48)  a(cid:48)))ζ(s  a) − f∗(ζ(s  a))]
+− (1 − γ) Es0∼β a0∼π(s0) [ν(s0  a0)] .
+
+min
+
+(14)
+
+(15)
+
+5
+
+ν satisﬁes 
+
+By the KKT condition of the inner optimization problem  for any ν the optimizer ζ∗
+
+f∗(cid:48)(ζ∗
+
+ν (s  a)) = (ν − Bπν)(s  a).
+
+(16)
+Therefore  using the fact that the derivative of a convex function f(cid:48) is the inverse function of the
+derivative of its Fenchel conjugate f∗(cid:48)  our desired stationary distribution corrections are found by
+computing the saddle-point (ζ∗  ν∗) of the above problem:
+
+ζ∗(s  a) = f(cid:48)((ν∗ − Bπν∗)(s  a)) = f(cid:48)(x∗(s  a)) = wπ/D(s  a).
+
+(17)
+Amazingly  despite the generalization beyond the quadratic penalty function f (x) = 1
+2 x2  the
+optimization problem in equation 15 retains all the computational beneﬁts that make this method very
+practical for learning wπ/D(s  a): All quantities and their gradients may be unbiasedly estimated
+from stochastic samples; the objective is linear in ν and concave in ζ  thus is well-behaved; and
+the optimizer of this problem immediately provides the desired stationary distribution corrections
+through the values of ζ∗(s  a)  without any additional computation.
+This generalized derivation also provides insight into the initial technical result: It is now clear
+that the objective in equation 13 is the negative Fenchel dual (variational) form of the Ali-Silvey
+or f-divergence  which has been used in previous work to estimate divergence and data likelihood
+ratios [27]. In the case of f (x) = 1
+2 x2 (equation 8)  this corresponds to a variant of the Pearson
+χ2 divergence. Despite the similar formulations of our work and previous works using the same
+divergences to estimate data likelihood ratios [27]  we emphasize that the aforementioned dual form
+of the f-divergence is not immediately applicable to estimation of off-policy corrections in the context
+of RL  due to the fact that samples from distribution dπ are unobserved. Indeed  our derivations
+hinged on two additional key steps: (1) the change of variables from x to ν := x + Bπν; and (2)
+the second application of duality to introduce ζ. Due to these repeated applications of duality in our
+derivations  we term our method Dual stationary DIstribution Correction Estimation (DualDICE).
+3.4 Theoretical Guarantees
+(cid:9)N
+In this section  we consider the theoretical properties of DualDICE in the setting where we have
+a dataset formed by empirical samples {si  ai  ri  s(cid:48)
+i=1 ∼ β  and target actions
+i ∼ π(s(cid:48)
+a(cid:48)
+0) for i = 1  . . .   N.3 We will use the shorthand notation ˆEdD to denote an
+average over these empirical samples. Although the proposed estimator can adopt general f  for
+2 x2. We consider using an algorithm OP T (e.g. 
+simplicity of exposition we restrict to f (x) = 1
+stochastic gradient descent/ascent) to ﬁnd optimal ν  ζ of equation 15 within some parameterization
+families F H  respectively. We denote by ˆν  ˆζ the outputs of OP T . We have the following guarantee
+on the quality of ˆν  ˆζ with respect to the off-policy policy estimation (OPE) problem.
+Theorem 2. (Informal) Under some mild assumptions  the mean squared error (MSE) associated
+with using ˆν  ˆζ for OPE can be bounded as 
+
+i=1 ∼ dD (cid:8)si
+
+0 ∼ π(si
+
+i}N
+
+i)  ai
+
+(cid:20)(cid:16)ˆEdD
+
+(cid:104)ˆζ (s  a) · r
+
+(cid:17)2(cid:21)
+(cid:105) − ρ(π)
+
+= (cid:101)O(cid:16)
+
+E
+
+(cid:17)
+
+0
+
+approx (F H) + opt + 1√
+
+N
+
+ 
+
+(18)
+
+where the outer expectation is with respect to the randomness of the empirical samples and OP T  
+opt denotes the optimization error  and approx (F H) denotes the approximation error due to F H.
+The sources of estimation error are explicit in Theorem 2. As the number of samples N increases  the
+statistical error N−1/2 approaches zero. Meanwhile  there is an implicit trade-off in approx (F H)
+and opt. With ﬂexible function spaces F and H (such as the space of neural networks)  the
+approximation error can be further decreased; however  optimization will be complicated and it is
+difﬁcult to characterize opt. On the other hand  with linear parameterization of (ν  ζ)  under some
+mild conditions  after T iterations we achieve provably fast rate  O (exp (−T )) for OP T = SVRG
+
+(cid:1) for OP T = SGD  at the cost of potentially increased approximation error. See the
+
+and O(cid:0) 1
+
+Appendix for the precise theoretical results  proofs  and further discussions.
+4 Related Work
+Density Ratio Estimation Density ratio estimation is an important tool for many machine learning
+and statistics problems. Other than the naive approach  (i.e.  the density ratio is calculated via esti-
+mating the densities in the numerator and denominator separately  which may magnify the estimation
+3For the sake of simplicity  we consider the batch learning setting with i.i.d. samples as in [41]. The results
+
+T
+
+can be easily generalized to single sample path with dependent samples (see Appendix).
+
+6
+
+error)  various direct ratio estimators have been proposed [37]  including the moment matching ap-
+proach [13]  probabilistic classiﬁcation approach [3  5  33]  and ratio matching approach [17  27  38]
+The proposed DualDICE algorithm  as a direct approach for density ratio estimation  bears some
+similarities to ratio matching [27]  which is also derived by exploiting the Fenchel dual representation
+of the f-divergences. However  compared to the existing direct estimators  the major difference lies
+in the requirement of the samples from the stationary distribution. Speciﬁcally  the existing estimators
+require access to samples from both dD and dπ  which is impractical in the off-policy learning setting.
+Therefore  DualDICE is uniquely applicable to the more difﬁcult RL setting.
+
+Off-policy Policy Evaluation The problem of off-policy policy evaluation has been heavily studied
+in contextual bandits [8  42  45] and in the more general RL setting [10  16  20  23  28  29  30  43  44].
+Several representative approaches can be identiﬁed in the literature. The Direct Method (DM) learns
+a model of the system and then uses it to estimate the performance of the evaluation policy. This
+approach often has low variance but its bias depends on how well the selected function class can
+express the environment dynamics. Importance sampling (IS) [31] uses importance weights to correct
+the mismatch between the distributions of the system trajectory induced by the target and behavior
+policies. Its variance can be unbounded when there is a big difference between the distributions of
+the evaluation and behavior policies  and grows exponentially with the horizon of the RL problem.
+Doubly Robust (DR) is a combination of DM and IS  and can achieve the low variance of DM and no
+(or low) bias of IS. Other than DM  all the methods described above require knowledge of the policy
+density ratio  and thus the behavior policy. Our proposed algorithm avoids this necessity.
+5 Experiments
+We evaluate our method applied to off-policy policy evaluation (OPE). We focus on this setting
+because it is a direct application of stationary distribution correction estimation  without many
+additional tunable parameters  and it has been previously used as a test-bed for similar techniques [21].
+In each experiment  we use a behavior policy µ to collect some number of trajectories  each for some
+number of steps. This data is used to estimate the stationary distribution corrections  which are then
+used to estimate the average step reward  with respect to a target policy π. We focus our comparisons
+here to a TD-based approach (based on [12]) and weighted step-wise IS (as described in [21])  which
+we and others have generally found to work best relative to common IS variants [24  31]. See the
+Appendix for additional results and implementation details.
+We begin in a controlled setting with an evaluation agnostic to optimization issues  where we ﬁnd
+that  absent these issues  our method is competitive with TD-based approaches (Figure 1). However 
+as we move to more difﬁcult settings with complex environment dynamics  the performance of TD
+methods degrades dramatically  while our method is still able to provide accurate estimates (Figure 2).
+Finally  we provide an analysis of the optimization behavior of our method on a simple control task
+across different choices of function f (Figure 3). Interestingly  although the choice of f (x) = 1
+2 x2 is
+3|x|3/2. All results are
+most natural  we ﬁnd the empirically best performing choice to be f (x) = 2
+summarized for 20 random seeds  with median plotted and error bars at 25th and 75th percentiles.4
+5.1 Estimation Without Function Approximation
+We begin with a tabular task  the Taxi domain [7]. In this task  we evaluate our method in a manner
+agnostic to optimization difﬁculties: The objective 6 is a quadratic equation in ν  and thus may
+be solved by matrix operations. The Bellman residuals (equation 7) may then be estimated via an
+empirical average of the transitions appearing in the off-policy data. In a similar manner  TD methods
+for estimating the correction terms may also be solved using matrix operations [21]. In this controlled
+setting  we ﬁnd that  as expected  TD methods can perform well (Figure 1)  and our method achieves
+competitive performance. As we will see in the following results  the good performance of TD
+methods quickly deteriorates as one moves to more complex settings  while our method is able to
+maintain good performance  even when using function approximation and stochastic optimization.
+5.2 Control Tasks
+We now move on to difﬁcult control tasks: A discrete-control task Cartpole and a continuous-control
+task Reacher [4]. In these tasks  observations are continuous  and thus we use neural network function
+
+4The choice of plotting percentiles is somewhat arbitrary. Plotting mean and standard errors yields similar
+
+plots.
+
+7
+
+# traj = 50
+
+# traj = 100
+
+# traj = 200
+
+# traj = 400
+
+E
+S
+M
+R
+g
+o
+l
+
+trajectory length
+
+Figure 1: We perform OPE on the Taxi domain [7]. The plots show log RMSE of the estimator
+across different numbers of trajectories and different trajectory lengths (x-axis). For this domain 
+we avoid any potential issues in optimization by solving for the optimum of the objectives exactly
+using standard matrix operations. Thus  we are able to see that our method and the TD method are
+competitive with each other.
+
+Cartpole  α = 0
+
+Cartpole  α = 0.33
+
+Cartpole  α = 0.66
+
+Reacher  α = 0
+
+Reacher  α = 0.33
+
+Reacher  α = 0.66
+
+)
+π
+(
+ˆρ
+
+)
+π
+(
+ˆρ
+
+Figure 2: We perform OPE on control tasks. Each plot shows the estimated average step reward over
+training (x-axis is training step) and different behavior policies (higher α corresponds to a behavior
+policy closer to the target policy). We ﬁnd that in all cases  our method is able to approximate these
+desired values well  with accuracy improving with a larger α. On the other hand  the TD method
+performs poorly  even more so when the behavior policy µ is unknown and must be estimated. While
+on Cartpole it can start to approach the desired value for large α  on the more complicated Reacher
+task (which involves continuous actions) its learning is too unstable to learn anything at all.
+
+approximators with stochastic optimization. Figure 2 shows the results of our method compared to
+the TD method. We ﬁnd that in this setting  DualDICE is able to provide good  stable performance 
+while the TD approach suffers from high variance  and this issue is exacerbated when we attempt to
+estimate µ rather than assume it as given. See the Appendix for additional baseline results.
+5.3 Choice of Convex Function f
+We analyze the choice of the convex function f. We consider a simple continuous grid task where an
+agent may move left  right  up  or down and is rewarded for reaching the bottom right corner of a
+square room. We plot the estimation errors of using DualDICE for off-policy policy evaluation on this
+p|x|p. Interestingly 
+task  comparing against different choices of convex functions of the form f (x) = 1
+although the choice of f (x) = 1
+2 x2 is most natural  we ﬁnd the empirically best performing choice to
+be f (x) = 2
+6 Conclusions
+We have presented DualDICE  a method for estimating off-policy stationary distribution corrections.
+Compared to previous work  our method is agnostic to knowledge of the behavior policy used to
+collect the off-policy data and avoids the use of importance weights in its losses. These advantages
+have a profound empirical effect: our method provides signiﬁcantly better estimates compared to TD
+methods  especially in settings which require function approximation and stochastic optimization.
+
+3|x|3/2. Thus  this is the form of f we used in our experiments for Figure 2.
+
+8
+
+50100200400−5−4−3−2−150100200400−5−4−3−250100200400−5−4−3−250100200400−6−5−4−3−2DualDICE(ours)TDIS0500001000001500000.250.500.751.001.251.500500001000001500000.250.500.751.001.251.500500001000001500000.250.500.751.001.251.50050000100000150000−0.4−0.3−0.2−0.10.0050000100000150000−0.4−0.3−0.2−0.10.0050000100000150000−0.4−0.3−0.2−0.10.0DualDICE(ours)TD(knownµ)TD(unknownµ)IS(knownµ)TrueValuetraj length = 50
+
+traj length = 100
+
+traj length = 200
+
+traj length = 400
+
+E
+S
+M
+R
+g
+o
+l
+
+Figure 3: We compare the OPE error when using different forms of f to estimate stationary distri-
+bution ratios with function approximation  which are then applied to OPE on a simple continuous
+grid task. In this setting  optimization stability is crucial  and this heavily depends on the form of
+p|x|p for p ∈ [1.25  1.5  2  3  4]. We also
+the convex function f. We plot the results of using f (x) = 1
+show the results of TD and IS methods on this task for comparison. We ﬁnd that p = 1.5 consistently
+performs the best  often providing signiﬁcantly better results.
+
+Future work includes (1) incorporating the DualDICE algorithm into off-policy training  (2) further
+understanding the effects of f on the performance of DualDICE (in terms of approximation error of
+the distribution corrections)  and (3) evaluating DualDICE on real-world off-policy evaluation tasks.
+
+Acknowledgments
+
+We thank Marc Bellemare  Carles Gelada  and the rest of the Google Brain team for helpful thoughts
+and discussions.
+
+References
+[1] Marcin Andrychowicz  Bowen Baker  Maciek Chociej  Rafal Jozefowicz  Bob McGrew  Jakub
+Pachocki  Arthur Petron  Matthias Plappert  Glenn Powell  Alex Ray  et al. Learning dexterous
+in-hand manipulation. arXiv preprint arXiv:1808.00177  2018.
+
+[2] Richard Ernest Bellman. Dynamic Programming. Dover Publications  Inc.  New York  NY 
+
+USA  2003.
+
+[3] Steffen Bickel  Michael Brückner  and Tobias Scheffer. Discriminative learning for differing
+training and test distributions. In Proceedings of the 24th international conference on Machine
+learning  pages 81–88. ACM  2007.
+
+[4] Greg Brockman  Vicki Cheung  Ludwig Pettersson  Jonas Schneider  John Schulman  Jie Tang 
+
+and Wojciech Zaremba. Openai gym. arXiv preprint arXiv:1606.01540  2016.
+
+[5] Kuang Fu Cheng  Chih-Kang Chu  et al. Semiparametric density estimation under a two-sample
+
+density ratio model. Bernoulli  10(4):583–604  2004.
+
+[6] Bo Dai  Niao He  Yunpeng Pan  Byron Boots  and Le Song. Learning from conditional
+
+distributions via dual embeddings. arXiv preprint arXiv:1607.04579  2016.
+
+[7] Thomas G Dietterich. Hierarchical reinforcement learning with the MAXQ value function
+
+decomposition. Journal of Artiﬁcial Intelligence Research  13:227–303  2000.
+
+[8] Miroslav Dudík  John Langford  and Lihong Li. Doubly robust policy evaluation and learning.
+
+arXiv preprint arXiv:1103.4601  2011.
+
+[9] Mehrdad Farajtabar  Yinlam Chow  and Mohammad Ghavamzadeh. More robust doubly robust
+
+off-policy evaluation. arXiv preprint arXiv:1802.03493  2018.
+
+[10] Raphael Fonteneau  Susan A. Murphy  Louis Wehenkel  and Damien Ernst. Batch mode
+reinforcement learning based on the synthesis of artiﬁcial trajectories. Annals of Operations
+Research  208(1):383–416  2013.
+
+[11] Jianfeng Gao  Michel Galley  and Lihong Li. Neural approaches to Conversational AI. Founda-
+
+tions and Trends in Information Retrieval  13(2–3):127–298  2019.
+
+9
+
+−4−3−2−101−4−3−2−101−4−3−2−101−4−3−2−101p=1.25p=1.5p=2p=3p=4TDIS[12] Carles Gelada and Marc G Bellemare. Off-policy deep reinforcement learning by bootstrapping
+
+the covariate shift. AAAI  2018.
+
+[13] Arthur Gretton  Alex J Smola  Jiayuan Huang  Marcel Schmittfull  Karsten M Borgwardt  and
+Bernhard Schöllkopf. Covariate shift by kernel mean matching. In Dataset shift in machine
+learning  pages 131–160. MIT Press  2009.
+
+[14] Assaf Hallak and Shie Mannor. Consistent on-line off-policy evaluation. In Proceedings of the
+34th International Conference on Machine Learning-Volume 70  pages 1372–1383. JMLR. org 
+2017.
+
+[15] W Keith Hastings. Monte carlo sampling methods using markov chains and their applications.
+
+1970.
+
+[16] Nan Jiang and Lihong Li. Doubly robust off-policy value evaluation for reinforcement learning.
+In Proceedings of the 33rd International Conference on Machine Learning  pages 652–661 
+2016.
+
+[17] Takafumi Kanamori  Shohei Hido  and Masashi Sugiyama. A least-squares approach to direct
+
+importance estimation. Journal of Machine Learning Research  10(Jul):1391–1445  2009.
+
+[18] Jiwei Li  Will Monroe  Alan Ritter  Michel Galley  Jianfeng Gao  and Dan Jurafsky. Deep
+
+reinforcement learning for dialogue generation. arXiv preprint arXiv:1606.01541  2016.
+
+[19] Lihong Li  Wei Chu  John Langford  and Xuanhui Wang. Unbiased ofﬂine evaluation of
+contextual-bandit-based news article recommendation algorithms. In Proceedings of the fourth
+ACM international conference on Web search and data mining  pages 297–306. ACM  2011.
+
+[20] Lihong Li  Rémi Munos  and Csaba Szepesvàri. Toward minimax off-policy value estimation.
+In Proceedings of the 18th International Conference on Artiﬁcial Intelligence and Statistics 
+pages 608–616  2015.
+
+[21] Qiang Liu  Lihong Li  Ziyang Tang  and Dengyong Zhou. Breaking the curse of horizon:
+Inﬁnite-horizon off-policy estimation. In Advances in Neural Information Processing Systems 
+pages 5356–5366  2018.
+
+[22] Yao Liu  Adith Swaminathan  Alekh Agarwal  and Emma Brunskill. Off-policy policy gradient
+with state distribution correction. In Proceedings of the Thirty-Fifth Conference on Uncertainty
+in Artiﬁcial Intelligence  2019. To appear.
+
+[23] A. Mahmood  H. van Hasselt  and R. Sutton. Weighted importance sampling for off-policy
+learning with linear function approximation. In Proceedings of the 27th International Conference
+on Neural Information Processing Systems  2014.
+
+[24] Travis Mandel  Yun-En Liu  Sergey Levine  Emma Brunskill  and Zoran Popovic. Ofﬂine
+policy evaluation across representations with applications to educational games. In Proceedings
+of the 2014 international conference on Autonomous agents and multi-agent systems  pages
+1077–1084. International Foundation for Autonomous Agents and Multiagent Systems  2014.
+
+[25] Volodymyr Mnih  Koray Kavukcuoglu  David Silver  Alex Graves  Ioannis Antonoglou  Daan
+Wierstra  and Martin Riedmiller. Playing atari with deep reinforcement learning. arXiv preprint
+arXiv:1312.5602  2013.
+
+[26] Susan A Murphy  Mark J van der Laan  James M Robins  and Conduct Problems Prevention Re-
+search Group. Marginal mean models for dynamic regimes. Journal of the American Statistical
+Association  96(456):1410–1423  2001.
+
+[27] XuanLong Nguyen  Martin J Wainwright  and Michael I Jordan. Estimating divergence func-
+tionals and the likelihood ratio by convex risk minimization. IEEE Transactions on Information
+Theory  56(11):5847–5861  2010.
+
+[28] C. Paduraru. Off-policy Evaluation in Markov Decision Processes. PhD thesis  McGill Univer-
+
+sity  2013.
+
+10
+
+[29] D. Precup  R. Sutton  and S. Dasgupta. Off-policy temporal difference learning with function
+approximation. In Proceedings of the 18th International Conference on Machine Learning 
+pages 417–424  2001.
+
+[30] D. Precup  R. Sutton  and S. Singh. Eligibility traces for off-policy policy evaluation. In
+Proceedings of the 17th International Conference on Machine Learning  pages 759–766  2000.
+
+[31] Doina Precup. Eligibility traces for off-policy policy evaluation. Computer Science Department
+
+Faculty Publication Series  page 80  2000.
+
+[32] Martin L Puterman. Markov decision processes: Discrete stochastic dynamic programming.
+
+1994.
+
+[33] Jing Qin. Inferences for case-control and semiparametric two-sample density ratio models.
+
+Biometrika  85(3):619–630  1998.
+
+[34] R Tyrrell Rockafellar and Roger J-B Wets. Variational analysis  volume 317. Springer Science
+
+& Business Media  2009.
+
+[35] Ralph Tyrell Rockafellar. Convex analysis. Princeton university press  2015.
+
+[36] Alexander Shapiro  Darinka Dentcheva  and Andrzej Ruszczy´nski. Lectures on stochastic
+
+programming: modeling and theory. SIAM  2009.
+
+[37] Masashi Sugiyama  Taiji Suzuki  and Takafumi Kanamori. Density ratio estimation in machine
+
+learning. Cambridge University Press  2012.
+
+[38] Masashi Sugiyama  Taiji Suzuki  Shinichi Nakajima  Hisashi Kashima  Paul von Bünau  and
+Motoaki Kawanabe. Direct importance estimation for covariate shift adaptation. Annals of the
+Institute of Statistical Mathematics  60(4):699–746  2008.
+
+[39] Richard S Sutton and Andrew G Barto. Introduction to reinforcement learning  volume 135.
+
+[40] Richard S Sutton  A Rupam Mahmood  and Martha White. An emphatic approach to the
+problem of off-policy temporal-difference learning. The Journal of Machine Learning Research 
+17(1):2603–2631  2016.
+
+[41] Richard S Sutton  Csaba Szepesvári  Alborz Geramifard  and Michael Bowling. Dyna-style
+planning with linear function approximation and prioritized sweeping. In Proceedings of the
+Twenty-Fourth Conference on Uncertainty in Artiﬁcial Intelligence  pages 528–536. AUAI Press 
+2008.
+
+[42] A. Swaminathan  A. Krishnamurthy  A. Agarwal  M. Dudík  J. Langford  D. Jose  and I. Zitouni.
+In Proceedings of the 31st International
+
+Off-policy evaluation for slate recommendation.
+Conference on Neural Information Processing Systems  pages 3635–3645  2017.
+
+[43] P. Thomas and E. Brunskill. Data-efﬁcient off-policy policy evaluation for reinforcement
+learning. In Proceedings of the 33rd International Conference on Machine Learning  pages
+2139–2148  2016.
+
+[44] P. Thomas  G. Theocharous  and M. Ghavamzadeh. High conﬁdence off-policy evaluation. In
+
+Proceedings of the 29th Conference on Artiﬁcial Intelligence  2015.
+
+[45] Yu-Xiang Wang  Alekh Agarwal  and Miroslav Dudik. Optimal and adaptive off-policy evalua-
+tion in contextual bandits. In Proceedings of the 34th International Conference on Machine
+Learning-Volume 70  pages 3589–3597. JMLR. org  2017.
+
+11
+
+,Jean-Baptiste Tristan
+Daniel Huang
+Joseph Tassarotti
+Adam Pocock
+Stephen Green
+Guy Steele
+Ofir Nachum
+Yinlam Chow
+Bo Dai
+Lihong Li

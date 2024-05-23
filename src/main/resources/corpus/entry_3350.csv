@@ -1,0 +1,974 @@
+2017,Matching neural paths: transfer from recognition to correspondence search,Many machine learning tasks require finding per-part correspondences between objects. In this work we focus on low-level correspondences --- a highly ambiguous matching problem. We propose to use a hierarchical semantic representation of the objects  coming from a convolutional neural network  to solve this ambiguity. Training it for low-level correspondence prediction directly might not be an option in some domains where the ground-truth correspondences are hard to obtain. We show how transfer from recognition can be used to avoid such training. Our idea is to mark parts as "matching" if their features are close to each other at all the levels of convolutional feature hierarchy (neural paths). Although the overall number of such paths is exponential in the number of layers  we propose a polynomial algorithm for aggregating all of them in a single backward pass. The empirical validation is done on the task of stereo correspondence and demonstrates that we achieve competitive results among the methods which do not use labeled target domain data.,Matching neural paths: transfer from recognition to
+
+correspondence search
+
+Nikolay Savinov1
+
+Lubor Ladicky1
+
+Marc Pollefeys1 2
+
+1Department of Computer Science at ETH Zurich  2Microsoft
+
+{nikolay.savinov lubor.ladicky marc.pollefeys}@inf.ethz.ch
+
+Abstract
+
+Many machine learning tasks require ﬁnding per-part correspondences between
+objects. In this work we focus on low-level correspondences — a highly ambiguous
+matching problem. We propose to use a hierarchical semantic representation of
+the objects  coming from a convolutional neural network  to solve this ambiguity.
+Training it for low-level correspondence prediction directly might not be an option
+in some domains where the ground-truth correspondences are hard to obtain. We
+show how transfer from recognition can be used to avoid such training. Our idea is
+to mark parts as “matching” if their features are close to each other at all the levels
+of convolutional feature hierarchy (neural paths). Although the overall number
+of such paths is exponential in the number of layers  we propose a polynomial
+algorithm for aggregating all of them in a single backward pass. The empirical
+validation is done on the task of stereo correspondence and demonstrates that we
+achieve competitive results among the methods which do not use labeled target
+domain data.
+
+1
+
+Introduction
+
+Finding per-part correspondences between objects is a long-standing problem in machine learning.
+The level at which correspondences are established can go as low as pixels for images or millisecond
+timestamps for sound signals. Typically  it is highly ambiguous to match at such a low level: a pixel
+or a timestamp just does not contain enough information to be discriminative and many false positives
+will follow. A hierarchical semantic representation could help to solve the ambiguity: we could
+choose the low-level match which also matches at the higher levels. For example  a car contains a
+wheel which contains a bolt. If we want to check if this bolt matches the bolt in another view of the
+car  we should check if the wheel and the car match as well.
+One possible hierarchical semantic representation could be computed by a convolutional neural
+network. The features in such a network are composed in a hierarchical manner: the lower-level
+features are used to compute higher-level features by applying convolutions  max-poolings and
+non-linear activation functions on them. Nevertheless  training such a convolutional neural network
+for correspondence prediction directly (e.g.  [25]  [2]) might not be an option in some domains
+where the ground-truth correspondences are hard and expensive to obtain. This raises the question of
+scalability of such approaches and motivates the search for methods which do not require training
+correspondence data.
+To address the training data problem  we could transfer the knowledge from the source domain where
+the labels are present to the target domain where no labels or few labeled data are present. The most
+common form of transfer is from classiﬁcation tasks. Its promise is two-fold. First  classiﬁcation
+labels are one of the easiest to obtain as it is a natural task for humans. This allows to create huge
+recognition datasets like Imagenet [18]. Second  the features from the low to mid-levels have been
+shown to transfer well to a variety of tasks [22]  [3]  [15].
+
+31st Conference on Neural Information Processing Systems (NIPS 2017)  Long Beach  CA  USA.
+
+Although there has been a huge progress in transfer from classiﬁcation to detection [7]  [17]  [19] 
+[16]  segmentation [12]  [1] and other semantic reasoning tasks like single-image depth prediction
+[4]  the transfer to correspondence search has been limited [13]  [10]  [8].
+We propose a general solution to unsupervised transfer from recognition to correspondence search at
+the lowest level (pixels  sound millisecond timestamps). Our approach is to match paths of activations
+coming from a convolutional neural network  applied on two objects to be matched. More precisely 
+to establish matching on the lowest level  we require the features to match at all different levels of
+convolutional feature hierarchy. Those different-level features form paths. One such path would
+consist of neural activations reachable from the lowest-level feature to the highest-level feature in the
+network topology (in other words  the lowest level feature lies in the receptive ﬁeld of the highest
+level). Since every lowest-level feature belongs to many paths  we do voting based on all of them.
+Although the overall number of such paths is exponential in the number of layers and thus infeasible
+to compute naively  we prove that the voting is possible in polynomial time in a single backward
+pass through the network. The algorithm is based on dynamic programming and is similar to the
+backward pass for gradient computation in the neural network.
+Empirical validation is done on the task of stereo correspondence on two datasets: KITTI 2012 [6]
+and KITTI 2015 [14]. We quantitatively show that our method is competitive among the methods
+which do not require labeled target domain data. We also qualitatively show that even dramatic
+changes in low-level structure can be handled reasonably by our method due to the robustness of the
+recognition hierarchy: we apply different style transfers [5] to corresponding images in KITTI 2015
+and still successfully ﬁnd correspondences.
+
+2 Notation
+
+Our method is generally applicable to the cases where the input data has a multi-dimensional grid
+topology layout. We will assume input objects o to be from the set of B-dimensional grids Φ ⊂ RB
+and run convolutional neural networks on those grids. The per-layer activations from those networks
+will be contained in the set of (B + 1)-dimensional grids Ψ ⊂ RB+1. Both the input data and the
+activations will be indexed by a (B + 1)-dimensional vector x = (x  y  . . .   c) ∈ NB+1  where x is a
+column index  y is a row index  etc.  and c ∈ {1  . . .   C} is the channel index (we will assume C = 1
+for the input data  which is a non-restrictive assumption as we will explain later).
+We will search for correspondences between those grids  thus our goal will be to estimate shifts
+d ∈ D ⊂ ZB+1 for all elements in the grid. The choice of the shift set D is task-dependent. For
+example  for sound B = 1 and only 1D shifts can be considered. For images  B = 2 and D could be
+a set of 1D shifts (usually called a stereo task) or a set of 2D shifts (usually called an optical ﬂow
+task).
+In this work  we will be dealing with convolutional neural network architectures  consisting of
+convolutions  max-poolings and non-linear activation functions (one example of such an architecture
+is a VGG-net [20]  if we omit softmax which we will not use for the transfer). We assume every
+convolutional layer to be followed by a non-linear activation function throughout the paper and will
+not specify those functions explicitly.
+The computational graph of these architectures is a directed acyclic graph G = {A  E}  where
+A = {a1  . . .   a|A|
+} is a set of nodes  corresponding to neuron activations (|A| denotes the size of
+this set)  and E = {e1  . . .   e|E|
+} is a set of arcs  corresponding to computational dependencies (|E|
+aj is the output (endpoint). The node set consists of disjoint layers A =(cid:83)L
+denotes the size of this set). Each arc is represented as a tuple (ai  aj)  where ai is the input (origin) 
+(cid:96)=0 A(cid:96). The arcs are only
+allowed to go from the previous layer to the next one.
+We will use the notation A(cid:96)(x) for the node in (cid:96)-th layer at position x; in(x(cid:96)) for the set of
+origins x(cid:96)−1 of arcs  entering layer (cid:96) at position x(cid:96) of the reference object; x(cid:96)+1 ∈ out(x(cid:96)) for
+the set of endpoints of arcs  exiting layer (cid:96) at position x(cid:96) of the reference object. Let f(cid:96) ∈ F =
+{maxpool  conv} be the mathematic operator which corresponds to forward computation in layer
+(cid:96) as a ← f(cid:96)(in(a))  a ∈ A(cid:96) (with a slight abuse of notation  we use a for both the nodes in the
+computational graph and the activation values which are computed in those nodes).
+
+2
+
+Figure 1: Four siamese paths are shown. Two of them (red) have the same origin and support the
+hypothesis of the shift d = 3 for this origin. The other two (green and pink) have different origins
+and support hypotheses d = 3 and d = 2 for their respective origins.
+
+3 Correspondence via path matching
+We will consider two objects  reference o ∈ Φ and searched o(cid:48) ∈ Φ  for which we want to ﬁnd
+correspondences. After applying a CNN on them  we get graphs G and G(cid:48) of activations. The goal is
+to establish correspondences between the input-data layers A0 and A(cid:48)0. That is  every cell A0(x) in
+the reference object o ∈ Φ has a certain shift d ∈ D in the searched object o(cid:48) ∈ Φ  and we want to
+estimate d.
+Here comes the cornerstone idea of our method: we establish the matching of A0(x) with A(cid:48)0(x − d)
+for a shift d if there is a pair of “parallel” paths (we call this pair a siamese path)  originating at
+those nodes and ending at the last layers AL  A(cid:48)L  which match. This pair of paths must have the
+same spatial shift with respect to each other at all layers  up to subsampling  and go through the
+same feature channels with respect to each other. We take the subsampling into account by per-layer
+functions
+
+k(cid:96)(d) = γ(cid:96)(k(cid:96)−1(d))  (cid:96) = 1  . . .   L 
+
+γ(cid:96)(˜d) =
+
+q(cid:96)
+
+ 
+
+k0(d) = d 
+
+(1)
+
+(cid:37)
+
+(cid:36) ˜d
+
+where k(cid:96)(d) is how the zero-layer shift d transforms at layer (cid:96)  q(cid:96) is the (cid:96)-th layer spatial subsampling
+factor (note that rounding and division on vectors is done element-wise). Then a siamese path P can
+be represented as
+
+0 − k0(d))  . . .   A(cid:48)L(xP
+
+L − kL(d)))
+
+P = (p  p(cid:48))  p = (A0(xP
+
+0 )  . . .   AL(xP
+
+L ))  p(cid:48) = (A(cid:48)0(xP
+
+0 = x and xP
+
+(2)
+where xP
+(cid:96) denotes the position at which the path P intersects layer (cid:96) of the reference
+activation graph. Such paths are illustrated in Fig. 1. The logic is simple: matching in a siamese
+path means that the recognition hierarchy detects the same features at different perception levels with
+the same shifts (up to subsampling) with respect to the currently estimated position x  which allows
+for a conﬁdent prediction of match. The fact that a siamese path is “matched” can be established by
+computing the matching function (high if it matches  low if not)
+
+(cid:96) − k(cid:96)(d)))
+
+(cid:96)=0
+
+M (P ) =
+
+m(cid:96)(A(cid:96)(xP
+
+(cid:96) )  A(cid:48)(cid:96)(xP
+
+(3)
+where m(cid:96)(· ·) is a matching function for individual neurons (prefers them both to be similar and
+non-zero at the same time) and (cid:12) is a logical-and-like operator. Both will be discussed later.
+Since we want to estimate the shift for a node A0(x)  we will consider all possible shifts and vote for
+each of them. Let us denote a set of siamese paths  starting at A(cid:96)(x) and A(cid:48)(cid:96)(x − d) and ending at
+the last layer  as P(cid:96)(x  d).
+For every shift d ∈ D we introduce U (x  d) as the log-likelihood of the event that d is the correct
+shift  i.e. A0(x) matches A(cid:48)0(x − d). To collect the evidence from all possible paths  we “sum up”
+
+L(cid:75)
+
+3
+
+InputConvolutionMax-poolingConvolutionMax-poolingk1(d)=3k1(d)=3k1(d)=2k0(d)=3k0(d)=3k0(d)=2k2(d)=1k2(d)=1k2(d)=1k3(d)=1k3(d)=1k3(d)=1k4(d)=0k4(d)=0k4(d)=0ReferenceGSearchedG′Shiftsthe matching functions for all individual paths  leading to
+
+(cid:77)
+
+(cid:77)
+
+L(cid:75)
+
+U (x  d) =
+
+M (P ) =
+
+m(cid:96)(A(cid:96)(xP
+
+(cid:96) )  A(cid:48)(cid:96)(xP
+
+(cid:96) − k(cid:96)(d)))
+
+(4)
+
+(cid:96)=0
+
+P∈P0(x d)
+
+P∈P0(x d)
+where the sum-like operator ⊕ will be discussed later.
+The distribution U (x  d) can be used to either obtain the solution as d∗(x) = arg maxd∈D U (x  d)
+or to post-process the distribution with any kind of spatial smoothing optimization and then again
+take the best-cost solution.
+The obvious obstacle to using the distribution U (x  d) is that
+Observation 1. If K is the minimal number of activation channels in all the layers of the network
+and L is the number of layers  the number of paths  considered in the computation of U (x  d) for a
+single originating node  is Ω(K L) — at least exponential in the number of layers.
+
+In practice  it is infeasible to compute U (x  d) naively. In this work  we prove that it is possible
+to compute U (x  d) in O(|A| + |E|) — thus linear in the number of layers — using the algorithm
+which will be introduced in the next section.
+
+4 Linear-time backward algorithm
+Theorem 1. For any m(cid:96)(· ·) and any pair of operators (cid:104)⊕  (cid:12)(cid:105) such that (cid:12) is left-distributive over
+⊕  i.e. a (cid:12) (b ⊕ c) = a (cid:12) b ⊕ a (cid:12) c  we can compute U (x  d) for all x and d in O(|A| + |E|).
+Proof Since there is distributivity  we can use a dynamic programming approach similar to the one
+developed for gradient backpropagation.
+First  let us introduce subsampling functions k(cid:96)
+s = ks as introduced in Eq. 1.
+k0
+Then  let us introduce auxiliary variables U(cid:96)(x(cid:96)  d) for each layer (cid:96) = 0  . . .   L  which have the same
+deﬁnition as U (x  d) except for the fact that the paths  considered in them  start from the later layer (cid:96):
+
+(cid:96)(d) = d  s ≥ (cid:96). Note that
+
+s−1(d))  k(cid:96)
+
+s(d) = γs(k(cid:96)
+
+U(cid:96)(x(cid:96)  d) =
+
+M (P ) =
+
+P∈P(cid:96)(x(cid:96) d)
+
+P∈P(cid:96)(x(cid:96) d)
+
+s=(cid:96)
+
+ms(As(xP
+
+s )  A(cid:48)s(xP
+
+s − k(cid:96)
+
+s(d))).
+
+(5)
+
+Note that U (x  d) = U0(x  d). The idea is to iteratively recompute U(cid:96)(x(cid:96)  d) based on known
+U(cid:96)+1(x(cid:96)+1  γ(cid:96)(d)) for all x(cid:96)+1. Eventually  we will get to the desired U0(x  d).
+The ﬁrst step is to notice that all the paths share the same preﬁx and write it out explicitly:
+
+U(cid:96)(x(cid:96)  d) =
+
+=
+
+P∈P(cid:96)(x(cid:96) d)
+
+P∈P(cid:96)(x(cid:96) d)
+
+ms(As(xP
+
+s )  A(cid:48)s(xP
+
+s − k(cid:96)
+
+s=(cid:96)
+
+m(cid:96)(A(cid:96)(x(cid:96))  A(cid:48)(cid:96)(x(cid:96) − d)) (cid:12)
+
+s(d)))
+
+(cid:34) L(cid:75)
+
+s=(cid:96)+1
+
+(cid:35)
+
+ms(As(xP
+
+s )  A(cid:48)s(xP
+
+s − k(cid:96)
+
+s(d)))
+
+.
+
+(6)
+Now  we want to pull the preﬁx m(cid:96)(A(cid:96)(x(cid:96))  A(cid:48)(cid:96)(x(cid:96) − d)) out of the “sum”. For that purpose  we
+will need the set of endpoints out(x(cid:96))  introduced in the notation in Section 2. The “sum” can be
+(cid:35)
+re-written in terms of those endpoints as
+
+m(cid:96)(A(cid:96)(x(cid:96))  A(cid:48)(cid:96)(x(cid:96) − d)) (cid:12)
+
+ms(As(xP
+
+s )  A(cid:48)s(xP
+
+s − k(cid:96)
+
+s(d)))
+
+(cid:34) L(cid:75)
+
+U(cid:96)(x(cid:96)  d) =
+
+(cid:77)
+
+L(cid:75)
+
+(cid:77)
+(cid:77)
+
+(cid:77)
+
+(cid:77)
+
+L(cid:75)
+
+x(cid:96)+1∈out(x(cid:96))
+
+P∈P(cid:96)+1(x(cid:96)+1 γ(cid:96)+1(d))
+
+s=(cid:96)+1
+
+4
+
+.
+
+(7)
+
+UL(xL  d) ← mL(AL(xL)  A(cid:48)L(xL − d)) 
+
+(cid:46) Initialize the last layer.
+
+end for
+for (cid:96) = L-1  ...  0 do
+for A(cid:96)(x(cid:96)) ∈ A(cid:96) do
+for d ∈ k(cid:96)(D) do
+
+Algorithm 1 Backward pass
+1: procedure BACKWARD(G  G(cid:48))
+for AL(xL) ∈ AL do
+2:
+for d ∈ kL(D) do
+3:
+4:
+end for
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15:
+16:
+end for
+17:
+return U0
+18:
+19: end procedure
+
+end for
+
+end for
+
+S ← 0 
+for x(cid:96)+1 ∈ out(x(cid:96)) do
+end for
+U(cid:96)(x(cid:96)  d) ← m(cid:96)(A(cid:96)(x(cid:96))  A(cid:48)(cid:96)(x(cid:96) − d)) (cid:12) S 
+
+S ← S ⊕ U(cid:96)+1(x(cid:96)+1  γ(cid:96)+1(d)) 
+
+(cid:46) Return the distribution for the ﬁrst layer.
+
+The last step is to use the left-distributivity of (cid:12) over ⊕ to pull the preﬁx out of the “sum”:
+U(cid:96)(x(cid:96)  d) = m(cid:96)(A(cid:96)(x(cid:96))  A(cid:48)(cid:96)(x(cid:96) − d)) (cid:12)
+
+s )  A(cid:48)s(xP
+
+ms(As(xP
+
+L(cid:75)
+
+(cid:77)
+= m(cid:96)(A(cid:96)(x(cid:96))  A(cid:48)(cid:96)(x(cid:96) − d)) (cid:12) (cid:77)
+
+x(cid:96)+1∈out(x(cid:96))
+
+P∈P(cid:96)+1(x(cid:96)+1 γ(cid:96)+1(d))
+
+s=(cid:96)+1
+
+U(cid:96)+1(x(cid:96)+1  γ(cid:96)+1(d)).
+
+(8)
+
+s − k(cid:96)
+
+s(d)))
+
+x(cid:96)+1∈out(x(cid:96))
+
+The detailed procedure is listed in Algorithm 1. We use the notation k(cid:96)(D) for the set of subsampled
+shifts which is the result of applying function k(cid:96) to every element of the set of initial shifts D.
+5 Choice of neuron matching function m and operators ⊕  (cid:12)
+For the convolutional layers  we use the matching function
+
+(cid:40)
+
+mconv(w  v) =
+
+0
+min(w v)
+max(w v)
+
+if w = 0  v = 0 
+otherwise.
+
+(9)
+
+For the max-pooling layers  the computational graph can be truncated to just one active connection
+(as only one element inﬂuences higher-level features). Moreover  max-pooling does not create any
+additional features  only passes/subsamples the existing ones. Thus it does not make sense to take into
+account the pre-activations for those layers as they are the same as activations (up to subsampling).
+For these reasons  we use
+
+mmaxpool(w  v) = δ(w = arg max Nw) ∧ δ(v = arg max Nv) 
+
+(10)
+where Nw is the neighborhood of max-pooling covering node w  δ(·) is the indicator function (1 if
+the condition holds  0 otherwise).
+In this paper  we use sum as ⊕ and product as (cid:12). Another possible choice would be max for ⊕
+and min or product for (cid:12) — theoretically  those combinations satisfy the conditions in Theorem 1.
+Nevertheless  we found sum/product combination working better than others. This could be explained
+by the fact that max as ⊕ would be taken over a huge set of paths which is not robust in practice.
+
+6 Experiments
+
+We validate our approach in the ﬁeld of computer vision as our method requires a convolutional
+neural network trained on a large recognition dataset. Out of the vision correspondence tasks  we
+
+5
+
+Table 1: Summary of the convolutional neural network VGG-16. We only show the part up to the 8-th
+layer as we do not use higher activations (they are not pixel-related enough). In the layer type row  c
+stands for 3x3 convolution with stride 1 followed by the ReLU non-linear activation function [11] and
+p for 2x2 max-pooling with stride 2. The input to convolution is padded with the “same as boundary”
+rule.
+
+Layer index
+Layer type
+Output channels
+
+1
+c
+64
+
+2
+c
+64
+
+3
+p
+64
+
+4
+c
+128
+
+5
+c
+128
+
+6
+p
+128
+
+7
+c
+256
+
+8
+c
+256
+
+chose stereo matching to validate our method. For this task  the input data dimensionality is B = 2
+and the shift set is represented by horizontal shifts D = {(0  0  0)  . . .   (Dmax  0  0)}. We always
+convert images to grayscale before running CNNs  following the observation by [25] that color does
+not help.
+For pre-trained recognition CNN  we chose the VGG-16 network [20]. This network is summarized
+in Table 1. We will further refer to layer indexes from this table. It is important to mention that we
+have not used the whole range of layers in our experiments. In particular  we usually started from
+layer 2 and ﬁnished at layer 8. As such  it is still necessary to consider multi-channel input. To
+extend our algorithm to this case  we create a virtual input layer with C = 1 and virtual per-pixel
+arcs to all the real input channels. While starting from a later layer is an empirical observation which
+improves the results for our method  the advantage of ﬁnishing at an earlier layer was discovered by
+other researchers as well [5] (starting from some layer  the network activations stop being related to
+individual pixels). We will thus abbreviate our methods as “ours(s  t)” where “s” is the starting layer
+and “t” is the last layer.
+
+6.1 Experimental setup
+
+For the stereo matching  we chose the largest available datasets KITTI 2012 and KITTI 2015. All
+image pairs in these datasets are rectiﬁed  so correspondences can be searched in the same row.
+For each training pair  the ground-truth shift is measured densely per-pixel. This ground truth was
+obtained by projecting the point cloud from LIDAR on the reference image. The quality measure is
+the percentage Errt of pixels whose predicted shift error is bigger than a threshold of t pixels. We
+considered a range of thresholds t = 1  . . .   5  while the main benchmark measure is Err3. This
+measure is only computed for the pixels which are visible in both images from the stereo pair.
+For comparison with the baselines  we used the setup proposed in [25] — the seminal work which
+introduced deep learning for stereo matching and which currently stays one of the best methods on the
+KITTI datasets. [24] is an extensive study which has a representative comparison of learning-based
+and non-learning-based methods under the same setup and open-source code [24] for this setup. The
+whole pipeline works as follows. First  we obtain the raw scores U (x  d) from Algorithm 1 for the
+shifts up to Dmax = 228. Then we normalize the scores U (x ·) per-pixel by dividing them over
+the maximal score  thus turning them into the range [0  1]  suitable for running the post-processing
+code [24]. Finally  we run the post-processing code with exactly the same parameters as the original
+method [25] and measure the quality on the same 40 validation images.
+
+6.2 Baselines
+
+We have two kinds of baselines in our evaluation: those coming from [25] and our simpler versions
+of deep feature transfer similar to [13]  which do not consider paths.
+The ﬁrst group of baselines from [25] are the following: the sum of absolute differences “sad” 
+the census transform “cens” [23]  the normalized cross-correlation “ncc”. We also included the
+learning-based methods “fst” and “acrt” [25] for completeness  although they use training data to
+learn features while our method does not.
+For the second group of baselines  we stack up the activation volumes for the given layer range
+and up-sample the layer volumes if they have reduced resolution. Then we compute normalized
+cross-correlation of the stacked features. Those baselines are denoted “corr(s  t)” where “s” is the
+
+6
+
+Table 2: This table shows the percentages of erroneous pixels Errt for thresholds t = 1  . . .   5
+on the KITTI 2012 validation set from [25]. Our method is denoted “ours(2  8)”. The two right-
+most columns “fst” and “acrt” correspond to learning-based methods from [25]. We give them for
+completeness  as all the other methods  including ours  do not use learning.
+
+Threshold
+
+1
+2
+3
+4
+5
+
+sad
+-
+-
+
+8.16
+
+-
+-
+
+cens
+
+4.90
+
+-
+-
+
+-
+-
+
+ncc
+-
+-
+
+8.93
+
+-
+-
+
+corr(1  2)
+
+Methods
+corr(2  2)
+
+corr(2  8)
+
+ours(2  8)
+
+20.6
+10.5
+7.58
+6.19
+5.40
+
+20.4
+10.4
+7.52
+6.13
+5.36
+
+20.7
+8.14
+5.23
+4.02
+3.42
+
+17.4
+6.40
+3.94
+2.99
+2.49
+
+fst
+-
+-
+
+-
+-
+
+3.02
+
+acrt
+-
+-
+
+2.61
+
+-
+-
+
+Table 3: KITTI 2012 ablation study.
+
+Methods
+
+Threshold
+
+ours(2  2)
+
+ours(2  3)
+
+central(2  8)
+
+ours(2  8)
+
+1
+2
+3
+4
+5
+
+17.7
+7.90
+5.28
+4.08
+3.41
+
+18.4
+8.16
+5.41
+4.05
+3.32
+
+17.3
+6.58
+4.02
+3.04
+2.53
+
+17.4
+6.40
+3.94
+2.99
+2.49
+
+starting layer  “t” is the last layer. Note that we correlate the features before applying ReLU following
+what [25] does for the last layer. Thus we use the input to the ReLU inside the layers.
+All the methods  including ours  undergo the same post-processing pipeline. This pipeline consists of
+semi-global matching [9]  left-right consistency check  sub-pixel enhancement by ﬁtting a quadratic
+curve  median and bilateral ﬁltering. We refer the reader to [25] for the full description. While the
+ﬁrst group of baselines was tuned by [25] and we take the results from that paper  we had to tune the
+post-processing hyper-parameters of the second group of baselines to obtain the best results.
+
+6.3 KITTI 2012
+
+The dataset consists of 194 training image pairs and 195 test image pairs. The reﬂective surfaces like
+windshields were excluded from the ground truth.
+The results in Table 2 show that our method “ours(2  8)” performs better compared to the baselines.
+At the same time  its performance is lower than learning-based methods from [25]. The main promise
+of our method is scalability: while we test it on a task where huge effort was invested into collecting
+the training data  there are other important tasks without such extensive datasets.
+
+6.4 Ablation study on KITTI 2012
+
+The goal of this section is to understand how important is the deep hierarchy of features versus one or
+few layers. We compared the following setups: “ours(2  2)” uses only the second layer  “ours(2  3)”
+uses only the range from layer 2 to layer 3  “central(2  8)” considers the full range of layers but only
+with central arcs in the convolutions (connecting same pixel positions between activations) taken into
+account in the backward pass  “ours(2  8)” is the full method. The result in Table 3 shows that it is
+proﬁtable to use the full hierarchy both in terms of depth and coverage of the receptive ﬁeld.
+
+6.5 KITTI 2015
+
+The stereo dataset consists of 200 training image pairs and 200 test image pairs. The main difference
+to KITTI 2012 is that the images are colored and the reﬂective surfaces are present in the evaluation.
+Similar conclusions to KITTI 2012 can be drawn from experimental results: our method provides a
+reasonable transfer  being inferior only to learning-based methods — see Table 4. We show our depth
+map results in Fig. 2.
+
+7
+
+Table 4: This table shows the percentages of erroneous pixels Errt for thresholds t = 1  . . .   5
+on the KITTI 2015 validation set from [25]. Our method is denoted “ours(2  8)”. The two right-
+most columns “fst” and “acrt” correspond to learning-based methods from [25]. We give them for
+completeness  as all the other methods  including ours  do not use learning.
+
+Threshold
+
+1
+2
+3
+4
+5
+
+sad
+-
+-
+
+9.44
+
+-
+-
+
+cens
+
+5.03
+
+-
+-
+
+-
+-
+
+ncc
+-
+-
+
+8.89
+
+-
+-
+
+corr(1  2)
+
+Methods
+corr(2  2)
+
+corr(2  8)
+
+ours(2  8)
+
+26.6
+10.9
+6.68
+5.05
+4.22
+
+26.5
+10.8
+6.63
+5.03
+4.20
+
+29.6
+11.2
+6.16
+4.42
+3.60
+
+26.2
+9.27
+4.78
+3.36
+2.72
+
+fst
+-
+-
+
+-
+-
+
+3.99
+
+acrt
+-
+-
+
+3.25
+
+-
+-
+
+Figure 2: Results on KITTI 2015. Top to bottom: reference image  searched image  our depth result.
+The depth is visualized in the standard KITTI color coding (from close to far: yellow  green  purple 
+red  blue).
+
+6.6 Style transfer experiment on KITTI 2015
+
+The goal of this experiment is to show the robustness of recognition hierarchy for the transfer to
+correspondence search — something we advocated in the introduction as the advantage of our
+approach. We apply the style transfer method [5]  implemented in the Prisma app. We ran different
+style transfers on the left and right images. While now very different at the pixel level  the higher
+level descriptions of the images remain the same which allows to successfully run our method. The
+qualitative results show the robustness of our path-based method in Fig. 3 (see also Fig. 2 for visual
+comparison to normal data).
+
+Figure 3: Results for the style transfer on KITTI 2015. Top to bottom: reference image  searched
+image  our depth result. The depth is visualized in the standard KITTI color coding (from close to
+far: yellow  green  purple  red  blue).
+
+8
+
+7 Conclusion
+
+In this work  we have presented a method for transfer from recognition to correspondence search at
+the lowest level. For that  we re-use activation paths from deep convolutional neural networks and
+propose an efﬁcient polynomial algorithm to aggregate an exponential number of such paths. The
+empirical results on the stereo matching task show that our method is competitive among methods
+which do not use labeled data from the target domain. It would be interesting to apply this technique
+to sound  which should become possible once a high-quality deep convolutional model becomes
+accessible to the public (e.g.  [21]).
+
+Acknowledgements
+
+We would like to thank Dmitry Laptev  Alina Kuznetsova and Andrea Cohen for their comments
+about the manuscript. We also thank Valery Vishnevskiy for running our code while our own cluster
+was down. This work is partially funded by the Swiss NSF project 163910 “Efﬁcient Object-Centric
+Detection”.
+
+References
+[1] Vijay Badrinarayanan  Alex Kendall  and Roberto Cipolla. Segnet: A deep convolutional encoder-decoder
+
+architecture for image segmentation. arXiv preprint arXiv:1511.00561  2015.
+
+[2] Christopher B Choy  JunYoung Gwak  Silvio Savarese  and Manmohan Chandraker. Universal correspon-
+
+dence network. In Advances in Neural Information Processing Systems  pages 2414–2422  2016.
+
+[3] J Donahue  Y Jia  O Vinyals  J Hoffman  N Zhang  E Tzeng  and T Darrell. Decaf: A deep convolutional
+
+activation feature for generic visual recognition. corr abs/1310.1531 (2013)  2013.
+
+[4] David Eigen and Rob Fergus. Predicting depth  surface normals and semantic labels with a common
+multi-scale convolutional architecture. In Proceedings of the IEEE International Conference on Computer
+Vision  pages 2650–2658  2015.
+
+[5] Leon A Gatys  Alexander S Ecker  and Matthias Bethge. A neural algorithm of artistic style. arXiv preprint
+
+arXiv:1508.06576  2015.
+
+[6] Andreas Geiger  Philip Lenz  and Raquel Urtasun. Are we ready for autonomous driving? the kitti vision
+
+benchmark suite. In Conference on Computer Vision and Pattern Recognition (CVPR)  2012.
+
+[7] Ross Girshick. Fast r-cnn. In Proceedings of the IEEE International Conference on Computer Vision 
+
+pages 1440–1448  2015.
+
+[8] Bumsub Ham  Minsu Cho  Cordelia Schmid  and Jean Ponce. Proposal ﬂow. In Proceedings of the IEEE
+
+Conference on Computer Vision and Pattern Recognition  pages 3475–3484  2016.
+
+[9] Heiko Hirschmuller. Accurate and efﬁcient stereo processing by semi-global matching and mutual
+information. In Computer Vision and Pattern Recognition  2005. CVPR 2005. IEEE Computer Society
+Conference on  volume 2  pages 807–814. IEEE  2005.
+
+[10] Seungryong Kim  Dongbo Min  Bumsub Ham  Sangryul Jeon  Stephen Lin  and Kwanghoon Sohn. Fcss:
+Fully convolutional self-similarity for dense semantic correspondence. arXiv preprint arXiv:1702.00926 
+2017.
+
+[11] Alex Krizhevsky  Ilya Sutskever  and Geoffrey E Hinton. Imagenet classiﬁcation with deep convolutional
+
+neural networks. In Advances in neural information processing systems  pages 1097–1105  2012.
+
+[12] Jonathan Long  Evan Shelhamer  and Trevor Darrell. Fully convolutional networks for semantic seg-
+mentation. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition  pages
+3431–3440  2015.
+
+[13] Jonathan L Long  Ning Zhang  and Trevor Darrell. Do convnets learn correspondence? In Advances in
+
+Neural Information Processing Systems  pages 1601–1609  2014.
+
+[14] Moritz Menze and Andreas Geiger. Object scene ﬂow for autonomous vehicles. In Conference on Computer
+
+Vision and Pattern Recognition (CVPR)  2015.
+
+[15] Ali Sharif Razavian  Hossein Azizpour  Josephine Sullivan  and Stefan Carlsson. Cnn features off-the-shelf:
+
+an astounding baseline for recognition (2014). arXiv preprint arXiv:1403.6382.
+
+[16] Joseph Redmon  Santosh Divvala  Ross Girshick  and Ali Farhadi. You only look once: Uniﬁed  real-time
+object detection. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition 
+pages 779–788  2016.
+
+9
+
+[17] Shaoqing Ren  Kaiming He  Ross Girshick  and Jian Sun. Faster r-cnn: Towards real-time object detection
+with region proposal networks. In Advances in neural information processing systems  pages 91–99  2015.
+[18] O. Russakovsky  J. Deng  H. Su  J. Krause  S. Satheesh  S. Ma  Z. Huang  A. Karpathy  A. Khosla 
+
+M. Bernstein  et al. Imagenet large scale visual recognition challenge. IJCV  115(3):211–252  2015.
+
+[19] Pierre Sermanet  David Eigen  Xiang Zhang  Michaël Mathieu  Rob Fergus  and Yann LeCun. Over-
+feat: Integrated recognition  localization and detection using convolutional networks. arXiv preprint
+arXiv:1312.6229  2013.
+
+[20] Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recogni-
+
+tion. arXiv preprint arXiv:1409.1556  2014.
+
+[21] Aäron van den Oord  Sander Dieleman  Heiga Zen  Karen Simonyan  Oriol Vinyals  Alex Graves  Nal
+Kalchbrenner  Andrew Senior  and Koray Kavukcuoglu. Wavenet: A generative model for raw audio.
+CoRR abs/1609.03499  2016.
+
+[22] Jason Yosinski  Jeff Clune  Yoshua Bengio  and Hod Lipson. How transferable are features in deep neural
+
+networks? In Advances in neural information processing systems  pages 3320–3328  2014.
+
+[23] Ramin Zabih and John Woodﬁll. Non-parametric local transforms for computing visual correspondence.
+
+In European conference on computer vision  pages 151–158. Springer  1994.
+
+[24] Jure Zbontar and Yann LeCun. MC-CNN github repository. https://github.com/jzbontar/mc-cnn 
+
+2016.
+
+[25] Jure Zbontar and Yann LeCun. Stereo matching by training a convolutional neural network to compare
+
+image patches. Journal of Machine Learning Research  17(1-32):2  2016.
+
+10
+
+,Nikolay Savinov
+Lubor Ladicky
+Marc Pollefeys

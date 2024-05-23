@@ -1,0 +1,921 @@
+2019,Sampling Networks and Aggregate Simulation for Online POMDP Planning,The paper introduces a new algorithm for planning in partially observable Markov decision processes (POMDP) based on the idea of aggregate simulation. The algorithm uses product distributions to approximate the belief state and shows how to build a representation graph of an approximate action-value function over belief space. The graph captures the result of simulating the model in aggregate under independence assumptions  giving a symbolic representation of the value function. The algorithm supports large observation spaces using sampling networks  a representation of the process of sampling values of observations  which is integrated into the graph representation. Following previous work in MDPs this approach enables action selection in POMDPs through gradient optimization over the graph representation. This approach complements recent algorithms for POMDPs which are based on particle representations of belief states and an explicit search for action selection. Our approach enables scaling to large factored action spaces in addition to large state spaces and observation spaces. An experimental evaluation demonstrates that the algorithm provides excellent performance relative to state of the art in large POMDP problems.,Sampling Networks and Aggregate Simulation for
+
+Online POMDP Planning
+
+Department of Computer Science
+
+Department of Computer Science
+
+Roni Khardon
+
+Indiana University
+
+Bloomington  IN  USA
+
+rkhardon@iu.edu
+
+Hao Cui
+
+Tufts University
+
+Medford  MA 02155  USA
+
+hao.cui@tufts.edu
+
+Abstract
+
+The paper introduces a new algorithm for planning in partially observable Markov
+decision processes (POMDP) based on the idea of aggregate simulation. The
+algorithm uses product distributions to approximate the belief state and shows how
+to build a representation graph of an approximate action-value function over belief
+space. The graph captures the result of simulating the model in aggregate under
+independence assumptions  giving a symbolic representation of the value function.
+The algorithm supports large observation spaces using sampling networks  a rep-
+resentation of the process of sampling values of observations  which is integrated
+into the graph representation. Following previous work in MDPs this approach
+enables action selection in POMDPs through gradient optimization over the graph
+representation. This approach complements recent algorithms for POMDPs which
+are based on particle representations of belief states and an explicit search for
+action selection. Our approach enables scaling to large factored action spaces in
+addition to large state spaces and observation spaces. An experimental evaluation
+demonstrates that the algorithm provides excellent performance relative to state of
+the art in large POMDP problems.
+
+1
+
+Introduction
+
+Planning in partially observable Markov decision processes is a central problem in AI which is known
+to be computationally hard. Work over the last two decades produced signiﬁcant algorithmic progress
+that affords some scalability for solving large problems. Off-line approaches  typically aiming for
+exact solutions  rely on the structure of the optimal value function to construct and prune such
+representations [22  10  2]  and PBVI and related algorithms (see [20]) carefully control this process
+yielding signiﬁcant speedup over early algorithms. In contrast  online algorithms interleave planning
+and execution and are not allowed sufﬁcient time to produce an optimal global policy. Instead they
+focus on search for the best action for the current step. Many approaches in online planning rely on
+an explicit search tree over the belief space of the POMDP and use sampling to reduce the size of the
+tree [11] and most effective recent algorithms further use a particle based representation of the belief
+states to facilitate fast search [21  25  23  7].
+Our work is motivated by the idea of aggregate simulation in MDPs [5  4  3]. This approach builds an
+explicit symbolic computation graph that approximates the evolution of the distribution of state and
+reward variables over time  conditioned on the current action and future rollout policy. The algorithm
+then optimizes the choice of actions by gradient based search  using automatic differentiation [8] over
+the explicit function represented by the computation graph. As recently shown [6] this is equivalent
+to solving a marginal MAP inference problem where the expectation step is evaluated by belief
+propagation (BP) [17]  and the maximization step is performed using gradients.
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+We introduce a new algorithm SNAP (Sampling Networks and Aggregate simulation for POMDP) that
+expands the scope of aggregate simulation. The algorithm must tackle two related technical challenges.
+The solution in [5  4] requires a one-pass forward computation of marginal probabilities. Viewed
+from the perspective of BP  this does not allow for downstream observations – observed descendents
+of action variables – in the corresponding Bayesian network. But this conﬂicts with the standard
+conditioning on observation variables in belief update. Our proposed solution explicitly enumerates
+all possible observations  which are then numerical constants  and reorders the computation steps to
+allow for aggregate simulation. The second challenge is that enumerating all possible observations is
+computationally expensive. To resolve this  our algorithm must use explicit sampling for problems
+with large observation spaces. Our second contribution is a construction of sampling networks 
+showing how observations z can be sampled symbolically and how both z and p(z) can be integrated
+into the computation graph so that potential observations are sampled correctly for any setting of the
+current action. This allows full integration with gradient based search and yields the SNAP algorithm.
+We evaluate SNAP on problems from the international planning competition (IPC) 2011  the latest
+IPC with publicly available challenge POMDP problems  comparing its performance to POMCP [21]
+and DESPOT [25]. The results show that the algorithm is competitive on a large range of problems
+and that it has a signiﬁcant advantage on large problems.
+
+2 Background
+
+2.1 MDPs and POMDPs
+A MDP [18] is speciﬁed by {S  A  T  R  γ}  where S is a ﬁnite state space  A is a ﬁnite action space 
+T (s  a  s(cid:48)) = p(s(cid:48)
+|s  a) deﬁnes the transition probabilities  R(s  a) is the immediate reward and γ
+function V π(s) is the expected discounted total reward E[(cid:80)
+is the discount factor. For MDPs (where the state is observed) a policy π : S → A is a mapping
+from states to actions  indicating which action to choose at each state. Given a policy π  the value
+i γiR(si  π(si)) | π]  where si is the ith
+state visited by following π and s0 = s. The action-value function Qπ : S × A → R is the expected
+discounted total reward when taking action a at state s and following π thereafter.
+In POMDPs the agent cannot observe the state. The MDP model is augmented with an observation
+space O and the observation probability function O(z  s(cid:48)  a) = p(z|s(cid:48)  a) where s(cid:48) is the state reached
+and z is the observation in the transition T (s  a  s(cid:48)). That is  in the transition from s to s(cid:48)  observation
+probabilities depend on the next state s(cid:48). The belief state  a distribution over states  provides a
+sufﬁcient statistic of the information from the initial state distribution and history of actions and
+observations. The belief state can be calculated iteratively from the history. More speciﬁcally  given
+the current belief state bt(s)  action at and no observations  we expect to be in
+
+(cid:48)
+bat
+t+1(s
+
+(cid:48)
+) = p(s
+
+(cid:48)
+|bt  at) = Es∼bt(s)[p(s
+
+Given bt(s)  at and observation zt the new belief state is bat zt
+
+|s  at)].
+t+1 (s(cid:48)(cid:48)) = p(s(cid:48)(cid:48)
+t+1(s(cid:48)(cid:48))p(zt|s(cid:48)(cid:48)  at)
+bat
+
+p(zt|bt  at)
+
+|bt  at  zt):
+
+(1)
+
+(2)
+
+(cid:80)
+
+s
+
+(cid:80)
+the denominator
+s(cid:48) bt(s)p(s(cid:48)
+
+(cid:48)(cid:48)
+bat zt
+t+1 (s
+
+) =
+
+p(s(cid:48)(cid:48)  zt|bt  at)
+p(zt|bt  at)
+last
+
+=
+
+where
+
+in the
+
+equation requires
+
+states:
+|s  at)p(zt|s(cid:48)  at). Algorithms for POMDPs typically condition action se-
+lection either directly on the history or on the belief state. The description above assumed an atomic
+representation of states  actions and observations. In factored spaces each of these is speciﬁed by a set
+of variables  where in this paper we assume the variables are binary. In this case  the number of states
+(actions  observations) is exponential in the number of variables  implying that state enumeration
+which is implicit above is not feasible. One way to address this challenge is by using a particle based
+representation for the belief state as in [20  21]. In contrast  our approach approximates the belief
+state as a product distribution which allows for further computational simpliﬁcations.
+
+sum over
+
+a double
+
+2.2 MDP planning by aggregate simulation
+
+Aggregate simulation follows the general scheme of the rollout algorithm [24] with some modiﬁca-
+tions. The core idea in aggregate simulation is to represent a distribution over states at every step of
+planning. Recall that the rollout algorithm [24] estimates the state-action value function Qπ(s  a) by
+
+2
+
+applying a in s and then simulating forward using action selection with π  where the policy π maps
+states to actions. This yields a trajectory  s  a  s1  a1  . . . and the average of the cumulative reward
+over multiple trajectories is used to estimate Qπ(s  a). The lifted-conformant SOGBOFA algorithm of
+[3] works in factored spaces. For the rollout process  it uses an open-loop policy (a.k.a. a straight
+line plan  or a sequential plan) where the sequence of actions is pre-determined and the actions used
+do not depend on the states visited in the trajectory. We refer to this below as a sequential rollout
+plan p. In addition  instead of performing explicit simulations it calculates a product distribution over
+state and reward variables at every step  conditioned on a and p. Finally  while rollout uses a ﬁxed π 
+lifted-conformant SOGBOFA optimizes p at the same time it optimizes a and therefore it can improve
+over the initial rollout scheme. In order to perform this the algorithm approximates the corresponding
+distributions as product distributions over the variables.
+SOGBOFA accepts a high level description of the MDP  where our implementation works with the
+RDDL language [19]  and compiles it into a computation graph. Consider a Dynamic Bayesian
+Network (DBN) which captures the ﬁnite horizon planning objective conditioned on p and a. The
+conditional distribution of each state variable x at any time step is ﬁrst translated into a disjoint
+sum form “if(c1) then p1  if(c2) . . . if(cn) then pn" where pi is p(x=T )  T stands for true  and the
+conditions ci are conjunctions of parent values which are are mutually exclusive and exhaustive.
+
+The last condition implies that the probability that the variable is true is equal to:(cid:80) p(ci)pi. This
+translated into a disjoint sum form(cid:80) p(ci)vi with vi ∈ R. The probabilities for the conditions ci
+ˆp(ci) =(cid:81)
+
+representation is always possible because we work with discrete random variables and the expression
+can be obtained from the conditional probability of x give its parents. In practice the expressions can
+be obtained directly from the RDDL description. Similarly the expected value of reward variables is
+
+wk∈ci ˆp(wk)(cid:81)
+
+are approximated by assuming that their parents are independent  that is p(ci) is approximated by
+¯wk∈ci(1 − ˆp(wk))  where wk and ¯wk are positive and negative literals in
+the conjunction respectively. To avoid size explosion when translating expressions with many parents 
+SOGBOFA skips the translation to disjoint sum form and directly translates from the logical form of
+expressions into a numerical form using standard translation from logical to numerical constructs
+(a ∧ b is a ∗ b  a ∨ b is 1-(1-a)*(1-b)  ¬a is 1-a). These expressions are combined to build an explicit
+computation graph that approximates of the marginal probability for every variable in the DBN.
+To illustrate this process consider the following example from [4] with three state variables s(1) 
+s(2) and s(3)  three action variables a(1)  a(2)  a(3) and two intermediate variables cond1 and cond2.
+The MDP model is given by the following RDDL [19] program where primed variants of variables
+represent the value of the variable after performing the action.
+cond1 = Bernoulli(0.7)
+cond2 = Bernoulli(0.5)
+s’(1) = if (cond1) then ~a(3)
+s’(2) = if (s(1))
+then a(2)
+s’(3) = if (cond2) then s(2)
+reward = s(1) + s(2) + s(3)
+The model is translated into disjoint sum expressions as s’(1) = (1-a(3))*0.7  s’(2) =
+s(1)*a(2)  s’(3) = s(2) * 0.5  r = s(1) + s(2) + s(3). The corresponding computa-
+tion graph  for horizon 3  is shown in the right portion of Figure 1. The bottom layer represents
+the current state and action variables. In the second layer action variables represent the conformant
+policy  and state variables are computed from values in the ﬁrst layer where each node represents the
+corresponding expression. The reward variables are computed at each layer and summed to get the
+cumulative Q value. The graph enables computation of Qp(s  a) by plugging in values for p  s and
+a. For the purpose of our POMDP algorithm it is important to notice that the computation graph in
+SOGBOFA replaces each random variable in the graph with its approximate marginal probability.
+Now given that we have an explicit computation graph we can use it for optimizing a and p using
+gradient based search. This is done by using automatic differentiation [8] to compute gradients w.r.t.
+all variables in a and p and using gradient ascent. To achieve this  for each action variable  e.g.  at (cid:96) 
+
+we optimize p(at (cid:96)=T )  and optimize the joint setting of(cid:81)
+
+(cid:96) p(at (cid:96)=T ) using gradient ascent.
+
+else false
+else false
+else false
+
+SOGBOFA includes several additional heuristics including dynamic control of simulation depth (trying
+to make sure we have enough time for n gradient steps  we make the simulation shallower if graph
+size gets too large)  dynamic selection of gradient step size  maintaining domain constraints  and a
+balance between gradient search and random restarts. In addition  the graph construction simpliﬁes
+obvious numerical operations (e.g.  1 ∗ x = x and 0 ∗ x = 0) and uses dynamic programming to
+avoid regenerating identical node computations  achieving an effect similar to lifting in probabilistic
+
+3
+
+inference. All these heuristics are inherited by our POMDP solver  but they are not important for
+understanding the ideas in this paper. We therefore omit the details and refer to reader to [4  3].
+
+3 Aggregate simulation for POMDP
+
+This section describes a basic version of SNAP which assumes that the observation space is small and
+can be enumerated. Like SOGBOFA  our algorithm performs aggregate rollout with a rollout plan p.
+The estimation is based on an appropriate deﬁnition of the Q() function over belief states:
+
+Qp(bt  at) = Ebt(s)[R(s  at)] +
+
+p(zt|bt  at) V pzt (bat zt
+t+1 )
+
+(3)
+
+(cid:88)
+
+zt
+
+where V p(b) is the cumulative value obtained by using p to choose actions starting from belief state b.
+Notice that we use a different rollout plan pzt for each value of the observation variables which can
+be crucial for calculating an informative value for each bat zt
+t+1 . The update for belief states was given
+above in Eq (1) and (2). Our algorithm implements approximations of these equations by assuming
+factoring through independence and by substituting variables with their marginal probabilities.
+A simple approach to upgrade SOGBOFA to this case will attempt to add observation variables to the
+computation graph and perform the calculations in the same manner. However  this approach does
+not work. Note that observations are descendants of current state and action variables. However  as
+pointed out by [6] the main computational advantage in SOGBOFA results from the fact that there are
+no downstream observed variables in the computation graph. As a result belief propagation does not
+have backward messages and and the computation can be done in one pass. To address this difﬁculty
+we reorder the computations by grounding all possible values for observations  conditioning the
+computation of probabilities and values on the observations and combining the results.
+We start by enforcing factoring over the representation of belief states:
+
+(cid:89)
+
+(cid:89)
+
+(cid:89)
+
+ˆbt(s) =
+
+ˆbt(si);
+
+ˆbat
+t+1(s) =
+
+ˆbat
+t+1(si);
+
+ˆbat zt
+t+1 (s) =
+
+ˆbat zt
+t+1 (si)
+
+i
+
+i
+
+i
+
+We then approximate Eq (1) as
+
+(cid:48)
+(cid:48)
+i=T|{ˆbt(si)}  at)
+i=T ) = ˆp(s
+t+1(s
+
+(cid:48)
+(cid:48)
+i=T|s  at)] ≈ ˆbat
+bat
+i=T ) = Es∼bt(s)[p(s
+t+1(s
+where the notation ˆp indicates that conditioning on the factored set of beliefs {ˆbt(si)} is performed by
+replacing each occurrence of sj in the expression for p(s(cid:48)
+i=T|{sj}  at) with its marginal probability
+ˆbt(sj=T ). We use the same notation with intended meaning for substitution by marginal probabilities
+when conditioning on ˆb in other expressions below. Note that since variables are binary  for any
+variable x it sufﬁces to calculate ˆp(x=T ) where 1 − ˆp(x=T ) is used when the complement is needed.
+We use this implicitly in the following. Similarly  the reward portion of Eq (3) is approximated as
+(cid:81)
+(4)
+The term p(zt|bt  at) from Eq (2) and (3) is approximated by enforcing factoring as p(zt|bt  at) ≈
+k p(zt k|bt  at) where for each factor we have
+p(zt k=T|bt  at) = Ebat
+
+  at)] ≈ ˆp(zt k=T|bt  at) = ˆp(zt k=T|{ˆbat
+Next  to facilitate computations with factored representations  we replace Eq (2) with
+
+Ebt(s)[R(s  at)] ≈ ˆR({ˆbt(si)}  at).
+
+(cid:48)
+t+1(s(cid:48))[p(zt k=T|s
+
+(cid:48)
+i)}  at).
+t+1(s
+
+(cid:48)(cid:48)
+bat zt
+i =T ) =
+t+1 (s
+
+p(s(cid:48)(cid:48)
+
+i =T  zt|bt  at)
+p(zt|bt  at)
+
+=
+
+t+1(s(cid:48)(cid:48)
+bat
+
+i =T )p(zt|s(cid:48)(cid:48)
+p(zt|bt  at)
+
+i =T  bt  at)
+
+.
+
+(5)
+
+(cid:81)
+Notice that because we condition on a single variable s(cid:48)(cid:48)
+the conditioning on bt. This term is approximated by enforcing factoring p(zt|s(cid:48)(cid:48)
+k p(zt k|s(cid:48)(cid:48)
+i =T  bt  at) where each component is
+(cid:48)(cid:48)
+(cid:48)(cid:48)
+i =T {ˆbat
+p(zt k=T|s
+i =T  bt  at) = Ebat
+  at)] ≈ ˆp(zt k=T|s
+and Eq (5) is approximated as:
+
+(cid:48)(cid:48)
+i =T )[p(zt k=T|s
+
+i the last term in the numerator must retain
+i =T  bt  at) ≈
+
+(cid:48)(cid:48)
+(cid:96) )}(cid:96)(cid:54)=i  at)
+t+1(s
+
+t+1(s(cid:48)(cid:48)|s(cid:48)(cid:48)
+
+(cid:48)(cid:48)
+ˆbat zt
+i =T ) =
+t+1 (s
+
+t+1(s(cid:48)(cid:48)
+ˆbat
+
+(cid:96) )}(cid:96)(cid:54)=i  at)
+
+.
+
+(6)
+
+i =T ) (cid:81)
+(cid:81)
+k ˆp(zt k|s(cid:48)(cid:48)
+k ˆp(zt k|{ˆbat
+4
+
+i =T {ˆbat
+t+1(s(cid:48)
+
+t+1(s(cid:48)(cid:48)
+i)}  at)
+
+Figure 1: Left: demonstration of the structure of the computation graph in SNAP when there are two
+possible values for observations zt = z1 or zt = z2. Right: demonstration of a three-step simulation
+in SOGBOFA including the representation of conformant actions.
+
+The basic version of our algorithm enumerates all observations and constructs a computation graph
+to capture an approximate version of Eq (3) as follows:
+
+(cid:32)(cid:89)
+
+(cid:88)
+
+(cid:33)
+
+ˆQp(ˆbt  at) = ˆR({ˆbt(si)}  at) +
+
+zt
+
+k
+
+ˆp(zt k|{ˆbat
+
+(cid:48)
+i)}  at)
+t+1(s
+
+ˆV pzt (ˆbat zt
+
+t+1 ).
+
+(7)
+
+t+1 . To construct this portion  we ﬁrst build a graph that computes ˆbat zt
+
+The overall structure has a sum of the reward portion and the next state portion. The next state portion
+has a sum over all concrete values for observations. For each concrete observation value we have
+a product between two portions: the probability for zt and the approximate future value obtained
+from ˆbat zt
+t+1 and then apply ˆV
+to the belief state which is the output of this graph. This value ˆV p(b) is replaced by the SOGBOFA
+graph which rolls out p on the belief state. This is done using the computation of {ˆbat
+i)} which is
+correct because actions in p are not conditioned on states. As explained above  the computation in
+SOGBOFA already handles product distributions over state variables so no change is needed for this
+part. Figure 1 shows the high level structure of the computation graph for POMDPs.
+
+t+1(s(cid:48)
+
+Example: Tiger Problem: To illustrate the details of this construction consider the well known
+Tiger domain with horizon 2  i.e. where the rollout portion is just an estimate of the reward at the
+second step. In Tiger we have one state variable L (true when tiger is on left)  three actions listen 
+openLeft and openRight  and one observation variable H (relevant on listen; true when we hear
+noise on left  false when we hear noise on right). If we open the door where the tiger is  the reward is
+−100 and the trajectory ends. If we open the other door where there is gold the reward is +10 and
+the game ends. The cost of taking a listen action is -10. If we listen then we hear noise on the
+correct side with probability 0.85 and on the other side with probability 0.15. The initial belief state
+is p(L=T ) = 0.5. Note that the state always remains the same in this problem: p(L(cid:48)=v|L=v)=1.
+We have p(H=T|L(cid:48)  listen) = if L(cid:48) then 0.85 else 0.15 which is translated to L(cid:48)
+∗ 0.85 + (1-L(cid:48)) ∗
+0.15. The reward is R = ((1-L)∗ openRight + L∗ openLeft)∗−100 + ((1-L)∗ openLeft + L∗
+openRight) ∗ 10 + listen ∗ −10. We ﬁrst calculate the approximated ˆQp(ˆbt  at=listen). The
+reward expectation of taking the action listen is -10. According to Eq (6)  the belief state after hearing
+noise is ˆbat=listen H=T
+(L=T ) = 0.85. With the approximation in Eq (4)  the reward expectation
+at step t + 1 is then calculated as E
+t+1 + 0.85 ∗
+
+[R(s  at+1)] ≈ (0.15 ∗ openRight1
+
+t+1
+
+ˆbat=listen H=T
+
+t+1
+
+5
+
+ 1 0 1 0 a1 a2 a3 1 * * * a4 a5 a6 s1 s2 s3 a1 a2 a3 STEP 1 2 r + + + * * * a7 a8 a9 1 Q 0.5 - - 0.7 0.7 0.5 + 3 t+1
+
+ˆbat=listen H=F
+
+t+1
+
+t+1) ∗ 10 + listen1
+
+t+1 + 0.85 ∗ openRight1
+
+t+1) ∗ −100 + (0.15 ∗ openLeft1
+
+[R(s  at+1)] ≈ (0.85 ∗ openRight2
+
+t+1)∗−100+(0.85∗openLeft2
+[R(s  a1
+
+t+1 ∗ −10 
+openLeft1
+where the suprescript o of action is to denote that it works with the belief state o after seeing the
+oth observation. Similarly we have ˆbat=listen H=F
+(L=T ) = 0.15  and the reward expectation on
+the belief state is calculated as E
+t+1 + 0.15 ∗
+t+1∗−10. Note
+openLeft2
+that we have ˆp(H=T ) = ˆp(H=F ) = 0.5. Now with horizon 2  we have ˆQp(ˆbt  at = listen) =
+t+1)]. Note that
+−10 + 0.5 ∗ E
+the conformant actions for step t+1 on different belief states are different. With openLeft1
+t+1=T
+and openRight2
+t+1=T   the total Q estimate is −26.5. Similar computations for openLeft and
+openRight yield ˆQ = −90. Maximizing over at and p we have an optimal conformant path
+listent  openLeftt+1|H=T  openRightt+1|H=F .
+4 Sampling networks for large observation spaces
+
+t+1 +0.15∗openRight2
+t+1)] + 0.5 ∗ E
+
+t+1)∗10+listen2
+[R(s  a2
+
+ˆbat=Tlisten H=T
+
+ˆbatceqlisten H=F
+
+t+1
+
+t+1
+
+The algorithm of the previous section is too slow when there are many observations because we
+generate a sub-graph of the simulation for every possible value. Like other algorithms  when the
+observation space is large we can resort to sampling observations and aggregating values only for
+the observations sampled. Our construction already computes a node in the graph representing an
+approximation of p(zt k|bt  at). Therefore we can sample from the product space of observations
+conditioned on at. Once a set of observations are sampled we can produce the same type of graph as
+before  replacing the explicit calculation of expectation with an average over the sample as in the
+following equation  where N is total number of samples and zn
+
+ˆQp(ˆbt  at) = ˆR({ˆbt(si)}  at) +
+
+1
+N
+
+N(cid:88)
+
+n=1
+
+t is the nth sampled observation
+ˆV pzn
+
+at zn
+t+1 ).
+t
+
+t (ˆb
+
+(8)
+
+date(cid:81)
+
+tributions(cid:81)
+
+However  to implement this idea we must deal
+with two difﬁculties. The ﬁrst is that during
+gradient search at is not a binary action but in-
+stead it represents a product of Bernoulli dis-
+(cid:96) p(at (cid:96)) where each p(at (cid:96)) deter-
+mines our choice for setting action variable at (cid:96)
+to true. This is easily dealt with by replacing
+variables with their expectations as in previous
+calculations. The second is more complex be-
+cause of the gradient search. We can correctly
+sample as above  calculate derivatives and up-
+(cid:96) p(at (cid:96)). But once this is done  at has
+changed and the sampled observations no longer
+reﬂect p(zt k|bt  at). The computation graph is
+still correct  but the observations may not be a
+representative sample for the updated action. To address this we introduce the idea of sampling net-
+works. This provides a static construction that samples observations with correct probabilities for any
+setting of at. Since we deal with product distributions we can deal with each variable separately. Con-
+sider a speciﬁc variable zt k and let x1 be the node in the graph representing ˆp(zt k=T|{ˆbat
+i)}  at).
+Our algorithm draws C ∈ [0  1] from the uniform distribution at graph construction time. Note that
+p(C ≤ x1) = x1. Therefore we can sample a value for zt k at construction time by setting zt k=T
+iff x1 − C ≥ 0. To avoid the use of a non-differential condition (≥ 0) in our graph we replace this
+with ˆzt k = σ(A(x1 − C)) where σ(x) = 1/(1 + e−x) is the sigmoid function and A is a constant
+(A = 10 in our experiments). This yields a node in the graph representing ˆzt k whose value is ≈ 0 or
+≈ 1. The only problem is that at graph construction time we do not know whether this value is 0 or 1.
+We therefore need to modify the portion of the graph that uses ˆp(zt k| . . .) where the construction has
+two variants of this with different conditioning events  and we use the same solution in both cases.
+For concreteness let x2 be the node in the graph representing ˆp(zt k|s(cid:48)(cid:48)
+(cid:96) )}(cid:96)(cid:54)=i  at). The
+value computed by node x2 is used as input to other nodes. We replace these inputs with
+
+Figure 2: Sampling network structure.
+
+i =T {ˆbat
+
+t+1(s(cid:48)(cid:48)
+
+t+1(s(cid:48)
+
+ˆzt k ∗ x2 + (1 − ˆzt k) ∗ (1 − x2).
+
+6
+
+		 1 							c 10 1 - 	- 	* 	1 - 			* * * 	+ 			* * 1 - 			+ 	Now  when ˆzt k ≈ 1 we get x2 and when it is ≈ 0 we get 1 − x2 as desired. We use the same
+construction with x1 to calculate the probability with the second type of conditioning. Therefore 
+the sampling networks are produced at graph construction time but they produce symbolic nodes
+representing concrete samples for zt which are correctly sampled from the distribution conditioned
+on at. Figure 2 shows the sampling network for one ˆzt k and the calculation of the probability.
+SNAP tests if the observation space is smaller than some ﬁxed constant (S = 10 in the experiments). If
+so it enumerates all observations. Otherwise  it integrates sampling networks for up to S observations
+into the previous construction to yield a sampled graph. The process for the dynamic setting of
+simulation depth from SOGBOFA is used for the rollout from all samples. If the algorithm ﬁnds that
+there is insufﬁcient time it generates less than S samples with the goal of achieving at least n = 200
+gradient updates. Optimization proceeds in the same manner as before with the new graph.
+
+5 Discussion
+
+SNAP has two main assumptions or sources of potential limitations. The ﬁrst is the fact that the rollout
+plans do not depend on observations beyond the ﬁrst step. Our approximation is distinct from the
+QMDP approximation [13] which ignores observations altogether. It is also different from the FIB
+approximation of [9] which uses observations from the ﬁrst step but uses a state based approximation
+thereafter  in contrast with our use of a conformant plan over the factored belief state. The second
+limitation is the factoring into products of independent variables. Factoring is not new and has been
+used before for POMDP planning (e.g. [14  15  16]) where authors have shown practical success
+across different problems and some theoretical guarantees. However  the manner in which factoring
+is used in our algorithm  through symbolic propagation with gradient based optimization  is new and
+is the main reason for efﬁciency and improved search.
+POMCP [21] and DESPOT [25] perform search in belief space and develop a search tree which
+optimizes the action at every branch in the tree. Very recently these algorithms were improved to
+handle large  even continuous  observation spaces [23  7]. Comparing to these  the rollout portion in
+SNAP is more limited because we use a single conformant sequential plan (i.e.  not a policy) for rollout
+and do not expand a tree. On the other hand the aggregate simulation in SNAP provides a signiﬁcant
+speedup. The other main advantage of SNAP is the fact that it samples and computes its values
+symbolically because this allows for effective gradient based search in contrast with unstructured
+sampling of actions in these algorithms. Finally  [21  25] use a particle based representation of the
+belief space  whereas SNAP uses a product distribution. These represent different approximations
+which may work well in different problems.
+In terms of limitations  note that deterministic transitions are not necessarily bad for factored
+representations because a belief focused on one state is both deterministic and factored and this can
+be preserved by the transition function. For example  the work of [15] has already shown this for the
+well known rocksample domain. The same is true for the T-maze domain of [1]. Simple experiments
+(details omitted) show that SNAP solves this problem correctly and that it scales better than other
+systems to large mazes. SNAP can be successful in these problems because one step of observation is
+sufﬁcient and the reward does not depend in a sensitive manner on correlation among variables.
+On the other hand  we can illustrate the limitations of SNAP with two simple domains. The ﬁrst
+has 2 states variables x1  x2  3 action variables a1  a2  a3 and one observation variable o1. The
+initial belief state is uniform over all 4 assignments which when factored is b0 = (0.5  0.5)  i.e. 
+p(x1 = 1) = 0.5 and p(x2 = 1) = 0.5. The reward is if (x1 == x2) then 1 else − 1. The
+actions a1  a2 are deterministic where a1 deterministically ﬂips the value of x1  that is: x(cid:48)
+1 =
+if (a1 ∧ x1) then 0 elseif (a1 ∧ ¯x1) then 1 else x1. Similarly  a2 deterministically ﬂips the value
+of x2. The action a3 gives a noisy observation testing if x1 == x2 as follows: p(o = 1) =
+1 ∧ ¯x(cid:48)
+if (a3 ∧ x(cid:48)
+2) then 0.9 elseif a3 then 0.1 else 0. In this case  starting with
+b0 = (0.5  0.5) it is obvious that the belief is not changed with a1  a2 and calculating for a3 we
+see that p(x(cid:48)
+(0.5·0.9+0.5·0.1)+(0.5·0.9+0.5·0.1) = 0.5 so the belief does not change.
+In other words we always have the same belief and same expected reward (which is zero) and the
+search will fail. On the other hand  a particle based representation of the belief state will be able to
+concentrate on the correct two particles (00 11 or 01 10) using the observations.
+The second problem has the same state and action variables  same reward  and a1  a2 have the same
+dynamics. We have two sensing actions a3 and a4 and two observation variables. Action a3 gives
+
+2) ∨ (a3 ∧ ¯x(cid:48)
+1 ∧ x(cid:48)
+1 = 1|o = 1) =
+
+0.5·0.9+0.5·0.1
+
+7
+
+Figure 3: Top Left: The size of state  action  and observation spaces for the three IPC domains. Other
+Panels: Average reward of algorithms normalized relative to SNAP (score=1) and Random (score=0).
+
+a noisy observation of the value of x1 as follows: p(o1 = 1) = if (a3 ∧ x(cid:48)
+1) then 0.9 elseif (a3 ∧
+¯x(cid:48)
+1) then 0.1 else 0. Action a4 does the same w.r.t. x2. In this case the observation from a3 does
+change the belief  for example: p(x(cid:48)
+0.5·0.9+0.5·0.1 = 0.9. That is  if we observe
+o1 = 1 then the belief is (0.9  0.5). But the expected reward is still: 0.9 · 0.5 + 0.1 · 0.5 − 0.9 · 0.5 −
+0.1 · 0.5 = 0 so the new belief state is not distinguishable from the original one  unless one uses
+additional sensing action a4 to identify the value of x2. In other words for this problem we must
+develop a search tree because one level of observations does not sufﬁce. If we were to develop such a
+tree we can reach belief states like (0.9  0.9) that identiﬁes the correct action and we can succeed
+despite factoring  but SNAP will fail because the search is limited to one level of observations. Here
+too a particle based representation will succeed because it retains the correlation between x1  x2.
+
+1 = 1|o1 = 1) =
+
+0.5·0.9
+
+6 Experimental evaluation
+
+We compare the performance of SNAP to the state-of-the-art online planners for POMDP. Speciﬁcally 
+we compare to POMCP [21] and DESPOT [25]. For DESPOT  we use the original implementation
+from https://github.com/AdaCompNUS/despot/. For POMCP we use the implementation from the
+winner of IPC2011 Boolean POMDP track  POMDPX NUS. POMDPX NUS is a combination of an
+ofﬂine algorithm SARSOP [12] and POMCP. It triggers different algorithms depending on the size of
+the problem. Here  we only use their POMCP implementation. DESPOT and POMCP are domain
+independent planners  but previous work has used manually speciﬁed domain knowledge to improve
+their performance in speciﬁc domains. Here we test all algorithms without domain knowledge.
+We compare the planners on 3 IPC domains. In CrossingTraffic  the robot tries to move from
+one side of a river to the other side  with a penalty at every step when staying in the river. Floating
+obstacles randomly appear upstream in the river and ﬂoat downstream. If running into an obstacle 
+the robot will be trapped and cannot move anymore. The robot has partial observation of whether and
+where the obstacles appear. The sysadmin domain models a network of computers. A computer has
+a probability of failure which depends on the proportion of all other computers connected to it that
+are running. The agent can reboot one or more computers  which has a cost but makes sure that the
+computer is running in the next step. The goal is to keep as many computers as possible running for
+the entire horizon. The agent has a stochastic observation of whether each computer is still running.
+In the traffic domain  there are multiple trafﬁc lights that work at different intersections of roads.
+Cars ﬂow from the roads to the intersections and the goal is to minimize the number of cars waiting
+at intersections. The agent can only observe if there are cars running into each intersection and in
+which direction but not their number. For each domain  we use the original 10 problems from the
+competition  but add two larger problems  where  roughly speaking  the problems get harder as their
+
+8
+
+-0.6-0.4-0.2 0 0.2 0.4 0.6 0.8 1 1.2 2 4 6 8 10 12normalized scoreinstance indexDomain:SysadminRandomPO-SNAPDESPOTPOMCP-4-3-2-1 0 1 2 4 6 8 10 12normalized scoreinstance indexDomain:TrafficRandomPO-SNAPDESPOTPOMCP 0 0.5 1 1.5 2 2.5 2 4 6 8 10 12normalized scoreinstance indexDomain:CrossingTrafficRandomPO-SNAPDESPOTPOMCPSysadminCrossingTrafﬁcState10451.62⇥10242.56⇥1032Action150416Obs1045512256Figure4:Fromlefttoright:thesysadmindomain thetrafﬁcdomainandthecorssingtrafﬁcdomain. 300 400 500 600 700 800 900 2 4 6 8 10 12normalized scoretime per step (seconds)Performance Comparison with Different Running TimeRandomPO-SNAPDESPOTPOMCP 450 460 470 480 490 500 510 520 530 540 2 4 6 8 10 12cumulative rewardnumber of observations sampledCumulative Reward with Different Number of SamplesPO-SNAPFigure5:Left:performanceanalysisofSNAPgivendifferentamountofrunningtime.Right:performanceanalysisofSNAPgivendifferentnumberofsampledobservations.Forthemainexperimentweuse2secondsplanningtimeperstepforallplanners.Weﬁrstshowthenormalizedcumulativerewardthateachplannergetsfrom100runsoneachproblem.Therawscoresforindividualproblemsvarymakingvisualizationofresultsformanyproblemsdifﬁcult.ForvisualclarityofcomparisonacrossproblemswenormalizethetotalrewardofeachplannerbylinearscalingsuchthatSNAPisalways1andtherandompolicyisalways0.Wedonotincludestandarddeviationsintheplotsbecauseitisnotclearhowtocalculatethesefornormalizedratios.Rawscoresandstandarddeviationsofthemeanestimateforeachproblemaregiveninthesupplementarymaterials.Giventhesescores visibledifferencesintheplotsarestatisticallysigniﬁcantsothetrendsintheplotsareindicativeofperformance.TheresultsareshowninFig4.First wecanobservethatSNAPhascompetitiveperformanceonalldomainsanditissigniﬁcantlybetteronmostproblems.Notethattheobservationspaceinsysadminislargeandthebasicalgorithmwouldnotbeabletohandleit showingtheimportanceofsamplingnetworks.Second wecanobservethatthelargertheproblemis theeasieritistodistinguishourplannerfromtheothers.ThisillustratesthatSNAPhasanadvantageindealingwithlargecombinatorialstate actionandobservationspaces.TofurtheranalyzetheperformanceofSNAPweexploreitssensitivitytothesettingoftheexperiments.First wecomparetheplannerswithdifferentplanningtime.Wearbitrarilypickedoneofthelargestproblems sysadmin10 forthisexperiment.Wevarytherunningtimefrom1secondperstepto30secondsperstep.TheresultsareinFig5 left.WeﬁrstnoticethatSNAPdominatesotherplannersregardlessoftherunningtime.Itkeepsimprovingasgivenmoretime andthedifferencebetweenSNAPandotherplannersgetslargerwithlongerrunningtime.Thisshowsthatondifﬁcultproblems SNAPisabletoimproveperformancegivenlongerrunningtime andthatitimprovesfasterthantheothers.FinallyweevaluatethesensitivityofSNAPtothenumberofobservationsamples.Toobserve8-1-0.5 0 0.5 1 1.5 2 2 4 6 8 10 12normalized scoreinstance indexDomain:SysadminRandomSNAPDESPOTPOMCP-4-3-2-1 0 1 2 3 2 4 6 8 10 12normalized scoreinstance indexDomain:TrafficRandomSNAPDESPOTPOMCP 0 0.5 1 1.5 2 2.5 2 4 6 8 10 12normalized scoreinstance indexDomain:CrossingTrafficRandomSNAPDESPOTPOMCPFigure 4: Left: performance analysis of SNAP given different amount of running time. Right:
+performance analysis of SNAP given different number of sampled observations.
+
+index increases. The size of the largest problem for each domain is shown in Figure 3. Note that
+the action spaces are relatively small. Similar to SOGBOFA [3]  SNAP can handle much larger action
+spaces whereas we expect POMCP and DESPOT to do less well if the action space increases.
+For the main experiment we use 2 seconds planning time per step for all planners. We ﬁrst show the
+normalized cumulative reward that each planner gets from 100 runs on each problem. The raw scores
+for individual problems vary making visualization of results for many problems difﬁcult. For visual
+clarity of comparison across problems we normalize the total reward of each planner by linear scaling
+such that SNAP is always 1 and the random policy is always 0. We do not include standard deviations
+in the plots because it is not clear how to calculate these for normalized ratios. Raw scores and
+standard deviations of the mean estimate for each problem are given in the supplementary materials.
+Given these scores  visible differences in the plots are statistically signiﬁcant so the trends in the plots
+are indicative of performance. The results are shown in Fig 3. First  we can observe that SNAP has
+competitive performance on all domains and it is signiﬁcantly better on most problems. Note that
+the observation space in sysadmin is large and the basic algorithm would not be able to handle it 
+showing the importance of sampling networks. Second  we can observe that the larger the problem is 
+the easier it is to distinguish our planner from the others. This illustrates that SNAP has an advantage
+in dealing with large combinatorial state  action and observation spaces.
+To further analyze the performance of SNAP we explore its sensitivity to the setting of the experiments.
+First  we compare the planners with different planning time. We arbitrarily picked one of the largest
+problems  sysadmin 10  for this experiment. We vary the running time from 1 to 30 seconds per
+step. The results are in Fig 4  left. We observe that SNAP dominates other planners regardless of the
+running time and that the difference between SNAP and other planners is maintained across the range.
+Next  we evaluate the sensitivity of SNAP to the number of observation samples. In this experiment  in
+order to isolate the effect of the number of samples  we ﬁx the values of dynamically set parameters
+and do not limit the run time of SNAP. In particular we ﬁx the search depth (to 5) and the number of
+updates (to 200) and repeat the experiment 100 times. The number of observations is varied from 1 to
+20. We run the experiments on a relatively small problem  sysadmin 3  to control the run time for
+the experiment. The results are in right plot of Fig 4. We ﬁrst observe that on this problem allowing
+more samples improves the performance of the algorithm. For this problem the improvement is
+dramatic until 5 samples and from 5 to 20 the improvement is more moderate. This illustrates that
+more samples are better but also shows the potential of small sample sizes to yield good performance.
+
+7 Conclusion
+
+The paper introduces SNAP  a new algorithm for solving POMDPs by using sampling networks
+and aggregate simulation. The algorithm is not guaranteed to ﬁnd the optimal solution even if is
+given unlimited time  because it uses independence assumptions together with inference using belief
+propagation (through the graph construction) for portions of its computation. On the other hand 
+as illustrated in the experiments  when time is limited the algorithm provides a good tradeoff as
+compared to state of the art anytime exact solvers. This allows scaling POMDP solvers to factored
+domains where state  observation and actions spaces are all large. SNAP performs well across a range
+of problem domains without the need for domain speciﬁc heuristics.
+
+9
+
+ 0 0.5 1 1.5 0 5 10 15 20 25 30normalized scoretime per step (seconds)Performance Comparison with Different Running TimeRandomSNAPDESPOTPOMCP 450 460 470 480 490 500 510 520 530 540 0 2 4 6 8 10 12 14 16 18 20cumulative rewardnumber of observations sampledCumulative Reward with Different Number of SamplesSNAPAcknowledgments
+
+This work was partly supported by NSF under grant IIS-1616280 and by an Adobe Data Science
+Research Award. Some of the experiments in this paper were performed on the Tufts Linux Research
+Cluster supported by Tufts Technology Services.
+
+References
+[1] Bram Bakker. Reinforcement learning with long short-term memory. In Proceedings of the 14th
+International Conference on Neural Information Processing Systems  pages 1475–1482  2001.
+
+[2] A.R. Cassandra  M.L. Littman  and N.L. Zhang. Incremental pruning: A simple  fast  exact
+method for partially observable Markov Decision Processes. In Proceedings of the Conference
+on Uncertainty in Artiﬁcial Intelligence  pages 54–61  1997.
+
+[3] Hao Cui  Thomas Keller  and Roni Khardon. Stochastic planning with lifted symbolic trajectory
+optimization. In Proceedings of the International Conference on Automated Planning and
+Scheduling  2019.
+
+[4] Hao Cui and Roni Khardon. Online symbolic gradient-based optimization for factored action
+MDPs. In Proceedings of the International Joint Conference on Artiﬁcial Intelligence  pages
+3075–3081  2016.
+
+[5] Hao Cui  Roni Khardon  Alan Fern  and Prasad Tadepalli. Factored MCTS for large scale
+stochastic planning. In Proceedings of the AAAI Conference on Artiﬁcial Intelligence  pages
+3261–3267  2015.
+
+[6] Hao Cui  Radu Marinescu  and Roni Khardon. From stochastic planning to marginal MAP. In
+Proceedings of Advances in Neural Information Processing Systems  pages 3085–3095  2018.
+
+[7] Neha Priyadarshini Garg  David Hsu  and Wee Sun Lee. Despot-alpha: Online POMDP
+
+planning with large state and observation spaces. In Robotics: Science and Systems  2019.
+
+[8] Andreas Griewank and Andrea Walther. Evaluating derivatives - principles and techniques of
+
+algorithmic differentiation (2. ed.). SIAM  2008.
+
+[9] M. Hauskrecht. Value-function approximations for partially observable Markov decision
+
+processes. Journal of Artiﬁcial Intelligence Research  13:33–94  2000.
+
+[10] L. P. Kaelbling  M. L. Littman  and A. R. Cassandra. Planning and acting in partially observable
+
+stochastic domains. Artiﬁcial Intelligence  101:99–134  1998.
+
+[11] Michael Kearns  Yishay Mansour  and Andrew Y. Ng. A sparse sampling algorithm for near-
+optimal planning in large Markov decision processes. Machine Learning  49(2-3):193–208 
+2002.
+
+[12] Hanna Kurniawati  David Hsu  and Wee Sun Lee. Sarsop: Efﬁcient point-based POMDP
+planning by approximating optimally reachable belief spaces. In Robotics: Science and systems 
+volume 2008  2008.
+
+[13] M.L. Littman  A.R. Cassandra  and L.P. Kaelbling. Learning policies for partially observable
+environments: Scaling up. In Proceedings of the International Conference on Machine Learning 
+pages 362–370  1995.
+
+[14] David A. McAllester and Satinder P. Singh. Approximate planning for factored POMDPs
+using belief state simpliﬁcation. In Proceedings of the Fifteenth Conference on Uncertainty in
+Artiﬁcial Intelligence  pages 409–416  1999.
+
+[15] Joni Pajarinen  Jaakko Peltonen  Ari Hottinen  and Mikko A. Uusitalo. Efﬁcient planning in
+large POMDPs through policy graph based factorized approximations. In Proceedings of the
+European Conference on Machine Learning  pages 1–16  2010.
+
+10
+
+[16] Sébastien Paquet  Ludovic Tobin  and Brahim Chaib-draa. An online POMDP algorithm for
+complex multiagent environments. In International Joint Conference on Autonomous Agents
+and Multiagent Systems  pages 970–977  2005.
+
+[17] Judea Pearl. Probabilistic reasoning in intelligent systems - networks of plausible inference.
+
+Morgan Kaufmann series in representation and reasoning. Morgan Kaufmann  1989.
+
+[18] M. L. Puterman. Markov decision processes: Discrete stochastic dynamic programming. Wiley 
+
+1994.
+
+[19] Scott Sanner. Relational dynamic inﬂuence diagram language (RDDL): Language description.
+
+Unpublished Manuscript. Australian National University  2010.
+
+[20] Guy Shani  Joelle Pineau  and Robert Kaplow. A survey of point-based POMDP solvers.
+
+Autonomous Agents and Multi-Agent Systems  27(1):1–51  2013.
+
+[21] David Silver and Joel Veness. Monte-carlo planning in large POMDPs. In Proceedings of the
+
+Conference on Neural Information Processing Systems  pages 2164–2172  2010.
+
+[22] R. D. Smallwood and E. J. Sondik. The optimal control of partially observable Markov processes
+
+over a ﬁnite horizon. Operations Research  21:1071–1088  1973.
+
+[23] Zachary N. Sunberg and Mykel J. Kochenderfer. Online algorithms for POMDPs with continu-
+ous state  action  and observation spaces. In International Conference on Automated Planning
+and Scheduling  pages 259–263  2018.
+
+[24] G. Tesauro and G. Galperin. On-line policy improvement using Monte-Carlo search.
+
+Proceedings of Advances in Neural Information Processing Systems  1996.
+
+In
+
+[25] Nan Ye  Adhiraj Somani  David Hsu  and Wee Sun Lee. DESPOT: Online POMDP planning
+
+with regularization. Journal Artiﬁcial Intelligence Research  58(1)  2017.
+
+11
+
+,Borja Ibarz
+Jan Leike
+Tobias Pohlen
+Geoffrey Irving
+Shane Legg
+Dario Amodei
+Hao(Jackson) Cui
+Roni Khardon

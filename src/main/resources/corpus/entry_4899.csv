@@ -1,0 +1,827 @@
+2018,Scaling Gaussian Process Regression with Derivatives,Gaussian processes (GPs) with derivatives are useful in many applications  including Bayesian optimization  implicit surface reconstruction  and terrain reconstruction. Fitting a GP to function values and derivatives at $n$ points in $d$ dimensions requires linear solves and log determinants with an ${n(d+1) \times n(d+1)}$ positive definite matrix-- leading to prohibitive $\mathcal{O}(n^3d^3)$ computations for standard direct methods. We propose iterative solvers using fast $\mathcal{O}(nd)$ matrix-vector multiplications (MVMs)  together with pivoted Cholesky preconditioning that cuts the iterations to convergence by several orders of magnitude  allowing for fast kernel learning and prediction. Our approaches  together with dimensionality reduction  allows us to scale Bayesian optimization with derivatives to high-dimensional problems and large evaluation budgets.,Scaling Gaussian Process Regression with Derivatives
+
+Center for Applied Mathematics
+
+Center for Applied Mathematics
+
+Kun Dong
+
+Cornell University
+Ithaca  NY 14853
+
+kd383@cornell.edu
+
+David Eriksson
+
+Cornell University
+Ithaca  NY 14853
+
+dme65@cornell.edu
+
+Eric Hans Lee
+
+Cornell University
+Ithaca  NY 14853
+
+ehl59@cornell.edu
+
+Department of Computer Science
+
+Department of Computer Science
+
+David Bindel
+
+Cornell University
+Ithaca  NY 14853
+
+bindel@cornell.edu
+
+Andrew Gordon Wilson
+
+School of Operations Research
+and Information Engineering
+
+Cornell University
+Ithaca  NY 14853
+
+andrew@cornell.edu
+
+Abstract
+
+Gaussian processes (GPs) with derivatives are useful in many applications  includ-
+ing Bayesian optimization  implicit surface reconstruction  and terrain reconstruc-
+tion. Fitting a GP to function values and derivatives at n points in d dimensions
+requires linear solves and log determinants with an n(d + 1) × n(d + 1) positive
+deﬁnite matrix – leading to prohibitive O(n3d3) computations for standard direct
+methods. We propose iterative solvers using fast O(nd) matrix-vector multipli-
+cations (MVMs)  together with pivoted Cholesky preconditioning that cuts the
+iterations to convergence by several orders of magnitude  allowing for fast kernel
+learning and prediction. Our approaches  together with dimensionality reduc-
+tion  enables Bayesian optimization with derivatives to scale to high-dimensional
+problems and large evaluation budgets.
+
+1 Introduction
+
+Gaussian processes (GPs) provide a powerful probabilistic learning framework  including a marginal
+likelihood which represents the probability of data given only kernel hyperparameters. The marginal
+likelihood automatically balances model ﬁt and complexity terms to favor the simplest models that
+explain the data [22  21  27]. Computing the model ﬁt term  as well as the predictive moments
+of the GP  requires solving linear systems with the kernel matrix  while the complexity term  or
+Occam’s factor [18]  is the log determinant of the kernel matrix. For n training points  exact kernel
+learning costs of O(n3) ﬂops and the prediction cost of O(n) ﬂops per test point are computationally
+infeasible for datasets with more than a few thousand points. The situation becomes more challenging
+if we consider GPs with both function value and derivative information  in which case training and
+prediction become O(n3d3) and O(nd) respectively [21  §9.4]  for d input dimensions.
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+Derivative information is important in many applications  including Bayesian Optimization (BO)
+[29]  implicit surface reconstruction [17]  and terrain reconstruction. For many simulation models 
+derivatives may be computed at little extra cost via ﬁnite differences  complex step approximation  an
+adjoint method  or algorithmic differentiation [7]. But while many scalable approximation methods
+for Gaussian process regression have been proposed  scalable methods incorporating derivatives
+have received little attention. In this paper  we propose scalable methods for GPs with derivative
+information built on the structured kernel interpolation (SKI) framework [28]  which uses local
+interpolation to map scattered data onto a large grid of inducing points  enabling fast MVMs using
+FFTs. As the uniform grids in SKI scale poorly to high-dimensional spaces  we also extend the
+structured kernel interpolation for products (SKIP) method  which approximates a high-dimensional
+product kernel as a Hadamard product of low rank Lanczos decompositions [8]. Both SKI and SKIP
+provide fast approximate kernel MVMs  which are a building block to solve linear systems with the
+kernel matrix and to approximate log determinants [6].
+The speciﬁc contributions of this paper are:
+
+and O(1) prediction per test points  relying only on fast MVM with the kernel matrix.
+in high-dimensional spaces without grids. Our approach allows for O(nd) MVMs.
+
+• We extend SKI to incorporate derivative information  enabling O(nd) complexity learning
+• We also extend SKIP  which enables scalable Gaussian process regression with derivatives
+• We illustrate that preconditioning is critical for fast convergence of iterations for kernel ma-
+trices with derivatives. A pivoted Cholesky preconditioner cuts the iterations to convergence
+by several orders of magnitude when applied to both SKI and SKIP with derivatives.
+• We illustrate the scalability of our approach on several examples including implicit surface
+• We show how our methods  together with active subspace techniques  can be used to extend
+• Code  experiments  and ﬁgures may be reproduced at:
+
+ﬁtting of the Stanford bunny  rough terrain reconstruction  and Bayesian optimization.
+
+Bayesian optimization to high-dimensional problems with large evaluation budgets.
+
+https://github.com/ericlee0803/GP_Derivatives.
+
+We start in §2 by introducing GPs with derivatives and kernel approximations. In §3  we extend
+SKI and SKIP to handle derivative information. In §4  we show representative experiments; and we
+conclude in §5. The supplementary materials provide several additional experiments and details.
+
+2 Background and Challenges
+
+A Gaussian process (GP) is a collection of random variables  any ﬁnite number of which are jointly
+Gaussian [21]; it also deﬁnes a distribution over functions on Rd  f ∼ GP(µ  k)  where µ : Rd → R
+is a mean ﬁeld and k : Rd × Rd → R is a symmetric and positive (semi)-deﬁnite covariance kernel.
+For any set of locations X = {x1  . . .   xn} ⊂ Rd  fX ∼ N (µX   KXX ) where fX and µX represent
+the vectors of function values for f and µ evaluated at each of the xi ∈ X  and (KXX )ij = k(xi  xj).
+We assume the observed function value vector yX ∈ Rn is contaminated by independent Gaussian
+noise with variance σ2. We denote any kernel hyperparameters by the vector θ. To be concise  we
+suppress the dependence of k and associated matrices on θ in our notation. Under a Gaussian process
+prior depending on the covariance hyperparameters θ  the log marginal likelihood is given by
+
+L(yX | θ) = − 1
+2
+
+(yX − µX )T α + log | ˜KXX| + n log 2π
+
+(1)
+XX (yX − µX ) and ˜KXX = KXX + σ2I. The standard direct method to evaluate (1)
+where α = ˜K−1
+and its derivatives with respect to the hyperparameters uses the Cholesky factorization of ˜KXX 
+leading to O(n3) kernel learning that does not scale beyond a few thousand points.
+A popular approach to scalable GPs is to approximate the exact kernel with a structured kernel
+that enables fast MVMs [20]. Several methods approximate the kernel via inducing points U =
+{uj}m
+j=1 ⊂ Rd; see  e.g. [20  16  13]. Common examples are the subset of regressors (SoR)  which
+exploits low-rank structure  and fully independent training conditional (FITC)  which introduces an
+additional diagonal correction [23]. For most inducing point methods  the cost of kernel learning
+with n data points and m inducing points scales as O(m2n + m3)  which becomes expensive as m
+
+(cid:104)
+
+(cid:105)
+
+2
+
+Figure 1: An example where gradient information pays off; the true function is on the left. Compare
+the regular GP without derivatives (middle) to the GP with derivatives (right). Unlike the former  the
+latter is able to accurately capture critical points of the function.
+
+grows. As an alternative  Wilson and Nickisch [28] proposed the structured kernel interpolation (SKI)
+approximation 
+
+KXX ≈ W KU U W T
+
+(2)
+
+where U is a uniform grid of inducing points and W is an n-by-m matrix of interpolation weights;
+the authors of [28] use local cubic interpolation so that W is sparse. If the original kernel is stationary 
+each MVM with the SKI kernel may be computed in O(n + m log(m)) time via FFTs  leading
+to substantial performance over FITC and SoR. A limitation of SKI when used in combination
+with Kronecker inference is that the number of grid points increases exponentially with the dimen-
+sion. This exponential scaling has been addressed by structured kernel interpolation for products
+(SKIP) [8]  which decomposes the kernel matrix for a product kernel in d-dimensions as a Hadamard
+(elementwise) product of one-dimensional kernel matrices.
+We use fast MVMs to solve linear systems involving ˜KXX by the method of conjugate gradients.
+To estimate log | ˜KXX| = tr(log( ˜KXX ))  we apply stochastic trace estimators that require only
+products of log( ˜KXX ) with random probe vectors. Given a probe vector z  several ideas have been
+explored to compute log( ˜KXX )z via MVMs with ˜KXX  such as using a polynomial approximation
+of log or using the connection between the Gaussian quadrature rule and the Lanczos method [11  25].
+It was shown in [6] that using Lanczos is superior to the polynomial approximations and that only a
+few probe vectors are necessary even for large kernel matrices.
+Differentiation is a linear operator  and (assuming a twice-differentiable kernel) we may deﬁne a
+multi-output GP for the function and (scaled) gradient values with mean and kernel functions
+
+(cid:20)
+
+k(x  x(cid:48))
+∂xk(x  x(cid:48))
+
+(∂x(cid:48)k(x  x(cid:48)))T
+∂2k(x  x(cid:48))
+
+(cid:21)
+
+ 
+
+(cid:20) µ(x)
+
+(cid:21)
+
+∂xµ(x)
+
+µ∇(x) =
+
+ 
+
+k∇(x  x(cid:48)) =
+
+where ∂xk(x  x(cid:48)) and ∂2k(x  x(cid:48)) represent the column vector of (scaled) partial derivatives in x and
+the matrix of (scaled) second partials in x and x(cid:48)  respectively. Scaling derivatives by a natural length
+scale gives the multi-output GP consistent units  and lets us understand approximation error without
+weighted norms. As in the scalar GP case  we model measurements of the function as contaminated
+by independent Gaussian noise.
+Because the kernel matrix for the GP on function values alone is a submatrix of the kernel matrix
+for function values and derivatives together  the predictive variance in the presence of derivative
+information will be strictly less than the predictive variance without derivatives. Hence  convergence
+of regression with derivatives is always superior to convergence of regression without  which is well-
+studied in  e.g. [21  Chapter 7]. Figure 1 illustrates the value of derivative information; ﬁtting with
+derivatives is evidently much more accurate than ﬁtting function values alone. In higher-dimensional
+problems  derivative information is even more valuable  but it comes at a cost: the kernel matrix
+K∇
+XX is of size n(d + 1)-by-n(d + 1). Scalable approximate solvers are therefore vital in order to
+use GPs for large datasets with derivative data  particularly in high-dimensional spaces.
+
+3
+
+BraninSE no gradientSE with gradients3 Methods
+
+One standard approach to scaling GPs substitutes the exact kernel with an approximate kernel. When
+the GP ﬁts values and gradients  one may attempt to separately approximate the kernel and the kernel
+derivatives. Unfortunately  this may lead to indeﬁniteness  as the resulting approximation is no longer
+a valid kernel. Instead  we differentiate the approximate kernel  which preserves positive deﬁniteness.
+We do this for the SKI and SKIP kernels below  but our general approach applies to any differentiable
+approximate MVM.
+
+3.1 D-SKI
+
+D-SKI (SKI with derivatives) is the standard kernel matrix for GPs with derivatives  but applied to
+the SKI kernel. Equivalently  we differentiate the interpolation scheme:
+
+k(x  x(cid:48)) ≈(cid:88)
+wi(x)k(xi  x(cid:48)) → ∇k(x  x(cid:48)) ≈(cid:88)
+(cid:20) W KU U W T
+(cid:21)
+(cid:20) W
+
+(cid:20) W
+
+(cid:21)T
+
+(cid:21)
+
+i
+
+i
+
+∂W
+
+KU U
+
+∂W
+
+=
+
+(∂W )KU U W T
+
+(cid:20) K (∂K)T
+
+∂K ∂2K
+
+≈
+
+∇wi(x)k(xi  x(cid:48)).
+
+(cid:21)
+
+ 
+
+W KU U (∂W )T
+
+(∂W )KU U (∂W )T
+
+One can use cubic convolutional interpolation [14]  but higher order methods lead to greater accuracy 
+and we therefore use quintic interpolation [19]. The resulting D-SKI kernel matrix has the form
+
+where the elements of sparse matrices W and ∂W are determined by wi(x) and ∇wi(x) — assuming
+quintic interpolation  W and ∂W will each have 6d elements per row. As with SKI  we use FFTs
+to obtain O(m log m) MVMs with KU U . Because W and ∂W have O(n6d) and O(nd6d) nonzero
+elements  respectively  our MVM complexity is O(nd6d + m log m).
+
+3.2 D-SKIP
+
+Several common kernels are separable  i.e.  they can be expressed as products of one-dimensional
+kernels. Assuming a compatible approximation scheme  this structure is inherited by the SKI
+approximation for the kernel matrix without derivatives 
+1 ) (cid:12) (W2K2W T
+
+2 ) (cid:12) . . . (cid:12) (WdKdW T
+d ) 
+
+where A (cid:12) B denotes the Hadamard product of matrices A and B with the same dimensions  and Wj
+and Kj denote the SKI interpolation and inducing point grid matrices in the jth coordinate direction.
+The same Hadamard product structure applies to the kernel matrix with derivatives; for example  for
+d = 2 
+
+K ≈ (W1K1W T
+
+W1K1 ∂W T
+1
+∂W1K1 ∂W T
+1
+W1K1 ∂W T
+1
+
+W1K1W T
+1
+∂W1K1W T
+1
+W1K1W T
+1
+
+W2K2W T
+2
+W2K2W T
+2
+∂W2K2W T
+2
+
+W2K2 ∂W T
+2
+W2K2 ∂W T
+2
+∂W2K2 ∂W T
+2
+
+(3)
+
+ (cid:12)
+
+ W2K2W T
+
+2
+W2K2W T
+2
+∂W2K2W T
+2
+
+ W1K1W T
+
+1
+∂W1K1W T
+1
+W1K1W T
+1
+
+K∇ ≈
+
+.
+
+1 ) (cid:12) (Q2T2QT
+
+Equation 3 expresses K∇ as a Hadamard product of one dimensional kernel matrices. Following this
+approximation  we apply the SKIP reduction [8] and use Lanczos to further approximate equation
+3 as (Q1T1QT
+2 ). This can be used for fast MVMs with the kernel matrix. Applied to
+kernel matrices with derivatives  we call this approach D-SKIP.
+Constructing the D-SKIP kernel costs O(d2(n+m log m+r3n log d))  and each MVM costs O(dr2n)
+ﬂops where r is the effective rank of the kernel at each step (rank of the Lanczos decomposition). We
+achieve high accuracy with r (cid:28) n.
+
+3.3 Preconditioning
+
+Recent work has explored several preconditioners for exact kernel matrices without derivatives [5].
+We have had success with preconditioners of the form M = σ2I + F F T where K∇ ≈ F F T with
+F ∈ Rn×p. Solving with the Sherman-Morrison-Woodbury formula (a.k.a the matrix inversion
+lemma) is inaccurate for small σ; we use the more stable formula M−1b = σ−2(f − Q1(QT
+1 b))
+where Q1 is computed in O(p2n) time by the economy QR factorization
+
+(cid:20) F
+
+(cid:21)
+
+=
+
+σI
+
+(cid:20)Q1
+
+(cid:21)
+
+Q2
+
+4
+
+R.
+
+In our experiments with solvers for D-SKI and D-SKIP  we have found that a truncated pivoted
+Cholesky factorization  K∇ ≈ (ΠL)(ΠL)T works well for the low-rank factorization. Computing
+the pivoted Cholesky factorization is cheaper than MVM-based preconditioners such as Lanczos
+or truncated eigendecompositions as it only requires the diagonal and the ability to form the rows
+where pivots are selected. Pivoted Cholesky is a natural choice when inducing point methods are
+applied as the pivoting can itself be viewed as an inducing point method where the most important
+information is selected to construct a low-rank preconditioner [12]. The D-SKI diagonal can be
+formed in O(nd6d) ﬂops while rows cost O(nd6d + m) ﬂops; for D-SKIP both the diagonal and the
+rows can be formed in O(nd) ﬂops.
+
+3.4 Dimensionality reduction
+
+C =(cid:82)
+
+In many high-dimensional function approximation problems  only a few directions are relevant. That
+is  if f : Rd → R is a function to be approximated  there is often a matrix P with ˜d < d orthonormal
+columns spanning an active subspace of Rd such that f (x) ≈ f (P P T x) for all x in some domain Ω
+of interest [4]. The optimal subspace is given by the dominant eigenvectors of the covariance matrix
+Ω ∇f (x)∇f (x)T dx  generally estimated by Monte Carlo integration. Once the subspace is
+determined  the function can be approximated through a GP on the reduced space  i.e.  we replace the
+original kernel k(x  x(cid:48)) with a new kernel ˇk(x  x(cid:48)) = k(P T x  P T x(cid:48)). Because we assume gradient
+information  dimensionality reduction based on active subspaces is a natural pre-processing phase
+before applying D-SKI and D-SKIP.
+
+4 Experiments
+
+Figure 2: (Left two images) log10 error in SKI approximation and comparison to the exact spectrum.
+(Right two images) log10 error in SKIP approximation and comparison to the exact spectrum.
+
+Our experiments use the squared exponential (SE) kernel  which has product structure and can be
+used with D-SKIP; and the spline kernel  to which D-SKIP does not directly apply. We use these
+kernels in tandem with D-SKI and D-SKIP to achieve the fast MVMs derived in §3. We write D-SE
+to denote the exact SE kernel with derivatives.
+D-SKI and D-SKIP with the SE kernel approximate the original kernel well  both in terms of MVM
+accuracy and spectral proﬁle. Comparing D-SKI and D-SKIP to their exact counterparts in Figure 2 
+we see their matrix entries are very close (leading to MVM accuracy near 10−5)  and their spectral
+proﬁles are indistinguishable. The same is true with the spline kernel. Additionally  scaling tests in
+Figure 3 verify the predicted complexity of D-SKI and D-SKIP. We show the relative ﬁtting accuracy
+of SE  SKI  D-SE  and D-SKI on some standard test functions in Table 1.
+
+4.1 Dimensionality reduction
+
+We apply active subspace pre-processing to the 20 dimensional Welsh test function in [2]. The top six
+eigenvalues of its gradient covariance matrix are well separated from the rest as seen in Figure 4(a).
+However  the function is far from smooth when projected onto the leading 1D or 2D active subspace 
+as Figure 4(b)-4(d) indicates  where the color shows the function value.
+We therefore apply D-SKI and D-SKIP on the 3D and 6D active subspace  respectively  using 5000
+training points  and compare the prediction error against D-SE with 190 training points because
+
+5
+
+-10-8-6-45010015020025030010-610-410-2100True spectrumSKI spectrum200400600800100010-410-2100True spectrumSKIP spectrum-10-8-6-4Figure 3: Scaling tests for D-SKI in two dimensions and D-SKIP in 11 dimensions. D-SKIP uses
+fewer data points for identical matrix sizes.
+
+SE
+SKI
+D-SE
+D-SKI
+
+Branin
+6.02e-3
+3.97e-3
+1.83e-3
+1.03e-3
+
+Franke
+8.73e-3
+5.51e-3
+1.59e-3
+4.06e-4
+
+Sine Norm Sixhump
+6.44e-3
+5.11e-3
+1.05e-3
+5.66e-4
+
+8.64e-3
+5.37e-3
+3.33e-3
+1.32e-3
+
+StyTang
+4.49e-3
+2.25e-3
+1.00e-3
+5.22e-4
+
+Hart3
+1.30e-2
+8.59e-3
+3.17e-3
+1.67e-3
+
+Table 1: Relative RMSE error on 10000 testing points for test functions from [24]  including ﬁve 2D
+functions (Branin  Franke  Sine Norm  Sixhump  and Styblinski-Tang) and the 3D Hartman function.
+We train the SE kernel on 4000 points  the D-SE kernel on 4000/(d + 1) points  and SKI and D-SKI
+with SE kernel on 10000 points to achieve comparable runtimes between methods.
+
+(a) Log Directional Variation
+
+(b) First Active Direction
+
+(c) Second Active Direction
+
+(d) Leading 2D Active Subspace
+
+Figure 4: 4(a) shows the top 10 eigenvalues of the gradient covariance. Welsh is projected onto the
+ﬁrst and second active direction in 4(b) and 4(c). After joining them together  we see in 4(d) that
+points of different color are highly mixed  indicating a very spiky surface.
+
+of our scaling advantage. Table 2 reveals that while the 3D active subspace fails to capture all the
+variation of the function  the 6D active subspace is able to do so. These properties are demonstrated
+by the poor prediction of D-SKI in 3D and the excellent prediction of D-SKIP in 6D.
+
+D-SE
+
+RMSE
+4.900e-02
+SMAE 4.624e-02
+
+D-SKI (3D) D-SKIP (6D)
+2.267e-01
+2.073e-01
+
+3.366e-03
+2.590e-03
+
+Table 2: Relative RMSE and SMAE prediction error for Welsh. The D-SE kernel is trained on
+4000/(d + 1) points  with D-SKI and D-SKIP trained on 5000 points. The 6D active subspace is
+sufﬁcient to capture the variation of the test function.
+
+4.2 Rough terrain reconstruction
+
+Rough terrain reconstruction is a key application in robotics [9  15]  autonomous navigation [10] 
+and geostatistics. Through a set of terrain measurements  the problem is to predict the underlying
+topography of some region. In the following experiment  we consider roughly 23 million non-
+uniformly sampled elevation measurements of Mount St. Helens obtained via LiDAR [3]. We bin
+the measurements into a 970 × 950 grid  and downsample to a 120 × 117 grid. Derivatives are
+approximated using a ﬁnite difference scheme.
+
+6
+
+25005000100002000030000Matrix Size10-410-310-210-1100MVM TimeA Comparison of MVM Scalings O(n2) O(n) O(n)SE ExactSE SKI (2D)SE SKIP (11D)1 2 3 4 5 6 7 8 9 10-15-10-5 0 -1-0.50-505-0.500.5-505-1-0.50-0.500.5Figure 5: On the left is the true elevation map of Mount St. Helens. In the middle is the elevation
+map calculated with the SKI. On the right is the elevation map calculated with D-SKI.
+
+We randomly select 90% of the grid for training and the remainder for testing. We do not include
+results for D-SE  as its kernel matrix has dimension roughly 4 · 104. We plot contour maps predicted
+by SKI and D-SKI in Figure 5 — the latter looks far closer to the ground truth than the former. This
+is quantiﬁed in the following table:
+
+SKI
+D-SKI
+
+(cid:96)
+
+s
+
+σ
+
+35.196
+12.630
+
+207.689
+317.825
+
+12.865
+6.446
+
+σ2
+n.a.
+2.799
+
+Testing SMAE Overall SMAE Time[s]
+37.67
+131.70
+
+0.0357
+0.0254
+
+0.0308
+0.0165
+
+Table 3: The hyperparameters of SKI and D-SKI are listed. Note that there are two different noise
+parameters σ1 and σ2 in D-SKI  for the value and gradient respectively.
+
+4.3
+
+Implicit surface reconstruction
+
+Reconstructing surfaces from point cloud data and surface normals is a standard problem in computer
+vision and graphics. One popular approach is to ﬁt an implicit function that is zero on the surface
+with gradients equal to the surface normal. Local Hermite RBF interpolation has been considered
+in prior work [17]  but this approach is sensitive to noise. In our experiments  using a GP instead
+of splining reproduces implicit surfaces with very high accuracy. In this case  a GP with derivative
+information is required  as the function values are all zero.
+
+Figure 6: (Left) Original surface (Middle) Noisy surface (Right) SKI reconstruction from noisy
+surface (s = 0.4  σ = 0.12)
+
+7
+
+In Figure 6  we ﬁt the Stanford bunny using 25000 points and associated normals  leading to a K∇
+matrix of dimension 105  clearly far too large for exact training. We therefore use SKI with the
+thin-plate spline kernel  with a total of 30 grid points in each dimension. The left image is a ground
+truth mesh of the underlying point cloud and normals. The middle image shows the same mesh  but
+with heavily noised points and normals. Using this noisy data  we ﬁt a GP and reconstruct a surface
+shown in the right image  which looks very close to the original.
+
+4.4 Bayesian optimization with derivatives
+
+Prior work examines Bayesian optimization (BO) with derivative information in low-dimensional
+spaces to optimize model hyperparameters [29]. Wang et al. consider high-dimensional BO (without
+gradients) with random projections uncovering low-dimensional structure [26]. We propose BO with
+derivatives and dimensionality reduction via active subspaces  detailed in Algorithm 1.
+
+Algorithm 1: BO with derivatives and active subspace learning
+
+1: while Budget not exhausted do
+2:
+3:
+4:
+5:
+6:
+7: end
+
+Calculate active subspace projection P ∈ Rd× ˜d using sampled gradients
+Optimize acquisition function  un+1 = arg max A(u) with xn+1 = P un+1
+Sample point xn+1  value fn+1  and gradient ∇fn+1
+Update data Di+1 = Di ∪ {xn+1  fn+1 ∇fn+1}
+Update hyperparameters of GP with gradient deﬁned by kernel k(P T x  P T x(cid:48))
+
+Algorithm 1 estimates the active subspace and ﬁts a GP with derivatives in the reduced space. Kernel
+learning  ﬁtting  and optimization of the acquisition function all occur in this low-dimensional
+subspace. In our tests  we use the expected improvement (EI) acquisition function  which involves
+both the mean and predictive variance. We consider two approaches to rapidly evaluate the predictive
+variance v(x) = k(x  x) − KxX ˜K−1KXx at a test point x. In the ﬁrst approach  which provides a
+biased estimate of the predictive variance  we replace ˜K−1 with the preconditioner solve computed
+by pivoted Cholesky; using the stable QR-based evaluation algorithm  we have
+1 KXx(cid:107)2).
+
+v(x) ≈ ˆv(x) ≡ k(x  x) − σ−2((cid:107)KXx(cid:107)2 − (cid:107)QT
+
+We note that the approximation ˆv(x) is always a (small) overestimate of the true predictive variance
+v(x). In the second approach  we use a randomized estimator as in [1] to compute the predictive
+variance at many points X(cid:48) simultaneously  and use the pivoted Cholesky approximation as a control
+variate to reduce the estimator variance:
+
+(cid:104)
+
+(cid:105) − ˆvX(cid:48).
+
+vX(cid:48) = diag(KX(cid:48)X(cid:48)) − Ez
+
+z (cid:12) (KX(cid:48)X ˜K−1KXX(cid:48)z − KX(cid:48)X M−1KXX(cid:48)z)
+
+The latter approach is unbiased  but gives very noisy estimates unless many probe vectors z are used.
+Both the pivoted Cholesky approximation to the predictive variance and the randomized estimator
+resulted in similar optimizer performance in our experiments.
+To test Algorithm 1  we mimic the experimental set up in [26]: we minimize the 5D Ackley and 5D
+Rastrigin test functions [24]  randomly embedded respectively in [−10  15]50 and [−4  5]50. We ﬁx
+˜d = 2  and at each iteration pick two directions in the estimated active subspace at random to be
+our active subspace projection P . We use D-SKI as the kernel and EI as the acquisition function.
+The results of these experiments are shown in Figure 7(a) and Figure 7(b)  in which we compare
+Algorithm 1 to three other baseline methods: BO with EI and no gradients in the original space;
+multi-start BFGS with full gradients; and random search. In both experiments  the BO variants
+perform better than the alternatives  and our method outperforms standard BO.
+
+5 Discussion
+
+When gradients are available  they are a valuable source of information for Gaussian process regres-
+sion; but inclusion of d extra pieces of information per point naturally leads to new scaling issues.
+We introduce two methods to deal with these scaling issues: D-SKI and D-SKIP. Both are structured
+
+8
+
+(a) BO on Ackley
+
+(b) BO on Rastrigin
+
+Figure 7: In the following experiments  5D Ackley and 5D Rastrigin are embedded into 50 a
+dimensional space. We run Algorithm 1  comparing it with BO exact  multi-start BFGS  and random
+sampling. D-SKI with active subspace learning clearly outperforms the other methods.
+
+interpolation methods  and the latter also uses kernel product structure. We have also discussed
+practical details —preconditioning is necessary to guarantee convergence of iterative methods and
+active subspace calculation reveals low-dimensional structure when gradients are available. We
+present several experiments with kernel learning  dimensionality reduction  terrain reconstruction 
+implicit surface ﬁtting  and scalable Bayesian optimization with gradients. For simplicity  these
+examples all possessed full gradient information; however  our methods trivially extend if only partial
+gradient information is available.
+There are several possible avenues for future work. D-SKIP shows promising scalability  but it also
+has large overheads  and is expensive for Bayesian optimization as it must be recomputed from scratch
+with each new data point. We believe kernel function approximation via Chebyshev interpolation
+and tensor approximation will likely provide similar accuracy with greater efﬁciency. Extracting
+low-dimensional structure is highly effective in our experiments and deserves an independent  more
+thorough treatment. Finally  our work in scalable Bayesian optimization with gradients represents
+a step towards the uniﬁed view of global optimization methods (i.e. Bayesian optimization) and
+gradient-based local optimization methods (i.e. BFGS).
+
+Acknowledgements. We thank NSF DMS-1620038  NSF IIS-1563887  and Facebook Research
+for support.
+
+References
+[1] Costas Bekas  Eﬁ Kokiopoulou  and Yousef Saad. An estimator for the diagonal of a matrix.
+
+Applied Numerical Mathematics  57(11-12):1214–1229  November 2007.
+
+[2] Einat Neumann Ben-Ari and David M Steinberg. Modeling data from computer experiments:
+an empirical comparison of kriging with MARS and projection pursuit regression. Quality
+Engineering  19(4):327–338  2007.
+
+[3] Puget Sound LiDAR Consortium. Mount Saint Helens LiDAR data. University of Washington 
+
+2002.
+
+[4] Paul G. Constantine. Active subspaces: Emerging ideas for dimension reduction in parameter
+
+studies. SIAM  2015.
+
+[5] Kurt Cutajar  Michael Osborne  John Cunningham  and Maurizio Filippone. Preconditioning
+kernel matrices. In Proceedings of the International Conference on Machine Learning (ICML) 
+pages 2529–2538  2016.
+
+[6] Kun Dong  David Eriksson  Hannes Nickisch  David Bindel  and Andrew G. Wilson. Scalable
+log determinants for Gaussian process kernel learning. In Advances in Neural Information
+Processing Systems (NIPS)  pages 6330–6340  2017.
+
+9
+
+0100200300400500-20-15-10-5BO exactBO D-SKIBFGSRandom sampling0100200300400500-40-20020BO exactBO SKIBFGSRandom sampling[7] Alexander Forrester  Andy Keane  et al. Engineering design via surrogate modelling: a practical
+
+guide. John Wiley & Sons  2008.
+
+[8] Jacob R Gardner  Geoff Pleiss  Ruihan Wu  Kilian Q Weinberger  and Andrew Gordon Wilson.
+Product kernel interpolation for scalable Gaussian processes. In Artiﬁcial Intelligence and
+Statistics (AISTATS)  2018.
+
+[9] David Gingras  Tom Lamarche  Jean-Luc Bedwani  and Érick Dupuis. Rough terrain recon-
+struction for rover motion planning. In Proceedings of the Canadian Conference on Computer
+and Robot Vision (CRV)  pages 191–198. IEEE  2010.
+
+[10] Raia Hadsell  J. Andrew Bagnell  Daniel F. Huber  and Martial Hebert. Space-carving kernels
+for accurate rough terrain estimation. International Journal of Robotics Research  29:981–996 
+July 2010.
+
+[11] Insu Han  Dmitry Malioutov  and Jinwoo Shin. Large-scale log-determinant computation
+through stochastic Chebyshev expansions. In Proceedings of the International Conference on
+Machine Learning (ICML)  pages 908–917  2015.
+
+[12] Helmut Harbrecht  Michael Peters  and Reinhold Schneider. On the low-rank approximation by
+the pivoted Cholesky decomposition. Applied Numerical Mathematics  62(4):428–440  2012.
+
+[13] James Hensman  Nicoló Fusi  and Neil D. Lawrence. Gaussian processes for big data. In
+
+Proceedings of the Conference on Uncertainty in Artiﬁcial Intelligence (UAI)  2013.
+
+[14] Robert Keys. Cubic convolution interpolation for digital image processing. IEEE Transactions
+
+on Acoustics  Speech  and Signal Processing  29(6):1153–1160  1981.
+
+[15] Kurt Konolige  Motilal Agrawal  and Joan Sola. Large-scale visual odometry for rough terrain.
+
+In Robotics Research  pages 201–212. Springer  2010.
+
+[16] Quoc Le  Tamas Sarlos  and Alexander Smola. Fastfood – computing Hilbert space expansions
+in loglinear time. In Proceedings of the 30th International Conference on Machine Learning 
+pages 244–252  2013.
+
+[17] Ives Macedo  Joao Paulo Gois  and Luiz Velho. Hermite radial basis functions implicits.
+
+Computer Graphics Forum  30(1):27–42  2011.
+
+[18] David J. C. MacKay.
+University Press  2003.
+
+Information theory  inference and learning algorithms. Cambridge
+
+[19] Erik H. W. Meijering  Karel J. Zuiderveld  and Max A. Viergever. Image reconstruction by
+convolution with symmetrical piecewise nth-order polynomial kernels. IEEE Transactions on
+Image Processing  8(2):192–201  1999.
+
+[20] Joaquin Quiñonero-Candela and Carl Edward Rasmussen. A unifying view of sparse approxi-
+mate Gaussian process regression. Journal of Machine Learning Research  6(Dec):1939–1959 
+2005.
+
+[21] C. E. Rasmussen and C. K. I. Williams. Gaussian processes for machine learning. The MIT
+
+Press  2006.
+
+[22] Carl Edward Rasmussen and Zoubin Ghahramani. Occam’s razor. In Advances in Neural
+
+Information Processing Systems (NIPS)  pages 294–300  2001.
+
+[23] Edward Snelson and Zoubin Ghahramani. Sparse Gaussian processes using pseudo-inputs. In
+
+Advances in Neural Information Processing Systems (NIPS)  pages 1257–1264  2005.
+
+[24] S. Surjanovic and D. Bingham. Virtual library of simulation experiments: Test functions and
+
+datasets. http://www.sfu.ca/ ssurjano  2018.
+
+[25] Shashanka Ubaru  Jie Chen  and Yousef Saad. Fast estimation of tr(F (A)) via stochastic
+Lanczos quadrature. SIAM Journal on Matrix Analysis and Applications  38(4):1075–1099 
+2017.
+
+10
+
+[26] Ziyu Wang  Masrour Zoghi  Frank Hutter  David Matheson  Nando De Freitas  et al. Bayesian
+optimization in high dimensions via random embeddings. In Proceedings of the International
+Joint Conferences on Artiﬁcial Intelligence  pages 1778–1784  2013.
+
+[27] Andrew G Wilson  Christoph Dann  Chris Lucas  and Eric P Xing. The human kernel. In
+
+Advances in neural information processing systems  pages 2854–2862  2015.
+
+[28] Andrew G. Wilson and Hannes Nickisch. Kernel interpolation for scalable structured Gaussian
+processes (KISS-GP). Proceedings of the International Conference on Machine Learning
+(ICML)  pages 1775–1784  2015.
+
+[29] Jian Wu  Matthias Poloczek  Andrew G Wilson  and Peter Frazier. Bayesian optimization with
+gradients. In Advances in Neural Information Processing Systems (NIPS)  pages 5273–5284 
+2017.
+
+11
+
+,Mohammad Karimi
+Mario Lucic
+Hamed Hassani
+Andreas Krause
+David Eriksson
+Kun Dong
+Eric Lee
+David Bindel
+Andrew Wilson

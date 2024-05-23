@@ -1,0 +1,950 @@
+2018,Learning Beam Search Policies via Imitation Learning,Beam search is widely used for approximate decoding in structured prediction problems. Models often use a beam at test time but ignore its existence at train time  and therefore do not explicitly learn how to use the beam. We develop an unifying meta-algorithm for learning beam search policies using imitation learning. In our setting  the beam is part of the model and not just an artifact of approximate decoding. Our meta-algorithm captures existing learning algorithms and suggests new ones. It also lets us show novel no-regret guarantees for learning beam search policies.,Learning Beam Search Policies via Imitation
+
+Learning
+
+Renato Negrinho1
+
+Matthew R. Gormley1
+
+Geoffrey J. Gordon1 2
+
+1Machine Learning Department  Carnegie Mellon University
+
+2Microsoft Research
+
+{negrinho mgormley ggordon}@cs.cmu.edu
+
+Abstract
+
+Beam search is widely used for approximate decoding in structured prediction
+problems. Models often use a beam at test time but ignore its existence at train
+time  and therefore do not explicitly learn how to use the beam. We develop an
+unifying meta-algorithm for learning beam search policies using imitation learning.
+In our setting  the beam is part of the model  and not just an artifact of approximate
+decoding. Our meta-algorithm captures existing learning algorithms and suggests
+new ones. It also lets us show novel no-regret guarantees for learning beam search
+policies.
+
+1
+
+Introduction
+
+Beam search is the dominant method for approximate decoding in structured prediction tasks such
+as machine translation [1]  speech recognition [2]  image captioning [3]  and syntactic parsing [4].
+Most models that use beam search at test time ignore the beam at train time and instead are learned
+via methods like likelihood maximization. They therefore suffer from two issues that we jointly
+address in this work: (1) learning ignores the existence of the beam and (2) learning uses only oracle
+trajectories. These issues lead to mismatches between the train and test settings that negatively
+affect performance. Our work addresses these two issues simultaneously by using imitation learning
+to develop novel beam-aware algorithms with no-regret guarantees. Our analysis is inspired by
+DAgger [5].
+Beam-aware learning algorithms use beam search at both train and test time. These contrast with
+common two-stage learning algorithms that  ﬁrst  at train time  learn a probabilistic model via
+maximum likelihood  and then  at test time  use beam search for approximate decoding. The insight
+behind beam-aware algorithms is that  if the model uses beam search at test time  then the model
+should be learned using beam search at train time. Resulting beam-aware methods run beam search
+at train time (i.e.  roll-in) to collect losses that are then used to update the model parameters. The ﬁrst
+proposed beam-aware algorithms are perceptron-based  updating the parameters either when the best
+hypothesis does not score ﬁrst in the beam [6]  or when it falls out of the beam [7].
+While there is substantial prior work on beam-aware algorithms  none of the existing algorithms
+expose the learned model to its own consecutive mistakes at train time. When rolling in with the
+learned model  if a transition leads to a beam without the correct hypothesis  existing algorithms
+either stop [6  8  9] or reset to a beam with the correct hypothesis [7  10  11].1 Additionally  existing
+beam-aware algorithms either do not have theoretical guarantees or only have perceptron-style
+guarantees [10]. We are the ﬁrst to prove no-regret guarantees for an algorithm to learn beam search
+policies.
+
+1[12] take a different approach by training with a differentiable approximation of beam search  but decode
+
+with the standard (non-differentiable) search algorithm at test time.
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018)  Montréal  Canada.
+
+Imitation learning algorithms  such as DAgger [5]  leverage the ability to query an oracle at train time
+to learn a model that is competitive (in the no-regret sense) to the best model in hindsight. Existing
+imitation learning algorithms such as SEARN [13]  DAgger [5]2  AggreVaTe [15]  and LOLS [16] 
+execute the learned model at train time to collect data that is then labeled by the oracle and used for
+retraining. Nonetheless  these methods do not take the beam into account at train time  and therefore
+do not learn to use the beam effectively at test time.
+We propose a new approach to learn beam search policies using imitation learning that addresses
+these two issues. We formulate the problem as learning a policy to traverse the combinatorial search
+space of beams. The learned policy is induced via a scoring function: the neighbors of the elements
+of a beam are scored and the top k are used to form the successor beam. We learn a scoring function
+to match the ranking induced by the oracle costs of the neighbors. We introduce training losses
+that capture this insight  among which are variants of the weighted all pairs loss [17] and existing
+beam-aware losses. As the losses we propose are differentiable with respect to the scores  our scoring
+function can be learned using modern online optimization algorithms  e.g. Adam [18].
+In some problems (e.g.  sequence labeling and syntactic parsing) we have the ability to compute
+oracle completions and oracle completion costs for non-optimal partial outputs. Within our imitation
+learning framework  we can use this ability to compute oracle completion costs for the neighbors
+of the elements of a beam at train time to induce an oracle that allows us to continue collecting
+supervision after the best hypothesis falls out of the beam. Using this oracle information  we are able
+to propose a DAgger-like beam-aware algorithm with no-regret guarantees.
+We describe our novel learning algorithm as an instantiation of a meta-algorithm for learning beam
+search policies. This meta-algorithm sheds light into key design decisions that lead to more performant
+algorithms  e.g.  the introduction of better training losses. Our meta-algorithm captures much of
+the existing literature on beam-aware methods (e.g.  [7  8])  allowing a clearer understanding of and
+comparison to existing approaches  for example  by emphasizing that they arise from speciﬁc choices
+of training loss function and data collection strategy  and by proving novel regret guarantees for them.
+Our contributions are: an algorithm for learning beam search policies (Section 4.2) with accompanying
+regret guarantees (Section 5)  a meta-algorithm that captures much of the existing literature (Section 4) 
+and new theoretical results for the early update [6] and LaSO [7] algorithms (Section 5.3).
+
+2 Preliminaries
+
+Structured Prediction as Learning to Search We consider structured prediction in the learning
+to search framework [13  5]. Input-output training pairs D = {(x1  y1)  . . .   (xm  ym)} are drawn
+according to a data generating distribution D jointly over an input space X and an output space Y.
+For each input x ∈ X   there is an underlying search space Gx = (Vx  Ex) encoded as a directed
+graph with nodes Vx and edges Ex. Each output y ∈ Yx is encoded as a terminal node in Gx  where
+Yx ⊆ Y is the set of valid structured outputs for x.
+In this paper  we deal with stochastic policies π : Vx → ∆(Vx)  where ∆(Vx) is the set of probability
+distributions over nodes in Vx. (For convenience and brevity of presentation  we make our policies
+deterministic later in the paper through the introduction of a tie-breaking total order over the elements
+of Vx  but our arguments and theoretical results hold more generally.) The goal is to learn a stochastic
+policy π(·  x  θ) : Vx → ∆(Vx) parametrized by θ ∈ Θ ⊆ Rp that traverses the induced search
+spaces  generating outputs with small expected cost; i.e.  ideally  we would want to minimize
+
+c(θ) = E(x y)∼DEˆy∼π(· x θ)cx y(ˆy) 
+
+(1)
+where cx y : Yx → R is the cost function comparing the ground-truth labeling y to the predicted
+labeling ˆy. We are not able to optimize directly the loss in Equation (1)  but we are able to ﬁnd
+a mixture of policies θ1  . . .   θm  where θt ∈ Θ for all t ∈ [m]  that is competitive with the best
+policy in Θ in the distribution of trajectories induced by the mixture of θ1  . . .   θm. We use notation
+ˆy ∼ π(·  x  θ) to mean that ˆy is generated by sampling a trajectory v1  . . .   vh on Gx by executing
+policy π(·  x  θ)  and returning the labeling ˆy ∈ Y associated with terminal node vh ∈ T . The search
+spaces  cost functions and policies depend on x ∈ X or (x  y) ∈ X × Y—in the sequel  we omit
+indexing by example for conciseness.
+
+2 Scheduled sampling [14] is an instantiation of DAgger.
+
+2
+
+Search Space  Cost  and Policies Each example (x  y) ∈ X × Y induces a search space G =
+(V  E) and a cost function c : Y → R. For all v ∈ V   we introduce its set of neighbors Nv = {v(cid:48) ∈
+V | (v  v(cid:48)) ∈ E}. We identify a single initial node v(0) ∈ V . We deﬁne the set of terminal nodes
+T = {v ∈ V | Nv = ∅}. We assume without loss of generality that all nodes are reachable from
+v(0) and that all nodes have paths to terminal nodes. For clarity of exposition  we assume that G is
+a tree-structured directed graph where all terminals nodes are at distance h from the root v(0). We
+describe in Appendix A how to convert a directed graph search space to a tree-structured one with all
+terminals at the same depth.
+Each terminal node v ∈ T corresponds to a complete output y ∈ Y  which can be compared to the
+ground-truth y∗ ∈ Y via a cost function c : T → R of interest (e.g.  Hamming loss in sequence
+labeling or negative BLEU score [19] in machine translation). We deﬁne the optimal completion cost
+function c∗ : V → R  which computes the cost of the best terminal node reachable from v ∈ V as
+c∗(v) = minv(cid:48)∈Tv c(v(cid:48))  where Tv is the set of terminal nodes reachable from v.
+The deﬁnition of c∗ : V → R naturally gives rise to an oracle policy π∗(·  c∗) : V → ∆(V ). At
+v ∈ V   π∗(v  c∗) can be any ﬁxed distribution (e.g.  uniform or one-hot) over arg minv(cid:48)∈Nv c∗(v(cid:48)).
+For any state v ∈ V   executing π∗(·  c∗) until arriving at a terminal node achieves the lowest possible
+cost for completions of v.
+At v ∈ V   a greedy policy π : V → ∆(V ) induced by a scoring function s : V → R computes a
+ﬁxed distribution π(v  θ) over arg maxv(cid:48)∈Nv s(v(cid:48)  θ). When multiple elements are tied with the same
+highest score  we can choose an arbitrary distribution over them. If there is a single highest scoring
+element  the policy is deterministic. In this paper  we assume the existence of a total order over the
+elements of V that is used for breaking ties induced by a scoring function. The tie-breaking total
+ordering allows us to talk about a particular unique ordering  even when ties occur. The oracle policy
+π∗(·  c∗) : V → ∆(V ) can be thought as being induced by the scoring function −c∗ : V → R.
+
+3 Beam search
+
+Algorithm 1 Beam Search
+1: function BEAMSEARCH(G  k  θ)
+b ← {v(0)} ≡ b(0)
+2:
+while BEST(b  1  s(·  θ)) /∈ T do
+3:
+b ← POLICY(G  b  k  s(·  θ))
+4:
+return BEST(b  1  s(·  θ))
+5:
+6: function POLICY(G  b  k  f)
+7:
+8:
+
+Beam Search Space Given a search space G  we
+construct its beam search space Gk = (Vk  Ek)  where
+k ∈ N is the maximum beam capacity. Vk is the
+set of possible beams that can be formed along the
+search process  and Ek is the set of possible beam
+transitions. Nodes b ∈ Vk correspond to nonempty
+sets of nodes of V with size upper bounded by k  i.e. 
+b = {v1  . . .   v|b|} with 1 ≤ |b| ≤ k and vi ∈ V for
+all i ∈ [|b|]. The initial beam state b(0) ∈ Vk is the
+singleton set with the initial state v(0) ∈ V . Terminal
+nodes in Tk are singleton sets with a single terminal
+node v ∈ T . For b ∈ Vk  we deﬁne Ab = ∪v∈bNv  i.e. 
+the union of the neighborhoods of the elements in b.
+Algorithm 1 describes the beam search variant used
+in our paper. In this paper  all elements in the beam
+are simultaneously expanded when transitioning. It is
+possible to deﬁne different beam search space variants 
+e.g.  by considering different expansion strategies or by handling terminals differently (in the case
+where terminals can be at different depths) 3. The arguments developed in this paper can be extended
+to those variants in a straightforward manner.
+
+Let Ab = ∪v∈bNv
+return BEST(Ab  k  f )
+
+9: function BEST(A  k  f)
+10:
+11:
+12:
+13:
+
+Let A = {v1  . . .   vn} be ordered
+such that f (v1) ≥ ··· ≥ f (vn)
+Let k(cid:48) = min(k  n)
+return v1  . . .   vk(cid:48)
+
+Beam Costs We deﬁne the cost of a beam to be the cost of its lowest cost element  i.e.  we have
+c∗ : Vk → R and  for b ∈ Vk  c∗(b) = minv∈b c∗(v). We deﬁne the beam transition cost function
+c : Ek → R to be c(b  b(cid:48)) = c∗(b(cid:48)) − c∗(b)  for (b  b(cid:48)) ∈ Ek  i.e.  the difference in cost between the
+lowest cost element in b(cid:48) and the lowest cost element in b.
+A cost increase occurs on a transition (b  b(cid:48)) ∈ Ek if c∗(b(cid:48)) > c∗(b)  or equivalently  c(b  b(cid:48)) > 0 
+i.e.  b(cid:48) dropped all the lowest cost neighbors of the elements of b. For all b ∈ Vk  we deﬁne
+
+3[13] mention the possibility of encoding complex search algorithms by deﬁning derived search spaces.
+
+3
+
+SGD or Adam
+
+Algorithm 2 Meta-algorithm
+1: function LEARN(D  θ1  k)
+for each t ∈ [|D|] do
+2:
+Induce G using xt
+3:
+Induce s(·  θt) : V → R using G and θt
+4:
+Induce c∗ : V → R using (xt  yt)
+5:
+b1:j ← BEAMTRAJECTORY(G  c∗  s(·  θt)  k)
+6:
+Incur losses (cid:96)(·  b1)  . . .   (cid:96)(·  bj−1)
+7:
+8:
+
+Compute θt+1 using(cid:80)j−1
+
+b = {b(cid:48) ∈ Nb | c(b  b(cid:48)) = 0}  i.e.  the set of beams neighboring b that do not lead to cost increases.
+N∗
+We will signiﬁcantly overload notation  but usage will be clear from context and argument types  e.g. 
+when referring to c∗ : V → R and c∗ : Vk → R.
+Beam Policies Let π : Vk → ∆(Vk)
+be a policy induced by a scoring function
+f : V → R. To sample b(cid:48) ∼ π(b) for a
+beam b ∈ Vk  form Ab  and compute scores
+f (v) for all v ∈ Ab; let v1  . . .   vn be the
+elements of Ab ordered such that f (v1) ≥
+. . . ≥ f (vn); if v1 ∈ T   b(cid:48) = {v1}; if
+v1 (cid:54)∈ T   let b(cid:48) pick the k top-most elements
+from Ab \ T . At b ∈ Vk  if there are many
+orderings that sort the scores of the ele-
+ments of Ab  we can choose a single one
+deterministically or sample one stochasti-
+cally; if there is a single such ordering  the
+policy π : Vk → ∆(Vk) is deterministic at
+b.
+For each x ∈ X   at train time  we have
+access to the optimal path cost function
+c∗ : V → R  which induces the ora-
+cle policy π∗(·  c∗) : Vk → ∆(Vk). At
+a beam b  a successor beam b(cid:48) ∈ Nb is
+optimal if c∗(b(cid:48)) = c∗(b)  i.e.  at least
+one neighbor with the smallest possible
+cost was included in b(cid:48). The oracle pol-
+icy π∗(·  c∗) : Vk → ∆(Vk) can be seen as
+using scoring function −c∗ : Vk → R to
+transition in the beam search space Gk.
+
+9:
+10: function BEAMTRAJECTORY(G  c∗  f  k)
+11:
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+19:
+20:
+21:
+22:
+23:
+24:
+
+bj+1 ← POLICY(G  bj  k −c∗)
+bj+1 ← POLICY(G  bj  k  f )
+if c∗(bj+1) > c∗(bj) then
+if strategy is stop then
+
+b1 ← {v(0)} ≡ b(0)
+j = 1
+while BEST(bj  1  f ) /∈ T do
+if strategy is oracle then
+
+if strategy is reset then
+
+break
+bj+1 ← POLICY(G  bj  1 −c∗)
+
+return best θt on validation
+
+i=1 (cid:96)(·  bi)  e.g.  by
+
+j ← j + 1
+
+return b1:j
+
+4 Meta-Algorithm
+Our goal is to learn a policy π(·  θ) : Vk → ∆(Vk) induced by a scoring function s(·  θ) : V → R
+that achieves small expected cumulative transition cost along the induced trajectories. Algorithm 2
+presents our meta-algorithm in detail.
+Instantiating our meta-algorithm requires choosing both a
+surrogate training loss function (Section 4.1) and a data collection strategy (Section 4.2). Table 1
+shows how existing algorithms can be obtained as instances of our meta-algorithm with speciﬁc
+choices of loss function  data collection strategy  and beam size.
+
+else
+
+4.1 Surrogate Losses
+
+In the beam search space  a prediction ˆy ∈ Yx for x ∈ X is generated by running π(·  θ)
+
+Insight
+on Gk. This yields a beam trajectory b1:h  where b1 = b(0) and bh ∈ Tk. We have
+c(θ) = E(x y)∼DEˆy∼π(· θ)c(ˆy) = E(x y)∼DEb1:h∼π(· θ)c∗(bh).
+
+The term c∗(bh) can be written in a telescoping manner as
+
+c∗(bh) = c∗(b1) +
+
+c(bi  bi+1).
+
+As c∗(b1) depends on an example (x  y) ∈ X × Y  but not on the parameters θ ∈ Θ  the set of
+minimizers of c : Θ → R is the same as the set of minimizers of
+
+(cid:33)
+
+c(cid:48)(θ) = E(x y)∼DEb1:h∼π(· θ)
+
+c(bi  bi+1)
+
+.
+
+(4)
+
+(2)
+
+(3)
+
+h−1(cid:88)
+
+i=1
+
+(cid:32)h−1(cid:88)
+
+i=1
+
+4
+
+It is not easy to minimize the cost function in Equation (4) as  for example  c(b ·) : Vk → R is
+combinatorial. To address this issue  we observe the following by using linearity of expectation and
+the law of iterated expectations to decouple the term in the sum over the trajectory:
+
+(cid:32)h−1(cid:88)
+
+(cid:33)
+
+h−1(cid:88)
+
+Eb1:h∼π(· θ)
+
+c(bi  bi+1)
+
+=
+
+Ebi∼dθ i
+
+i=1
+
+i=1
+
+= Eb1:h∼π(· θ)
+
+(cid:32)h−1(cid:88)
+
+Ebi+1∼π(bi θ)c(bi  bi+1)
+
+(cid:33)
+Eb(cid:48)∼π(bi θ)c(bi  b(cid:48))
+
+ 
+
+(5)
+
+i=1
+
+where dθ i denotes the distribution over beams in Vk that results from following π(·  θ) on Gk for i
+steps. We now replace Eb(cid:48)∼π(b ·)c(b  b(cid:48)) : Θ → R by a surrogate loss function (cid:96)(·  b) : Θ → R that
+is differentiable with respect to the parameters θ ∈ Θ  and where (cid:96)(θ  b) is a surrogate loss for the
+expected cost increase incurred by following policy π(·  θ) at beam b for one step.
+Elements in Ab should be scored in a way that allows the best elements to be kept in the beam.
+Different surrogate losses arise from which elements we concern ourselves with  e.g.  all the top k
+elements in Ab or simply one of the best elements in Ab. Surrogate losses are then large when the
+scores lead to discarding desired elements in Ab  and small when the scores lead to comfortably
+keeping the desired elements in Ab.
+
+Surrogate Loss Functions The following additional notation allows us to deﬁne losses precisely.
+Let Ab = {v1  . . .   vn} be an arbitrary ordering of the neighbors of the elements in b. Let c =
+c1  . . .   cn be the corresponding costs  where ci = c∗(vi) for all i ∈ [n]  and s = s1  . . .   sn be the
+corresponding scores  where si = s(vi  θ) for all i ∈ [n]. Let σ∗ : [n] → [n] be a permutation such
+that cσ∗(1) ≤ . . . ≤ cσ∗(n)  i.e.  vσ∗(1)  . . .   vσ∗(n) are ordered in increasing order of cost. Note that
+c∗(b) = cσ∗(1). Similarly  let ˆσ : [n] → [n] be a permutation such that sˆσ(1) ≥ . . . ≥ sˆσ(n)  i.e. 
+vˆσ(1)  . . .   vˆσ(n) are ordered in decreasing order of score. We assume unique σ∗ : [n] → [n] and
+ˆσ : [n] → [n] for simplifying the presentation of the loss functions (which can be guaranteed via
+the tie-breaking total order on V ). In this case  at b ∈ Vk  the successor beam b(cid:48) ∈ Nb is uniquely
+determined by the scores of the elements of Ab.
+For each (x  y) ∈ X × Y  the corresponding cost function c∗ : V → R is independent of the
+parameters θ ∈ Θ. We deﬁne a loss function (cid:96)(·  b) : Θ → R at a beam b ∈ Vk in terms of the
+oracle costs of the elements of Ab. We now introduce some well-motivated surrogate loss functions.
+Perceptron and large-margin inspired losses have been used in early update [6]  LaSO [7]  and
+BSO [11]. We also introduce two log losses.
+
+perceptron (ﬁrst) Penalizes the lowest cost element in Ab not being put at the top of the beam.
+When applied on the ﬁrst cost increase  this is equivalent to an “early update” [6].
+
+(6)
+
+(7)
+
+(8)
+
+perceptron (last) Penalizes the lowest cost element in Ab falling out of the beam.
+
+(cid:96)(s  c) = max(cid:0)0  sˆσ(1) − sσ∗(1)
+(cid:96)(s  c) = max(cid:0)0  sˆσ(k) − sσ∗(1)
+
+(cid:1) .
+(cid:1) .
+
+margin (last) Prefers the lowest cost element to be scored higher than the last element in the beam
+by a margin. This yields updates that are similar but not identical to the approximate large-margin
+variant of LaSO [7].
+
+(cid:96)(s  c) = max(cid:0)0  1 + sˆσ(k) − sσ∗(1)
+
+(cid:1)
+
+cost-sensitive margin (last) Weights the margin loss by the cost difference between the lowest
+cost element and the last element in the beam. When applied on a LaSO-style cost increase  this is
+equivalent to the BSO update of [11].
+
+(cid:96)(s  c) = (cˆσ(k) − cσ∗(1)) max(cid:0)0  1 + sˆσ(k) − sσ∗(1)
+
+(cid:1) .
+
+(9)
+
+5
+
+(cid:32)(cid:88)
+
+i∈I
+
+(cid:32) n(cid:88)
+
+(cid:33)
+
+(cid:33)
+
+upper bound Convex upper bound to the expected beam transition cost  Eb(cid:48)∼π(b ·)c(b  b(cid:48)) : Θ → R 
+where b(cid:48) is induced by the scores s ∈ Rn.
+(10)
+where δj = (cσ∗(j) − cσ∗(1))(sσ∗(j) − sσ∗(1) + 1) for j ∈ {k + 1  . . .   n}.
+Intuitively  this
+loss imposes a cost-weighted margin between the best neighbor vσ∗(1) ∈ Ab and the neighbors
+vσ∗(k+1)  . . .   vσ∗(n) ∈ Ab that ought not to be included in the best successor beam b(cid:48). We prove in
+Appendix B that this loss is a convex upper bound for the expected beam transition cost.
+
+(cid:96)(s  c) = max (0  δk+1  . . .   δn)
+
+log loss (beam) Normalizes only over the top k neighbors of a beam according to the scores s.
+
+(cid:96)(s  c) = −sσ∗(1) + log
+
+(11)
+where I = {σ∗(1)  ˆσ(1)  . . .   ˆσ(k)}. The normalization is only over the correct element vσ∗(1) and
+the elements included in the beam. The set of indices I ⊆ [n] encodes the fact that the score vector
+s ∈ Rn may not place vσ∗(1) in the top k  and therefore it has to also be included in that case. This
+loss is used in [9]  albeit introduced differently.
+
+exp(si)
+
+ 
+
+log loss (neighbors) Normalizes over all elements in Ab.
+
+(cid:96)(s  c) = −sσ∗(1) + log
+
+exp(si)
+
+(12)
+
+i=1
+
+Discussion The losses here presented directly capture the purpose of using a beam for prediction—
+ensuring that the best hypothesis stays in the beam  i.e.  that  at b ∈ Vk  vσ∗(1) ∈ Ab is scored
+sufﬁciently high to be included in the successor beam b(cid:48) ∈ Nb. If full cost information is not
+accessible  i.e.  if are not able to evaluate c∗ : V → R for arbitrary elements in V   it is still possible
+to use a subset of these losses  provided that we are able to identify the lowest cost element among
+the neighbors of a beam  i.e.  for all b ∈ Vk  an element v ∈ Ab  such that c∗(v) = c∗(b).
+While certain losses do not appear beam-aware (e.g.  those in Equation (6) and Equation (12))  it
+is important to keep in mind that all losses are collected by executing a policy on the beam search
+space Gk. Given a beam b ∈ Vk  the score vector s ∈ Rn and cost vector c ∈ Rn are deﬁned for the
+elements of Ab. The losses incurred depend on the speciﬁc beams visited. Losses in Equation (6) 
+(10)  and (12) are convex. The remaining losses are non-convex. For k = 1  we recover well-known
+losses  e.g.  loss in Equation (12) becomes a simple log loss over the neighbors of a single node 
+which is precisely the loss used in typical log-likelihood maximization models; loss in Equation (7)
+becomes a perceptron loss. In Appendix C we discuss convexity considerations for different types of
+losses. In Appendix D  we present additional losses and expand on their connections to existing work.
+
+4.2 Data Collection Strategy
+Our meta-algorithm requires choosing a train time policy π : Vk → ∆(Vk) to traverse the beam
+search space Gk to collect supervision. Sampling a trajectory to collect training supervision is done
+by BEAMTRAJECTORY in Algorithm 2.
+oracle Our simplest policy follows the oracle policy π∗ : Vk → ∆(Vk) induced by the optimal
+completion cost function c∗ : V → R (as in Section 3). Using the terminology of Algorithm 1  we
+can write π∗(b  c∗) = POLICY(G  b  k −c∗). This policy transitions using the negated sorted costs
+of the elements in Ab as scores.
+The oracle policy does not address the distribution mismatch problem. At test time  the learned policy
+will make mistakes and visit beams for which it has not collected supervision at train time  leading to
+error compounding. Imitation learning tells us that it is necessary to collect supervision at train time
+with the learned policy to avoid error compounding at test time [5].
+We now present data collection strategies that use the learned policy. For brevity  we only cover the
+case where the learned policy is always used (except when the transition leads to a cost-increase)  and
+leave the discussion of additional possibilities (e.g.  probabilistic interpolation of learned and oracle
+policies) to Appendix E.3. When an edge (b  b(cid:48)) ∈ Ek incurring cost increase is traversed  different
+strategies are possible:
+
+6
+
+Table 1: Existing and novel beam-aware algorithms as instances of our meta-algorithm. Our theoret-
+ical guarantees require the existence of a deterministic no-regret online learning algorithm for the
+resulting problem.
+
+Algorithm
+
+log-likelihood
+DAGGER [5]
+early update [6]
+LaSO (perceptron) [7]
+LaSO (large-margin) [7]
+BSO [11]
+globally normalized [9]
+Ours
+
+Meta-algorithm choices
+
+data collection
+oracle
+continue
+stop
+reset
+reset
+reset
+stop
+continue
+
+surrogate loss
+k
+1
+log loss (neighbors)
+1
+log loss (neighbors)
+perceptron (ﬁrst)
+> 1
+perceptron (ﬁrst)
+> 1
+margin (last)
+> 1
+cost-sensitive margin (last) > 1
+log loss (beam)
+> 1
+[choose a surrogate loss]
+> 1
+
+stop Stop collecting the beam trajectory. The last beam in the trajectory is b(cid:48)  i.e.  the beam on
+which we arrive in the transition that led to a cost increase. This data collection strategy is used in
+structured perceptron training with early update [6].
+
+reset Reset the beam to contain only the best state as deﬁned by the optimal completion cost
+function: b(cid:48) = BEST(b  1 −c∗). In the subsequent steps of the policy  the beam grows back to size k.
+LaSO [7] uses this data collection strategy. Similarly to the oracle data collection strategy  rather than
+committing to a speciﬁc b(cid:48) ∈ N∗
+b   we can sample b(cid:48) ∼ π∗(b  c∗) where π∗(b  c∗) is any distribution
+over N∗
+b . The reset data collection strategy collects beam trajectories where the oracle policy π is
+executed conditionally  i.e.  when the roll-in policy π(·  θt) would lead to a cost increase.
+
+continue We can ignore the cost increase and continue following policy πt. This is the strategy
+taken by DAgger [5]. The continue data collection strategy has not been considered in the beam-aware
+setting  and therefore it is a novel contribution of our work. Our stronger theoretical guarantees apply
+to this case.
+
+5 Theoretical Guarantees
+
+We state regret guarantees for learning beam search policies using the continue  reset  or stop data
+collection strategies. One of the main contributions of our work is framing the problem of learning
+beam search policies in a way that allows us to obtain meaningful regret guarantees. Detailed proofs
+are provided in Appendix E. We begin by analyzing the continue collection strategy. As we will see 
+regret guarantees are stronger for continue than for stop or reset.
+No-regret online learning algorithms have an important role in the proofs of our guarantees. Let
+(cid:96)1  . . .   (cid:96)m be a sequence of loss functions with (cid:96)t : Θ → R for all t ∈ [m]. Let θ1  . . .   θm be a
+sequence of iterates with θt ∈ Θ for all t ∈ [m]. The loss function (cid:96)t can be chosen according to an
+arbitrary rule (e.g.  adversarially). The online learning algorithm chooses the iterate θt. Both (cid:96)t and
+θt are chosen online  as functions of loss functions (cid:96)1  . . .   (cid:96)t−1 and iterates θ1  . . .   θt−1.
+Deﬁnition 1. An online learning algorithm is no-regret if for any sequence of functions (cid:96)1  . . .   (cid:96)m
+chosen according to the conditions above we have
+(cid:96)t(θt) − min
+θ∈Θ
+
+m(cid:88)
+
+(cid:96)t(θ) = γm 
+
+(13)
+
+m(cid:88)
+
+t=1
+
+1
+m
+
+1
+m
+
+t=1
+
+where γm goes to zero as m goes to inﬁnity.
+
+Many no-regret online learning algorithms  especially for convex loss functions  have been proposed
+in the literature  e.g.  [20  21  22]. Our proofs of the theoretical guarantees require the no-regret
+online learning algorithm to be deterministic  i.e.  θt to be a deterministic rule of previous observed
+iterates θ1  . . .   θt−1 and loss functions (cid:96)1  . . .   (cid:96)t−1  for all t ∈ [m]. Online gradient descent [20] is
+an example of such an algorithm.
+
+7
+
+In Theorem 1  we prove no-regret guarantees for the case where the no-regret online algorithm is
+presented with explicit expectations for the loss incurred by a beam search policy. In Theorem 2 
+we upper bound the expected cost incurred by a beam search policy as a function of its expected
+loss. This result holds in cases where  at each beam  the surrogate loss is an upper bound on the
+expected cost increase at that beam. In Theorem 3  we use Azuma-Hoeffding to prove no-regret
+high probability bounds for the case where we only have access to empirical expectations of the loss
+incurred by a policy  rather than explicit expectations. In Theorem 4  we extend Theorem 3 for the
+case where the data collection policy is different from the policy that we are evaluating. These results
+allow us to give regret guarantees that depend on how frequently is the data collection policy different
+from the policy that we are evaluating.
+In this section we simply state the results of the theorems alongside some discussion. All proofs
+are presented in detail in Appendix E. Our analysis closely follows that of DAgger [5]  although
+the results need to be interpreted in the beam search setting. Our regret guarantees for beam-aware
+algorithms with different data collection strategies are novel.
+
+5.1 No-Regret Guarantees with Explicit Expectations
+
+(cid:17)
+
+.
+
+i=1 (cid:96)(θ  bi)
+
+(cid:80)m
+
+1
+m
+
+(cid:16)(cid:80)h−1
+
+(cid:80)m
+If the sequence θ1  . . .   θm
+t=1 (cid:96)(θt  θt) −
+
+The sequence of functions (cid:96)1  . . .   (cid:96)m can be chosen in a way that applying a no-regret online learning
+algorithm to generate the sequence of policies θ1  . . .   θm leads to no-regret guarantees for the
+performance of the mixture of θ1  . . .   θm. The adversary presents the no-regret online learning
+algorithm with (cid:96)t = (cid:96)(·  θt) at time t ∈ [m]. The adversary is able to play (cid:96)(·  θt) because it can
+anticipate θt  as the adversary knows the deterministic rule used by the no-regret online learning
+algorithm to pick iterates. Paraphrasing Theorem 1  on the distribution of trajectories induced by the
+the uniform stochastic mixture of θ1  . . .   θm  the best policy in Θ for this distribution performs as
+well (in the limit) as the uniform mixture of θ1  . . .   θm.
+Theorem 1. Let (cid:96)(θ  θ(cid:48)) = E(x y)∼DEb1:h∼π(· θ(cid:48))
+is chosen by a deterministic no-regret online learning algorithm  we have 1
+m
+t=1 (cid:96)(θ  θt) = γm  where γm goes to zero when m goes to inﬁnity.
+minθ∈Θ
+Furthermore  if for all (x  y) ∈ X × Y the surrogate loss (cid:96)(·  b) : Θ → R is an upper bound on the
+expected cost increase Eb(cid:48)∼π(b ·)c(b  b(cid:48)) : Θ → R for all b ∈ Vk  we can transform the surrogate
+loss no-regret guarantees into performance guarantees in terms of c : Y → R. Theorem 2 tells us
+that if the best policy along the trajectories induced by the mixture of θ1  . . .   θm in Θ incurs small
+surrogate loss  then the expected cost resulting from labeling examples (x  y) ∈ X ×Y sampled from
+D with the uniform mixture of θ1  . . .   θm is also small. It is possible to transform the results about
+the uniform mixture of θ1  . . .   θm on results about the best policy among θ1  . . .   θm  e.g.  following
+the arguments of [23]  but for brevity we do not present them in this paper. Proofs of Theorem 1 and
+Theorem 2 are in Appendix E.1
+Theorem 2. Let all the conditions in Deﬁnition 1 be satisﬁed. Additionally  let c(θ) = c∗(b1) +
+(cid:80)m
+= E(x y)∼DEb1:h∼π(· θ)c∗(bh). Let (cid:96)(·  b) : Θ → R be an
+E(x y)∼DEb1:h∼π(· θ)
+t=1 c(θt) ≤ E(x y)∼Dc∗(b1)+
+upper bound on Eb(cid:48)∼π(b ·)c(b  b(cid:48)) : Θ → R  for all b ∈ Vk. Then  1
+minθ∈Θ
+
+t=1 (cid:96)(θ  θt) + γm  where γm goes to zero as m goes to inﬁnity.
+
+(cid:16)(cid:80)h−1
+
+(cid:80)m
+
+1
+m
+
+(cid:17)
+
+i=1 c(bi  bi+1)
+
+m
+
+(cid:16)(cid:80)h−1
+
+(cid:17)
+i=1 (cid:96)(·  bi)
+
+5.2 Finite Sample Analysis
+
+(xt  yt) ∼ D  sample a trajectory b1:h according to π(·  θt)  and obtain ˆ(cid:96)(·  θt) =(cid:80)h−1
+
+Theorem 1 and Theorem 2 are for the case where the adversary presents explicit expectations  i.e.  the
+loss function at time t ∈ [m] is (cid:96)t(·) = E(x y)∼DEb1:h∼π(· θt)
+. We most likely only
+have access to a sample estimator ˆ(cid:96)(·  θt) : Θ → R of the true expectation: we ﬁrst sample an example
+i=1 (cid:96)(·  bi). We
+prove high probability no-regret guarantees for this case. Theorem 3 tells us that the population
+surrogate loss of the mixture of policies θ1  . . .   θm is  with high probability  not much larger than its
+empirical surrogate loss. Combining this result with Theorem 1 and Theorem 2 allows us to give
+ﬁnite sample high probability results for the performance of the mixture of policies θ1  . . .   θm. The
+proof of Theorem 3 is found in Appendix E.2.
+
+8
+
+Theorem 3. Let ˆ(cid:96)(·  θ(cid:48)) = (cid:80)h−1
+jectory using π(·  θ(cid:48)). Let |(cid:80)h−1
+we have P(cid:16) 1
+η(δ  m) = u(cid:112)2 log(1/δ)/m.
+
+(cid:80)m
+t=1 (cid:96)(θt  θt) ≤ 1
+
+i=1 (cid:96)(·  bi) which is generated by sampling (x  y) from D (which
+induces the corresponding beam search space Gk and cost functions)  and sampling a beam tra-
+i=1 (cid:96)(θ  bi)| ≤ u for a constant u ∈ R  for all (x  y) ∈ X × Y 
+beam trajectories b1:h  and θ ∈ Θ. Let the iterates be chosen by a no-regret online learn-
+ing algorithm  based on the sequence of losses (cid:96)t = ˆ(cid:96)(·  θt) : Θ → R  for t ∈ [m]  then
+
+(cid:17) ≥ 1 − δ  where δ ∈ (0  1] and
+
+ˆ(cid:96)(θt  θt) + η(δ  m)
+
+(cid:80)m
+
+t=1
+
+m
+
+m
+
+The insight is that(cid:80)h−1
+
+5.3 Finite Sample Analysis for Arbitrary Data Collection Policies
+All the results stated so far are for the continue data collection strategy where  at time t ∈ [m]  the
+whole trajectory b1:h is collected using the current policy π(·  θt). Stop and reset data collection
+strategies do not necessarily collect the full trajectory under π(·  θt). If the data collection policy
+π(cid:48) : Vk → ∆(Vk) is other than the learned policy  the analysis can be adapted by accounting for the
+difference in distribution of trajectories induced by the learned policy and the data collection policy.
+i=1 (cid:96)(θ  bi) only depends on b1:h−1  so if no cost increases occur in this portion
+of the trajectory  we are effectively sampling the trajectory using π(·  θ) when using the stop and
+reset data collection strategies.
+Prior work presented only perceptron-style results for these settings [6  7]—we are the ﬁrst to present
+regret guarantees. Our guarantee depends on the probability with which b1:h−1 is collected solely
+with π(·  θ). We state the ﬁnite sample analysis result for the case where these probabilities are not
+known explicitly  but we are able to estimate them. The proof of Theorem 4 is found in Appendix E.3.
+Theorem 4. Let πt : Vk → ∆(Vk) be the data collection policy for example t ∈ [m]  which uses
+either the stop or reset data collection strategies. Let ˆα(θt) be the empirical estimate of the probability
+of π(·  θt) incurring at least one cost increase up to time h − 1. Then 
+
+(cid:32)
+
+m(cid:88)
+
+(cid:32)
+where δ ∈ (0  1] and η(δ  m) = u(cid:112)2 log(1/δ)/m.
+
+(cid:96)(θt  θt) ≤ 1
+m
+
+ˆ(cid:96)(θt  πt) + u
+
+m(cid:88)
+
+1
+m
+
+t=1
+
+t=1
+
+P
+
+m(cid:88)
+
+t=1
+
+1 − 1
+m
+
+(cid:33)
+
+(cid:33)
+
+ˆα(θt)
+
++ 2η(δ  m)
+
+≥ 1 − δ 
+
+If the probability of stopping or resetting goes to zero as m goes to inﬁnity  then the term captures
+the discrepancy between the distributions of induced by π(·  θt) and πt vanishes  and we recover a
+guarantee similar to Theorem 3. If the probability of stopping or resetting does not go completely to
+zero  it is still possible to provide regret guarantees for the performance of this algorithm but now
+with a term that does not vanish with increasing m. These regret guarantees for the different data
+collection strategies are novel.
+
+6 Conclusion
+
+We propose a framework for learning beam search policies using imitation learning. We provide
+regret guarantees for both new and existing algorithms for learning beam search policies. One of the
+main contributions is formulating learning beam search policies in the learning to search framework.
+Policies for beam search are induced via a scoring function. The intuition is that the best neighbors in
+a beam should be scored sufﬁciently high  allowing them to be kept in the beam when transitioning
+using these scores. Based on this insight  we motivate different surrogate loss functions for learning
+scoring functions. We recover existing algorithms in the literature through speciﬁc choices for the
+loss function and data collection strategy. Our work is the ﬁrst to provide a beam-aware algorithm
+with no-regret guarantees.
+
+Acknowledgments
+
+The authors would like to thank Ruslan Salakhutdinov  Akshay Krishnamurthy  Wen Sun  Christoph
+Dann  and Kin Olivares for helpful discussions and detailed reviews.
+
+9
+
+References
+[1] Ilya Sutskever  Oriol Vinyals  and Quoc Le. Sequence to sequence learning with neural networks. NeurIPS 
+
+2014.
+
+[2] Alex Graves  Abdel-rahman Mohamed  and Geoffrey Hinton. Speech recognition with deep recurrent
+
+neural networks. ICASSP  2013.
+
+[3] Oriol Vinyals  Alexander Toshev  Samy Bengio  and Dumitru Erhan. Show and tell: A neural image
+
+caption generator. CVPR  2015.
+
+[4] David Weiss  Chris Alberti  Michael Collins  and Slav Petrov. Structured training for neural network
+
+transition-based parsing. ACL  2015.
+
+[5] Stéphane Ross  Geoffrey Gordon  and Drew Bagnell. A reduction of imitation learning and structured
+
+prediction to no-regret online learning. AISTATS  2011.
+
+[6] Michael Collins and Brian Roark. Incremental parsing with the perceptron algorithm. ACL  2004.
+
+[7] Hal Daumé and Daniel Marcu. Learning as search optimization: Approximate large margin methods for
+
+structured prediction. ICML  2005.
+
+[8] Liang Huang  Suphan Fayong  and Yang Guo. Structured perceptron with inexact search. NAACL  2012.
+
+[9] Daniel Andor  Chris Alberti  David Weiss  Aliaksei Severyn  Alessandro Presta  Kuzman Ganchev  Slav
+
+Petrov  and Michael Collins. Globally normalized transition-based neural networks. ACL  2016.
+
+[10] Yuehua Xu and Alan Fern. On learning linear ranking functions for beam search. ICML  2007.
+
+[11] Sam Wiseman and Alexander Rush. Sequence-to-sequence learning as beam-search optimization. ACL 
+
+2016.
+
+[12] Kartik Goyal  Graham Neubig  Chris Dyer  and Taylor Berg-Kirkpatrick. A continuous relaxation of beam
+
+search for end-to-end training of neural sequence models. AAAI  2018.
+
+[13] Hal Daumé  John Langford  and Daniel Marcu. Search-based structured prediction. Machine learning 
+
+2009.
+
+[14] Samy Bengio  Oriol Vinyals  Navdeep Jaitly  and Noam Shazeer. Scheduled sampling for sequence
+
+prediction with recurrent neural networks. NeurIPS  2015.
+
+[15] Stéphane Ross and Andrew Bagnell. Reinforcement and imitation learning via interactive no-regret
+
+learning. arXiv preprint arXiv:1406.5979  2014.
+
+[16] Kai-Wei Chang  Akshay Krishnamurthy  Alekh Agarwal  Hal Daumé  and John Langford. Learning to
+
+search better than your teacher. ICML  2015.
+
+[17] Alina Beygelzimer  John Langford  and Bianca Zadrozny. Machine learning techniques—reductions
+
+between prediction quality metrics. Performance Modeling and Engineering  2008.
+
+[18] Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. ICLR  2015.
+
+[19] Kishore Papineni  Salim Roukos  Todd Ward  and Wei-Jing Zhu. Bleu: a method for automatic evaluation
+
+of machine translation. ACL  2002.
+
+[20] Martin Zinkevich. Online convex programming and generalized inﬁnitesimal gradient ascent. ICML  2003.
+
+[21] Adam Kalai and Santosh Vempala. Efﬁcient algorithms for online decision problems. Journal of Computer
+
+and System Sciences  2005.
+
+[22] Elad Hazan. Introduction to online convex optimization. Foundations and Trends R(cid:13) in Optimization  2016.
+[23] Nicolo Cesa-Bianchi  Alex Conconi  and Claudio Gentile. On the generalization ability of on-line learning
+
+algorithms. IEEE Transactions on Information Theory  2004.
+
+[24] Ben Taskar  Carlos Guestrin  and Daphne Koller. Max-margin Markov networks. NeurIPS  2003.
+
+[25] Kevin Gimpel and Noah Smith. Softmax-margin CRFs: Training log-linear models with cost functions. In
+
+ACL  2010.
+
+10
+
+,Renato Negrinho
+Matthew Gormley
+Geoffrey Gordon
+Ning Miao
+Hao Zhou
+Chengqi Zhao
+Wenxian Shi
+Lei Li

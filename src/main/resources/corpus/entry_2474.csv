@@ -1,0 +1,831 @@
+2019,Hindsight Credit Assignment,We consider the problem of efficient credit assignment in reinforcement learning. In order to efficiently and meaningfully utilize new data  we propose to explicitly assign credit to past decisions based on the likelihood of them having led to the observed outcome. This approach uses new information in hindsight  rather than employing foresight. Somewhat surprisingly  we show that value functions can be rewritten through this lens  yielding a new family of algorithms. We study the properties of these algorithms  and empirically show that they successfully address important credit assignment challenges  through a set of illustrative tasks.,Hindsight Credit Assignment
+
+Anna Harutyunyan  Will Dabney  Thomas Mesnard  Nicolas Heess  Mohammad G. Azar 
+Bilal Piot  Hado van Hasselt  Satinder Singh  Greg Wayne  Doina Precup  Rémi Munos
+
+{harutyunyan  wdabney  munos}@google.com
+
+DeepMind
+
+Abstract
+
+We consider the problem of efﬁcient credit assignment in reinforcement learning.
+In order to efﬁciently and meaningfully utilize new data  we propose to explicitly
+assign credit to past decisions based on the likelihood of them having led to the
+observed outcome. This approach uses new information in hindsight  rather than
+employing foresight. Somewhat surprisingly  we show that value functions can
+be rewritten through this lens  yielding a new family of algorithms. We study the
+properties of these algorithms  and empirically show that they successfully address
+important credit assignment challenges  through a set of illustrative tasks.
+
+1
+
+Introduction
+
+A reinforcement learning (RL) agent is tasked with two fundamental  interdependent problems:
+exploration (how to discover useful data)  and credit assignment (how to incorporate it). In this work 
+we take a careful look at the problem of credit assignment. The instrumental learning object in RL –
+the value function – quantiﬁes the following question: “how does choosing an action a in a state x
+affect future return?”. This is a challenging question for several reasons.
+Issue 1: Variance. The simplest way of estimating the value function is by averaging returns
+(future discounted sums of rewards) starting from taking a in x. This Monte Carlo style of estimation
+is inefﬁcient  since there can be a lot of randomness in trajectories.
+Issue 2: Partial observability. To amortize the search and reduce variance  temporal difference
+(TD) methods  like Sarsa and Q-learning  use a learned approximation of the value function and
+bootstrap. This introduces bias due to the approximation  as well as a reliance on the Markov
+assumption  which is especially problematic when the agent operates outside of a Markov Decision
+Process (MDP)  for example if the state is partially observed  or if there is function approximation.
+Bootstrapping may then cause the value function to not converge at all  or to remain permanently
+biased [19].
+Issue 3: Time as a proxy. TD(λ) methods control this bias-variance trade-off  but they rely on
+time as the sole metric for relevance: the more recent the action  the more credit or blame it receives
+from a future reward [20  21]. Although time is a reasonable proxy for cause-and-effect (especially
+in MDPs)  in general it is a heuristic  and can hence be improved by learning.
+Issue 4: No counterfactuals. The only data used for estimating an action’s value are trajectories
+that contain that action  while ideally we would like to be able to use the same trajectory to update all
+relevant actions  not just the ones that happened to (serendipitously) occur.
+Figure 1 illustrates these issues concretely. At the high-level  we wish to achieve credit assignment
+mechanisms that are both sample-efﬁcient (issues 1 and 4)  and expressive (issues 2 and 3). To this
+end  we propose to reverse the key learning question  and learn estimators that measure: “given
+the future outcome (reward or state)  how relevant was the choice of a in x to achieve it?”  which
+is essentially the credit assignment question itself. Although eligibility traces consider the same
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019)  Vancouver  Canada.
+
+Figure 1: Left. Consider the trajectory shown by solid arrows to be the sampled trajectory  τ. An RL
+algorithm will typically assign credit for the reward obtained in state y to the actions along τ. This is
+unsatisfying for two reasons: (1) action a was not essential in reaching state z  any other a(cid:48) would
+have been just as effective; hence  overemphasizing a is a source of variance; (2) from z  action c was
+sampled  leading to a multi-step trajectory into y  but action b transitions to y from z directly; so  it
+should get more of the credit for y. Note that c could have been an exploratory action  but also could
+have been more likely according to the policy in z  but given that y was reached  b was more likely
+Right. The choice between actions a or b at state x causes a transition to either ya or yb  but they are
+perceptually aliased. On the next decision  the same action c transitions the agent to different states 
+depending on the true underlying y. The state y can be a single state  or could itself be a trajectory.
+This scenario can happen e.g. when the features are being learned. A TD algorithm that bootstraps in
+y will not be able to learn the correct values of a and b  since it will average over the rewards of za
+and zb. When y is a potentially long trajectory with a noisy reward  a Monte Carlo algorithm will
+incorporate the noise along y into the values of both a and b  despite it being irrelevant to the choice
+between them. We would like to be able to directly determine the relevance of a to being in za.
+
+question  they do so in a way that is (purposefully) equivalent to the forward view [20]  and so they
+have to rely mainly on “vanilla" features  like time  to decide credit assignment. Reasoning in the
+backward view explicitly opens up a new family of algorithms. Speciﬁcally  we propose to use a form
+of hindsight conditioning to determine the relevance of a past action to a particular outcome. We
+show that the usual value functions can be rewritten in hindsight  yielding a new family of estimators 
+and derive policy gradient algorithms that use these estimators. We demonstrate empirically the
+ability of these algorithms to address the highlighted issues through a set of diagnostic tasks  which
+are not handled well by other means.
+
+2 Background and Notation
+A Markov decision process (MDP) [14] is a tuple (X  A  p  r  γ)  with X being the state space  A -
+the action space  p : X × A × X → [0  1] – the state-transition distribution (with p(y|x  a) denoting
+the probability of transitioning to state y from x by choosing action a)  r : X × A → R – the reward
+function  and γ ∈ [0  1) – the scalar discount factor. A stochastic policy π maps each state to a
+distribution over actions: π(a|x) denotes the probability of choosing action a in state x. Let T (x  π)
+and T (x  a  π) be the distributions over trajectories τ = (Xk  Ak  Rk)k∈N+ generated by a policy π 
+k≥0 γkRk be the return obtained
+along the trajectory τ. The value (or V-) function V π and the action-value (or Q-) function Qπ denote
+the expected return under the policy π given X0 = x and (X0  A0) = (x  a)  respectively:
+
+given X0 = x and (X0  A0) = (x  a)  respectively. Let Z(τ ) def=(cid:80)
+
+V π(x) def= Eτ∼T (x π)
+
+Z(τ )
+
+ 
+
+Qπ(x  a) def= Eτ∼T (x a π)
+
+Z(τ )
+
+.
+
+(1)
+
+(cid:104)
+
+(cid:105)
+
+(cid:104)
+
+(cid:105)
+
+The beneﬁt of choosing a given action a over the usual policy π is measured by the advantage function
+Aπ(x  a) def= Qπ(x  a) − V π(x). Policy gradient algorithms improve the policy by changing π in the
+direction of the gradient of the value function [22]. This gradient at some initial state x0 is
+∇V π(x0) =
+
+dπ(x|x0)Qπ(x  a)∇π(a|x) = Eτ∼T (x0 π)
+
+γkAπ(Xk  a)∇π(a|Xk)
+
+(cid:104)(cid:88)
+
+(cid:105)
+
+ 
+
+(cid:88)
+
+k≥0
+
+a
+
+(cid:88)
+where dπ(x|x0) def= (cid:80)
+
+x a
+
+k γkPτ∼T (x0 π)(Xk = x) is the (unnormalized) discounted state-visitation
+distribution. Practical algorithms such as REINFORCE [25] approximate Qπ or Aπ with an n-step
+truncated return  possibly combined with a bootstrapped approximate value function V   which is also
+often used as baseline (see [22  12]) along a trajectory τ = (Xk  Ak  Rk)k ∼ T (x  a  π):
+
+Aπ(x  a) ≈ n−1(cid:88)
+
+γkRk + γnV (Xn) − V (x).
+
+k=0
+
+2
+
+3 Conditioning on the Future
+
+The classical value function attempts to answer the question: "how does the current action affect
+future outcomes?" By relying on predictions about these future outcomes  existing approaches often
+exacerbate problems around variance (issue 1) and partial observability (issue 2). Furthermore  these
+methods tend to use temporal distance as a proxy for relevance (issue 3) and are unable to assign
+credit counter-factually (issue 4). We propose to learn estimators that explicitly consider the credit
+assignment question: "given an outcome  how relevant were past decisions?".
+This approach can in fact be linked to some classical methods in statistical estimation. In particular 
+Monte Carlo simulation is known to be inaccurate when there are rare events that are of interest:
+the averaging requires an infeasible number of samples to obtain an accurate estimate [16]. One
+solution is to change measures  that is  to use another distribution for which the events are less rare 
+and correct with importance sampling. The Girsanov theorem is a well-known example of this in
+processes with Brownian dynamics [4]  known to produce lower variance estimates.
+This scenario of rare random events is particularly relevant to efﬁcient credit assignment in RL.
+When a new signiﬁcant outcome is experienced  the agent ought to quickly update its estimates
+and policy accordingly. Let τ ∼ T (x  π) be a sampled trajectory  and f some function of it. By
+changing measures from the policy π with which it was sampled to a future-conditional  or hindsight
+distribution h(·|x  π  f (τ ))  we hope to improve the efﬁciency of credit assignment. The importance
+sampling ratio h(a|x π f (τ ))
+then precisely denotes the relevance of an action a to the speciﬁc future
+f (τ ). If the distribution h(a|x  π  f (τ )) is accurate  this allows us to quickly assign credit to all
+actions relevant to achieving f (τ ). In this work  we consider f to be a future state  or a future return.
+To highlight the use of the future-conditional distribution  we refer to the resulting family of methods
+as Hindsight Credit Assignment (HCA).
+The remainder of this section formalizes the insight outlined above  and derives the usual value
+functions and policy gradients in hindsight  while the next one presents new algorithms based on
+sampling these expressions.
+
+π(a|x)
+
+3.1 Conditioning on Future States
+
+The agent composes its estimates of the return from an action a by summing over the rewards obtained
+from future states Xk. One option of hindsight conditioning is to consider  at each step  the likelihood
+of an action a given that the future state Xk was reached.
+Deﬁnition 1 (State-conditional hindsight distributions). For any action a and any state y  deﬁne
+hk(a|x  π  y) to be the conditional probability over trajectories τ ∼ T (x  π) of the ﬁrst action A0 of
+trajectory τ being equal to a  given that the state y has occurred at step k along trajectory τ:
+
+hk(a|x  π  y)
+
+def
+
+= Pτ∼T (x π)(A0 = a|Xk = y).
+
+(2)
+Intuitively  hk(a|x  π  y) quantiﬁes the relevance of action a to the future state Xk. If a is not relevant
+to reaching Xk  this probability is simply the policy π(a|x) (there is no relevant information in Xk). If
+a is instrumental to reaching Xk  hk(a|x  π  y) > π(a|x)  and vice versa  if a detracts from reaching
+Xk  hk(a|x  π  y) < π(a|x). In general  hk is a lower-entropy distribution than π. The relationship
+of hk to more familiar quantities can be understood through the following identity obtained by an
+application of Bayes’ rule:
+hk(a|x  π  y)
+
+P(Xk = y|X0 = x  A0 = a  π)
+
+Pτ∼T (x a π)(Xk = y)
+Pτ∼T (x π)(Xk = y)
+
+.
+
+=
+
+π(a|x)
+
+=
+
+P(Xk = y|X0 = x  π)
+
+Using this identity and importance sampling  we can rewrite the usual Q-function in terms of hk.
+Since there is only one policy π involved here  we will drop the explicit conditioning  but it is implied.
+Theorem 1. Consider an action a and a state x for which π(a|x) > 0 . Then the following holds:
+
+Qπ(x  a) = r(x  a) + Eτ∼T (x π)
+
+(cid:104)(cid:88)
+
+k≥1
+
+(cid:105)
+
+γk hk(a|x  Xk)
+π(a|x)
+
+Rk
+
+.
+
+So  each of the rewards Rk along the way is weighted by the ratio hk(a|x Xk)
+  which exactly quantiﬁes
+π(a|x)
+how relevant a was in achieving the corresponding state Xk. Following the discussion above  this
+
+3
+
+(cid:105)
+
+(cid:105)
+
+(cid:17)
+
+(cid:17)
+
+ratio is 1 if a is irrelevant  and larger or smaller than 1 in the other cases. The expression for the
+Q-function is similar to that in Eq. (1)  but the new expectation is no longer conditioned on the
+initial action a – the policy π is followed from the start (A0 ∼ π(·|x) instead of A0 = a). This is an
+important point  as it will allow us to use returns generated by any action A0 to update the values
+of all actions  to the extent that they are relevant according to hk(a|x Xk)
+. Theorem 1 implies the
+π(a|x)
+following expression for the advantage:
+
+Aπ(x  a) = r(x  a) − rπ(x) + Eτ∼T (x π)
+
+− 1
+
+γkRk
+
+ 
+
+(3)
+
+(cid:104)(cid:88)
+
+(cid:16) hk(a|x  Xk)
+
+π(a|x)
+
+k≥1
+
+a∈A π(a|x)r(x  a). This form of the advantage is particularly appealing  since it
+directly removes irrelevant rewards from consideration. Indeed  whenever hk(a|x Xk)
+π(a|x) = 1  the reward
+Rk does not participate in the advantage for the value of action a. When there is inconsequential
+noise that is outside of the agent’s control  this may greatly reduce the variance of the estimates.
+
+where rπ(x) =(cid:80)
+
+Removing time dependence. For clarity of exposition  here we have considered the hindsight
+distribution to be additionally conditioned on time. Indeed  hk depends not only on reaching the
+state  but also on the number of timesteps k that it takes to do so. In general  this can be limiting 
+as it introduces a stronger dependence on the particular trajectory  and a harder estimation problem
+of the hindsight distribution. It turns out we can generalize all of the results presented here to a
+time-independent distribution hβ(a|x  y)  which gives the probability of a conditioned on reaching y
+at some point in the future. The scalar β ∈ [0  1) is the "probability of survival" at each step. This can
+either be the discount γ  or a termination probability if the problem is undiscounted. In the discounted
+reward case Eq. (3) can be written in terms of hβ as follows:
+
+Aπ(x  a) = r(x  a) − rπ(x) + Eτ∼T (x π)
+
+− 1
+
+γkRk
+
+ 
+
+(4)
+
+(cid:104)(cid:88)
+
+(cid:16) hβ(a|x  Xk)
+
+π(a|x)
+
+k≥1
+
+with the choice of β = γ. The interested reader may ﬁnd the relevant proofs in the appendix.
+Finally  it is possible to obtain a hindsight V-function  analogously to the Q-function from Theorem 1.
+The next section does this for return-conditional HCA. We include other variations in appendix.
+
+3.2 Conditioning on Future Returns
+
+The previous section derived Q-functions that explicitly reweigh the rewards at each step  based on
+the corresponding states’ connection to the action whose value we wish to estimate. Since ultimately
+we are interested in the return  we could alternatively use it for future conditioning itself.
+Deﬁnition 2 (Return-conditional hindsight distributions). For any action a and any possible return
+z  deﬁne hz(a|x  π  z) to be the conditional probability over trajectories τ ∼ T (x  π) of the ﬁrst
+action A0 being a  given that z has been observed along τ:
+
+hz(a|x  π  z)
+
+def
+
+= Pτ∼T (x π)
+
+(cid:0)A0 = a|Z(τ ) = z(cid:1).
+
+The distribution hz(a|x  π  z) is intuitively similar to hk  but instead of future states  it directly
+quantiﬁes the relevance of a to obtaining the entire return z. This is appealing  since in the end
+we care about returns. Further  this could be simpler to learn  since instead of the possibly high-
+dimensional state  we now need to worry only about a scalar outcome. On the other hand  it is no
+longer "jumpy" in time  so may beneﬁt less from structure in the dynamics. As with hk  we will drop
+the explicit conditioning on π  but it is implied. We have the following result.
+Theorem 2. Consider an action a  and assume that for any possible random return z = Z(τ ) for
+some trajectory τ ∼ T (x  π) we have hz(a|x  z) > 0. Then we have:
+
+(cid:104)
+
+V π(x) = Eτ∼T (x a π)
+
+π(a|x)
+
+Z(τ )
+
+hz(a|x  Z(τ ))
+
+(cid:105)
+
+.
+
+(5)
+
+The V- (rather than Q-) function form here has interesting properties that we will discuss in the
+next section. Mathematically  the two forms are analogous to derive  but the ratio is now ﬂipped.
+Equations (5) and (1) imply the following expression for the advantage:
+
+4
+
+Aπ(x  a) = Eτ∼T (x a π)
+
+(cid:104)(cid:16)
+
+1 −
+
+(cid:17)
+
+(cid:105)
+
+Z(τ )
+
+.
+
+π(a|x)
+
+hz(a|x  Z(τ ))
+
+(6)
+
+The factor c(a|x  Z) = 1 − π(a|x)
+hz(a|x Z) expresses how much a single action a contributed to obtaining
+a return Z. If other actions (drawn from π(·|x)) would have yielded the same return  c(a|x  Z) = 0 
+and the advantage is 0. If an action a has made achieving Z more likely  then c(a|x  Z) > 0  and
+conversly  if other actions would have contributed to achieving Z more than a  then c(a|x  Z) < 0.
+Hence  c(a|x  Z) expresses the impact an action has on the environment  in terms of the return  if
+everything else (future decisions as well as randomness of the environment) is unchanged.
+Both hβ and hz can be learned online from sampled trajectories (see Sec. 4 for algorithms  and a
+discussion in Sec. 4.1). Finally  while we chose to focus on state and return conditioning  one could
+consider other options. For example  conditioning on the reward (instead of the state) at a future time
+k  or an embedding of (or part of) the future trajectory  could have interesting properties.
+
+3.3 Policy Gradients
+
+We now give a policy gradient theorem based on the new expressions of the value function.
+Theorem 3. Let πθ be the policy parameterized by θ  and β = γ. Then  the gradient of the value at
+some state x0 is:
+
+γk(cid:88)
+
+a
+
+(cid:104)(cid:88)
+(cid:104)(cid:88)
+(cid:88)
+
+k≥0
+
+k≥0
+
+∇πθ(a|Xk)Qx(Xk  a)
+
+γk∇ log πθ(Ak|Xk)Az(Xk  Ak)
+γt−k hβ(a|Xk  Xt)
+πθ(a|Xk)
+
+Rt 
+
+(cid:105)
+
+(cid:105)
+
+(7)
+
+(8)
+
+ 
+
+∇θV πθ (x0) = Eτ∼T (x0 πθ)
+
+= Eτ∼T (x0 πθ)
+
+Qx(Xk  a)
+
+def
+= r(Xk  a) +
+
+(cid:16)
+
+t≥k+1
+πθ(a|x)
+
+(cid:17)
+
+Az(x  a)
+
+def
+=
+
+1 −
+
+hz(a|x  Z(τk:∞))
+
+Z(τk:∞).
+
+Note that the expression for state HCA in Eq. (7) is written for all actions  rather than only the
+sampled one. Interestingly  this form does not require (or beneﬁt from) a baseline. Contrary to the
+usual all-actions algorithm which must use the critic  the HCA reweighting allows us to use returns
+sampled from a particular starting action to obtain value estimates for all actions.
+
+4 Algorithms
+
+Using the new policy gradient theorem 3  we will now give novel algorithms based on sampling the
+expectations (7) and (8). Then  we will discuss the training of the relevant hindsight distributions.
+State-Conditional HCA Consider a parametric representation of the policy π(·|x) and the future-
+state-conditional distribution hβ(a|x  y)  as well as the baseline V and an estimate of the immediate
+reward ˆr. Generate T -step trajectories τ T = (Xs  As  Rs)0≤s≤T . We can compose an estimate of
+the return for all actions a (see Theorem 7 in appendix):
+
+t=s+1
+
+Qx(Xs  a) ≈ ˆr(Xs  a) +
+
+Rt + γT−s hβ(a|Xs  XT )
+π(a|Xs)
+The algorithm proceeds by training V (Xs) to predict the usual return Zs = (cid:80)T−1
+predict As (cross entropy loss)  and ﬁnally by updating the policy logits with(cid:80)
+
+t=s γt−sRt +
+γT−sV (XT ) and ˆr(Xs  As) to predict Rs (square loss)  the hindsight distribution hβ(a|Xs  Xt) to
+a Qx(Xs  a)∇π(a |
+
+γt−s hβ(a|Xs  Xt)
+π(a|Xs)
+
+Xs). See Algorithm 1 in appendix for the detailed pseudocode.
+Return-Conditional HCA Consider a parametric representation of the policy π(·|x) and the return-
+conditioned distribution hz(a|x  z). Generate full trajectories τ = (Xs  As  Rs)s∈N+ and compute
+
+V (XT ).
+
+T−1(cid:88)
+
+5
+
+the sampled advantage at each step:
+
+where Zs = (cid:80)
+
+(cid:16)
+
+Az(Xs  As) =
+
+1 − π(As|Xs)
+hz(As|Xs  Zs)
+
+(cid:17)
+
+Zs 
+
+t≥s γt−sRt. The algorithm proceeds by training the hindsight distribution
+hz(a|Xs  Zs) to predict As (cross entropy loss)  and updating the policy gradient with ∇ log π(As |
+Xs)Az(Xs  As). See Algorithm 2 in appendix for the detailed pseudocode.
+
+RL without value functions. The return-conditional version lends itself to a particularly simple
+algorithm. In particular  we no longer need to learn the value function V – if hz(a|Xs  Zs) is
+estimated well  using complete rollouts is feasible without variance issues. This takes our idea of
+reversing the direction of the learning question to the extreme  it is now entirely in hindsight.
+
+π(As|Xs)
+
+def=
+The result is an actor-critic algorithm  where the usual baseline V (Xs) is replaced by bs
+hz(As|Xs Zs) Zs. This baseline is strongly correlated to the return Zs (it is proportional to it)  which is
+desirable since we would like to remove as much of the variance (due to the dynamics of the world  or
+the agent’s own policy) as possible. The following proposition veriﬁes that despite being correlated 
+this baseline does not introduce bias into the policy gradient.
+Proposition 1. The baseline bs = π(As|Xs)
+
+hz(As|Xs Zs) Zs does not introduce any bias in the policy gradient:
+
+(cid:104)(cid:88)
+
+γs∇ log π(As|Xs)(cid:0)Zs(τ ) − bs
+
+(cid:1)(cid:105)
+
+= ∇V (x0).
+
+Eτ∼T (x0 π)
+
+4.1 Learning Hindsight Distributions
+
+s
+
+We have given equivalent rewritings of the usual value functions in terms of the proposed hindsight
+distributions  and have motivated their properties  when they are accurate. Now  the question is if
+it is feasible to learn good estimates of those distributions from experience  and whether shifting
+the learning problem in this way is beneﬁcial. The remainder of this section discusses this question 
+while the next one provides empirical evidence for the afﬁrmative.
+There are several conventional objects that could be learned to help with credit assignment: a value
+function  a forward model  or an inverse model over states. An accurate forward model allows one
+to compute value functions directly with no variance  and an accurate inverse model – to perform
+precise credit assignment. However  learning such generative models accurately is difﬁcult and has
+been a long-standing challenge in RL  especially in high-dimensional state spaces. Interestingly  the
+hindsight distribution is a discriminative  rather than generative model  and is hence not required to
+model the full distribution over states. Additionally  the action space is usually much smaller than the
+state space  and so shifting the focus to actions potentially makes the problem much easier. When
+certain structure in the dynamics is present  learning hindsight distributions may be signiﬁcantly
+easier still – e.g. if the transition model is stochastic or the policy is changing  a particular (x  a)
+can lead to many possible future states  but a particular future state can be explained by a small
+number of past actions. In general  learning hz and hβ are supervised learning problems  so the new
+algorithms delegate some of the learning difﬁculty in RL to a supervised setting  for which many
+efﬁcient approaches exist (e.g. [7  23]).
+
+5 Experiments
+
+To empirically validate our proposal in a controlled way  we devised a set of diagnostic tasks that
+highlight issues 1-4  while also being representative of what occurs in practice (Fig. 2). We then
+systematically verify the intuitions developed throughout the paper. In all cases  we learn the hindsight
+distributions in tandem with the control policy. For each problem we compare HCA with state and
+return conditioning to standard baseline policy gradient  that is: n-step advantage actor critic (with
+n = ∞ for Monte Carlo). All the results are an average of 100 independent runs  with the plots
+depicting means and standard deviations. For simplicity we take γ = 1 in all of the tasks.
+
+Shortcut. We begin with an example capturing the intuition from Fig. 1 (left). Fig. 2 (left) depicts
+a chain of length n with a rewarding ﬁnal state. At each step  one action takes a shortcut and directly
+
+6
+
+Figure 2: Left: Shortcut. Each state has two actions  one transitions directly to the goal  the other
+to the next state of the chain. Center: Delayed effect. Start state presents a choice of two actions 
+followed by an aliased chain  with the consequence of the initial choice apparent only in the ﬁnal
+state. Right: Ambiguous bandit. Each action transitions to a particular state with high probability 
+but to the other action’s state with low probability. When the two states have noisy rewards  credit
+assignment to each action becomes challenging.
+
+Figure 3: Shortcut. Left: learning curves for n = 5 with the policy between long and short paths
+initialized uniformly. Explicitly considering the likelihood of reaching the ﬁnal state allows state-
+conditioned HCA to more quickly adjust its policy. Right: the advantage of the shortcut action
+estimated by performing 1000 rollouts from a ﬁxed policy. The x-axis depicts the policy probabilities
+of the actions on the long path. The oracle is computed analytically without sampling. When the
+shortcut action is unlikely and rarely encountered  it is difﬁcult to obtain an accurate estimate of the
+advantage. HCA is consistently able to maintain larger (and more accurate) advantages.
+
+Figure 4: Delayed effect. Left: Bootstrapping. The learning curves for n = 5  σ = 0  and a 3-step
+return  which causes the agent to bootstrap in the partially observed region. As expected  naive
+bootstrapping is unable to learn a good estimate. Middle: Using full Monte Carlo returns (for n = 3)
+overcomes partial observability  but is prone to noise. The plot depicts learning curves for the setting
+with added white noise of σ = 2. Right. The average performance w.r.t. different noise levels –
+predictably  state HCA is the most robust.
+
+Figure 5: Ambiguous bandit with Gaussian rewards of means 1  2  and standard deviation 1.5. Left:
+The state identity is observed. Both HCA methods improve on PG. Middle: The state identity is
+hidden  handicapping state HCA  but return HCA continues to improve on PG. Right: Average
+performance w.r.t. different -s with Gaussian rewards of means 1  2  and standard deviation 0.5.
+Note that the optimal value itself decays in this case.
+
+7
+
+020406080100Episodes1.41.51.61.71.81.92.0Value020406080100Episodes1.41.51.61.71.81.92.0Value0.00.10.20.30.4Epsilon1.41.51.61.71.81.92.02.1Average ValueHCA | StateHCA | ReturnPolicy GradientOptimal Valuetransitions to the ﬁnal state  while the other continues on the longer path  which may be more likely
+according to the policy. There is a per-step penalty (of −1)  and a ﬁnal reward of 1. There is also a
+chance (of 0.1) that the agent transitions to the absorbing state directly.
+This problem highlights two issues: (1) the importance of counter-factual credit assignment (issue 4);
+when the long path is taken more frequently than the shortcut path  counter-factual updates become
+increasingly effective (see Fig. 3  right) (2) the use of time as a proxy for relevance (issue 3) is shown
+to be only a heuristic  even in a fully-observable MDP. The relevance for the states along the chain is
+not accurately reﬂected in the long temporal distance between them and the goal state. In Fig. 3 we
+show that HCA is more effective at quickly adjusting the policy towards the shortcut action.
+
+Delayed Effect. The next task instantiates the example from Fig. 1 (right). Fig. 2 (middle) depicts
+a POMDP  in which after the ﬁrst decision  there is aliasing until the ﬁnal state. This is a common
+case of partial observability  and is especially pertinent if the features are being learned. We show
+that (1) Bootstrapping naively is inadequate in this case (issue 2)  but HCA is able to carry the
+appropriate information;1 and (2) While Monte Carlo is able to overcome the partial observability  its
+performance deteriorates when intermediate reward noise is present (issue 1). HCA on the other hand
+is able to reduce the variance due to the irrelevant noise in the rewards.
+Additionally  in this example the ﬁrst decision is the most relevant choice  despite being the most
+temporally remote  once again highlighting that using temporal proximity for credit assignment is
+a heuristic (issue 3). One of the ﬁnal states is rewarding (with r = 1)  the other penalizing (with
+r = −1)  and the middle states contain white noise of standard deviation σ. Fig. 4 depicts our results.
+In this task  the return-conditional HCA has a more difﬁcult learning problem  as it needs to correctly
+model the noise distribution to condition on  which is as difﬁcult as learning the values naively  and
+hence performs similarly to the baseline.
+
+Ambiguous Bandit. Finally  to emphasize that credit assignment can be challenging  even when it
+is not long-term  we consider a problem without a temporal component. Fig. 2 (right) depicts a bandit
+with two actions  leading to two different states  whose reward functions are similar (here: drawn
+from overlapping Gaussian distributions)  with some probability  of crossover. The challenge here is
+due to variance (issue 1) and a lack of counter-factual updates (issue 4). It is difﬁcult to tell whether
+an action was genuinely better  or just happened to be on the tail end of the distribution. This is a
+common scenario when bootstrapping with similar values. Due to the explicit aim at modeling the
+distributions  the hindsight algorithms are more efﬁcient (Fig. 5 (left)).
+To highlight the differences between the two types of hindsight conditioning  we introduce partial
+observability (issue 2)  see Fig. 5 (right). The return-conditional policy is still able to improve over
+policy gradient  but state-conditioning now fails to provide informative conditioning (by construction).
+
+6 Related Work
+
+Hindsight experience replay (HER) [1] introduces the idea of off-policy learning about many goals
+from the same trajectory. The intuition is that regardless of what goal the trajectory was pursuing
+originally  in hindsight it  e.g.  successfully found the one corresponding to its ﬁnal state  and there is
+something to be learned. Rauber et al. [15] extend the same intuition to policy gradient algorithms 
+with goal-conditioned policies. Goyal et al. [5] also use goal conditioning and learn a backtracking
+model  which predicts the state-action pairs occurring on trajectories that end up in goal states. These
+works share our intuition of in hindsight using the same data to learn about many things  but in the
+context of goal-conditioned policies  while we essentially contrast conditional and unconditional
+policies  where the conditioning is on the extra outcome (state or return). Note that we never act w.r.t.
+the conditional policy  and it is used solely for credit assignment.
+The temporal value transport algorithm [11] also aims to propagate credit efﬁciently backward in
+time. It uses an attention mechanism over memory to jump over parts of a trajectory that are irrelevant
+for the rewards obtained. While demonstrated on challenging problems  that method is biased; a
+promising direction for future research is to apply our unbiased hindsight mechanism with past
+states chosen by such an attention mechanism. Another line of work with a related intuition is
+RUDDER [2]. It uses an LSTM to predict future returns and sensitivity analysis to distribute those
+
+1See the discussion in Appendix F.
+
+8
+
+returns as immediate rewards in order to reduce the learning horizon and make long-term credit
+assignment easier. Instead of aiming to redistribute the return  state HCA up- or dowmnweights
+individual rewards according to their relevance to the past action.
+A large number of variance reduction techniques have been applied in RL  e.g. using learned
+value functions as critics  and other control variates [e.g. 24]. When a model of the environment is
+available  it can be used to reduce variance. Rollouts from the same state ﬁll the same role in policy
+gradients [18]. Differentiable system dynamics allow low-variance estimates of the Q-value gradient
+by using the pathwise derivative estimator  effectively backpropagating the gradient of the objective
+along trajectories [e.g. 17  9  10]. In stochastic systems this requires knowledge of the environment
+noise. To bypass this  Heess et al. [9] infer the noise given an observed trajectory. Buesing et al. [3]
+apply this idea to POMDPs  where it can be viewed as reasoning about events in hindsight. They use
+a structural causal model of the dynamics and infer the posterior over latent causes from empirical
+trajectories. Using an empirical rather than a learned distribution over latent causes can reduce bias
+and  together with the (deterministic) model of the system dynamics  allows exploring the effect of
+alternative action choices for an observed trajectory.
+Inverse models similar to the ones we use appear  for instance  in variational intrinsic control [6] (see
+also e.g. [8]). However  in our work  the inverse model serves as a way of determining the inﬂuence
+of an action on a future outcome  whereas the work in [6  8] aims to use the inverse model to derive
+an intrinsic reward for training policies in which actions inﬂuence the future observations.
+Finally  prioritized sweeping can be viewed as changing the sampling distribution with hindsight
+knowledge of the TD errors [13].
+
+7 Closing
+
+We proposed a new family of algorithms that explicitly consider the question of credit assignment
+as a part of  or instead of  estimating the traditional value function. The proposed estimators come
+with new properties  and as we validate empirically  are able to address some of the key issues in
+credit assignment. Investigating the scalability of these algorithms in the deep reinforcement learning
+setting is an exciting problem for future research.
+
+Acknowledgements
+
+The authors thank Joseph Modayil for reviews of earlier manuscripts  Theo Weber for several
+insightful suggestions  and the anonymous reviewers for their useful feedback.
+
+References
+[1] Marcin Andrychowicz  Filip Wolski  Alex Ray  Jonas Schneider  Rachel Fong  Peter Welinder 
+Bob McGrew  Josh Tobin  Pieter Abbeel  and Wojciech Zaremba. Hindsight experience replay.
+In Advances in Neural Information Processing Systems  pages 5048–5058  2017.
+
+[2] Jose A. Arjona-Medina  Michael Gillhofer  Michael Widrich  Thomas Unterthiner  Johannes
+Brandstetter  and Sepp Hochreiter. Rudder: Return decomposition for delayed rewards. In
+H. Wallach  H. Larochelle  A. Beygelzimer  F. Alché-Buc  E. Fox  and R. Garnett  editors 
+Advances in Neural Information Processing Systems 32  pages 13544–13555  2019.
+
+[3] Lars Buesing  Theophane Weber  Yori Zwols  Sébastien Racanière  Arthur Guez  Jean-Baptiste
+Lespiau  and Nicolas Heess. Woulda  coulda  shoulda: Counterfactually-guided policy search.
+CoRR  abs/1811.06272  2018.
+
+[4] Igor Vladimirovich Girsanov. On transforming a certain class of stochastic processes by
+absolutely continuous substitution of measures. Theory of Probability & Its Applications 
+5(3):285–301  1960.
+
+[5] Anirudh Goyal  Philemon Brakel  William Fedus  Soumye Singhal  Timothy Lillicrap  Sergey
+Levine  Hugo Larochelle  and Yoshua Bengio. Recall traces: Backtracking models for efﬁcient
+reinforcement learning. In International Conference on Learning Representations(ICLR)  2019.
+
+9
+
+[6] Karol Gregor  Danilo Jimenez Rezende  and Daan Wierstra. Variational intrinsic control. arXiv
+
+preprint arXiv:1611.07507  2016.
+
+[7] Michael Gutmann and Aapo Hyvärinen. Noise-contrastive estimation: A new estimation
+principle for unnormalized statistical models. In Proceedings of the Thirteenth International
+Conference on Artiﬁcial Intelligence and Statistics  pages 297–304  2010.
+
+[8] Karol Hausman  Jost Tobias Springenberg  Ziyu Wang  Nicolas Heess  and Martin Riedmiller.
+Learning an embedding space for transferable robot skills. In International Conference on
+Learning Representations (ICLR)  2018.
+
+[9] Nicolas Heess  Gregory Wayne  David Silver  Timothy Lillicrap  Tom Erez  and Yuval Tassa.
+Learning continuous control policies by stochastic value gradients. In C. Cortes  N. D. Lawrence 
+D. D. Lee  M. Sugiyama  and R. Garnett  editors  Advances in Neural Information Processing
+Systems 28  pages 2944–2952. Curran Associates  Inc.  2015.
+
+[10] Mikael Henaff  William F Whitney  and Yann LeCun. Model-based planning with discrete and
+
+continuous actions. arXiv preprint arXiv:1705.07177  2017.
+
+[11] Chia-Chun Hung  Timothy Lillicrap  Josh Abramson  Yan Wu  Mehdi Mirza  Federico
+Carnevale  Arun Ahuja  and Greg Wayne. Optimizing agent behavior over long time scales by
+transporting value. arXiv preprint arXiv:1810.06721  2018.
+
+[12] Volodymyr Mnih  Adria Puigdomenech Badia  Mehdi Mirza  Alex Graves  Timothy Lillicrap 
+Tim Harley  David Silver  and Koray Kavukcuoglu. Asynchronous methods for deep reinforce-
+ment learning. In Maria Florina Balcan and Kilian Q. Weinberger  editors  Proceedings of The
+33rd International Conference on Machine Learning  volume 48 of Proceedings of Machine
+Learning Research  pages 1928–1937  New York  New York  USA  20–22 Jun 2016. PMLR.
+
+[13] Andrew W Moore and Christopher G Atkeson. Prioritized sweeping: Reinforcement learning
+
+with less data and less time. Machine learning  13(1):103–130  1993.
+
+[14] Martin Puterman. Markov decision processes: discrete stochastic dynamic programming. John
+
+Wiley & Sons  1994.
+
+[15] Paulo Rauber  Avinash Ummadisingu  Filipe Mutz  and Jürgen Schmidhuber. Hindsight policy
+
+gradients. In International Conference on Learning Representations (ICLR)  2019.
+
+[16] Gerardo Rubino  Bruno Tufﬁn  et al. Rare event simulation using Monte Carlo methods 
+
+volume 73. Wiley Online Library  2009.
+
+[17] John Schulman  Nicolas Heess  Theophane Weber  and Pieter Abbeel. Gradient estimation
+
+using stochastic computation graphs. CoRR  abs/1506.05254  2015.
+
+[18] John Schulman  Sergey Levine  Pieter Abbeel  Michael Jordan  and Philipp Moritz. Trust region
+policy optimization. In International Conference on Machine Learning  pages 1889–1897 
+2015.
+
+[19] Satinder Singh  Tommi Jaakkola  and Michael I. Jordan. Learning without state estimation in
+partially observable environments. In International Conference on Machine Learning (ICML) 
+1994.
+
+[20] Richard S Sutton. Learning to predict by the methods of temporal differences. Machine learning 
+
+3(1):9–44  1988.
+
+[21] Richard S Sutton and Andrew G Barto. Reinforcement Learning: An Introduction. MIT Press 
+
+Cambridge  MA  USA  2nd edition  2018.
+
+[22] Richard S Sutton  David A McAllester  Satinder P Singh  and Yishay Mansour. Policy gradient
+In Advances in neural
+
+methods for reinforcement learning with function approximation.
+information processing systems  pages 1057–1063  2000.
+
+[23] Aaron van den Oord  Yazhe Li  and Oriol Vinyals. Representation learning with contrastive
+
+predictive coding. arXiv preprint arXiv:1807.03748  2018.
+
+10
+
+,Anna Harutyunyan
+Will Dabney
+Thomas Mesnard
+Mohammad Gheshlaghi Azar
+Bilal Piot
+Nicolas Heess
+Hado van Hasselt
+Gregory Wayne
+Satinder Singh
+Doina Precup
+Remi Munos
