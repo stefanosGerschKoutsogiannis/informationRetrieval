@@ -15,8 +15,8 @@ This is a **desktop search engine** built with **Lucene 9**, designed to help yo
 
 1. Clone the repository:
 ```sh
-   git clone https://github.com/your-repo-url
-   cd your-repo
+git clone https://github.com/your-repo-url
+cd your-repo
 ```
 
 2. Build with Maven:
