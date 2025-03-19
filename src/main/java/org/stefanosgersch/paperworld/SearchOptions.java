@@ -1,9 +1,5 @@
 package org.stefanosgersch.paperworld;
 
-/**
- * This class is responsible for the setting of search options
- * Does not work
- */
 public class SearchOptions {
 
     private String sort;

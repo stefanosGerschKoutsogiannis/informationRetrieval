@@ -9,24 +9,20 @@ import javafx.scene.text.Text;
 import javafx.stage.Stage;
 import javafx.stage.StageStyle;
 
-
-/**
- * This class is responsible for the viewing of a paper when opened via a hyperlink
- */
 public class PaperViewer {
 
     public PaperViewer(Results results) {
 
-        Text title = new Text(results.getTitle());
+        Text title = new Text(results.title());
         title.setUnderline(true);
         title.setWrappingWidth(765);
         title.setFont(new Font(22));
 
-        Text authors = new Text("Authors: " + results.getAuthors());
+        Text authors = new Text("Authors: " + results.authors());
         authors.setFont(new Font(18));
         authors.setUnderline(true);
 
-        Text year = new Text("Year of publication:  " + results.getYear());
+        Text year = new Text("Year of publication:  " + results.year());
         year.setFont(new Font(18));
         year.setUnderline(true);
 
@@ -34,14 +30,14 @@ public class PaperViewer {
         abstractHeader.setFont(new Font(20));
         abstractHeader.setUnderline(true);
 
-        Text abstractText = new Text(results.getAbstractText());
+        Text abstractText = new Text(results.abstractText());
         abstractText.setFont(new Font(15));
 
         Text fullTextHeader = new Text("Original paper");
         fullTextHeader.setFont(new Font(20));
         fullTextHeader.setUnderline(true);
 
-        Text fullText = new Text(results.getFullText());
+        Text fullText = new Text(results.fullText());
         fullText.setFont(new Font(15));
 
         VBox paperVBox = new VBox();
@@ -65,9 +61,9 @@ public class PaperViewer {
 
         Stage stage = new Stage(StageStyle.UTILITY);
         stage.setScene(new Scene(scrollPane, 800, 600));
-        stage.setTitle(results.getTitle());
+        stage.setTitle(results.title());
 
-        System.out.println(results.getFullText());
+        System.out.println(results.fullText());
 
         stage.show();
     }

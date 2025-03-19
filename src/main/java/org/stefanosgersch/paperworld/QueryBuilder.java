@@ -5,15 +5,13 @@ import org.apache.lucene.queryparser.classic.ParseException;
 import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.Query;
 
-/*
- * This class is responsible for creating the right queries as specified in the report
- */
+// stupid implementation
 public class QueryBuilder {
 
     public static Query buildQuery(String query) throws ParseException {
 
         // query parser can build all types of queries
-        // queries with prefix: year, title, name(author), abstract,
+        //  with prefix: year, title, name(author), abstract,
         if (query.startsWith("year:")) {
             String actualQuery = query.substring(5);
             QueryParser qp = new QueryParser(ApplicationConstants.YEAR, new StandardAnalyzer());
@@ -29,7 +27,7 @@ public class QueryBuilder {
         } else if (query.startsWith("name:")) {
             String actualQuery = query.substring(5);
             QueryParser qp = new QueryParser(ApplicationConstants.AUTHORS, new StandardAnalyzer());
-            Query ret = qp.parse(query);
+            Query ret = qp.parse(actualQuery);
             System.out.println(ret);
             return ret;
         } else if (query.startsWith("abstract:")) {

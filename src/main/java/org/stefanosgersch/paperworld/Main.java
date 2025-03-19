@@ -11,27 +11,21 @@ import java.io.IOException;
 import java.net.URL;
 
 
-/**
- * Through this class the application is started
- */
+
 public class Main extends Application {
 
     private static Main mainInstance;
     private static Searcher searcher;
-    //private static Indexer indexer;
+    private static Indexer indexer;
 
-    // should uncomment
     public Main() throws IOException {
-        //indexer = new Indexer(getClass().getResource(ApplicationConstants.INDEX_PATH), ApplicationConstants.CORPUS_PATH);
-        //indexer = new Indexer(ApplicationConstants.INDEX_PATH, ApplicationConstants.CORPUS_PATH);
-        //indexer.index();
+        indexer = new Indexer(ApplicationConstants.INDEX_PATH, ApplicationConstants.CORPUS_PATH);
+        indexer.index();
         searcher = new Searcher(ApplicationConstants.INDEX_PATH);
     }
 
     @Override
     public void start(Stage stage) throws IOException {
-
-        // need to create landing-page.fxml
         URL resource = getClass().getResource("LandingPage.fxml");
         FXMLLoader loader =  new FXMLLoader(resource);
         Parent root = loader.load();
@@ -41,13 +35,10 @@ public class Main extends Application {
     }
 
     public static void main(String[] args) throws IOException {
-
         getMainInstance();
-
         launch(args);
     }
 
-    // singleton, creation of Main instance
     public static Main getMainInstance() throws IOException {
         if (mainInstance == null) {
             mainInstance = new Main();
@@ -58,11 +49,5 @@ public class Main extends Application {
     public Searcher getSearcher() {
         return searcher;
     }
-
-    /*
-    public Indexer getIndexer() {
-        return indexer;
-    }
-*/
 
 }

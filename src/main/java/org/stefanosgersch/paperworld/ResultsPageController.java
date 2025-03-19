@@ -9,7 +9,6 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.Hyperlink;
 import javafx.scene.control.TextField;
 import javafx.scene.layout.VBox;
-import javafx.scene.paint.Paint;
 import javafx.scene.text.Font;
 import javafx.scene.text.Text;
 import org.apache.lucene.queryparser.classic.ParseException;
@@ -201,13 +200,13 @@ public class ResultsPageController {
         for (int i = pageId * window; i < pageId * 5 + window; i++) {
 
             // hyperlink in the title
-            Text text = new Text(queryResults.get(i).getTitle());
+            Text text = new Text(queryResults.get(i).title());
             text.setFont(new Font(18));
             resultsVBox.getChildren().add(text);
 
 
             // create hyperlink
-            Hyperlink hyperlink = new Hyperlink(queryResults.get(i).getTitle());
+            Hyperlink hyperlink = new Hyperlink(queryResults.get(i).title());
             hyperlink.setWrapText(true);
             hyperlink.setFont(new Font(14));
 
@@ -232,7 +231,7 @@ public class ResultsPageController {
         hyperlink.setOnAction(actionEvent -> {
             String titleText = hyperlink.getText();
             for (Results result: queryResults) {
-                if (result.getTitle().equals(titleText)) {
+                if (result.title().equals(titleText)) {
                     new PaperViewer(result);
                     break;
                 }
