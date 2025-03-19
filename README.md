@@ -28,3 +28,7 @@ mvn clean install
 ```sh
 java -jar target/your-app.jar
 ```
+
+## User Note
+
+See QueryBuilder to make appropriate queries💀
