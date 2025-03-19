@@ -1,11 +1,30 @@
-# paperWorld
+# NeurIPS Paper Finder - The Anti-UX Search Engine  
 
-# paperWorld, a machine learning and computational neuroscience research paper search engine
+## Overview  
 
-Το paperWorld, είναι μια μηχανή αναζήτησης, βασισμένη στην βιβλιοθήκη ανοιχτού κώδικα Apache Lucene, η οποία βοηθά τους χρήστες να βρουν επιστημονικά άρθρα με την χρήση διάφορων τύπων ερωτήσεων που μπορούν να διατυπώσουν.
+This is a **desktop search engine** built with **Lucene 9**, designed to help you find **NeurIPS papers**. It’s written in **Java**, built with **Maven**. Sounds good in theory. In practice it's shit.  
 
-## Run it yourself
+## Features  
 
-Η εφαρμογή δημιουργήθηκε με χρήση Apache Maven και το Intellij IDE.
+- **Lucene 9-powered search** – Works when it feels like it.  
+- **Java & Maven** – Because making things simple wasn’t an option.  
+- **Desktop UI** – As if web applications never existed.  
+- **Minimalist design** – Not by choice.  
 
-Στο αρχείο ApplicationConstants, αλλάξτε τις τιμές των INDEX_PATH και CORPUS_PATH, εκτελέστε στο τερματικό του IDE σας mvn clean compile, μετά εκτελέστε το Indexer.java για να δημιουργήσετε το ευρετήριο και τέλος, τρέξτε το Main.java για να εκτελέσεται το παραθυρικό περιβάλλον.
+## Installation & Usage  
+
+1. Clone the repository:
+```sh
+   git clone https://github.com/your-repo-url
+   cd your-repo
+```
+
+2. Build with Maven:
+```sh
+mvn clean install
+```
+
+3. Run the Application
+```sh
+java -jar target/your-app.jar
+```
