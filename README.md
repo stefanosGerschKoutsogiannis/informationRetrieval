@@ -2,7 +2,7 @@
 
 ## Overview  
 
-This is a **desktop search engine** built with **Lucene 9**, designed to help you find **NeurIPS papers**. It’s written in **Java**, built with **Maven**. Sounds good in theory. In practice it's shit.  
+This is a **desktop search engine** built with **Lucene 9**, designed to help you find **NeurIPS papers**. It’s written in **Java**, built with **Maven**. Sounds good in theory. In practice, it's shit.  
 
 ## Features  
 
